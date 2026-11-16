@@ -53,6 +53,7 @@ from tts_backends import TtsBackend, TtsUnavailable
 from video_watch import VideoWatcher
 from bubble_bridge import BubbleBridge
 from voice_mode import VoiceMode, LOOK_HINTS
+from player_watch import PlayerWatch
 import phrases as fixed_phrases
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -133,6 +134,16 @@ DEFAULTS = {
         "enter_seconds": 120,
         "away_grace_seconds": 180,
         "game_apps": [],
+    },
+    # B站视频模式：Edge 调试端口读播放进度 + bili CLI 拿字幕（方案 B）
+    "player_watch": {
+        "enabled": True,
+        "cdp_port": 9222,
+        "poll_seconds": 1.0,
+        "fresh_seconds": 8,
+        "subtitle_window_seconds": 90,
+        "subtitle_cache_hours": 24,
+        "bili_cli": "bili",
     },
     # 看到不认识的游戏/番剧，自己问一下写进 titles.json（作品小抄）
     "title_learner": {
@@ -2870,6 +2881,9 @@ class Gateway:
         # 前台是游戏、稳着待够 2 分钟：自动进游戏模式（不看键鼠活跃度）
         self.game_watch = GameWatcher(cfg, self)
         self.game_watch.start()
+        # B站视频模式：从 Edge 调试端口读播放进度（方案 B），按时间轴切字幕
+        self.player = PlayerWatch(cfg, self)
+        self.player.start()
         # 头顶原生气泡（独立 Qt 小工，按需拉起）
         self.bubble = BubbleBridge(cfg)
         self.bubble.start()
@@ -3355,12 +3369,26 @@ class Gateway:
                     ages = []
                 log.info("识屏附上 %d 帧拼图（分别是 %s 秒前）", attached, ages)
 
+        # B站视频模式（方案 B）：有调试端口就读「现在放到哪」，按时间轴切出前 N 秒字幕。
+        # 这条比转写/OCR 都准，所以有它就不再叠转写，省 token。
+        player_block = ""
+        if scenario == "vision" and getattr(self, "player", None) is not None:
+            try:
+                player_block = self.player.context_block()
+            except Exception as exc:  # noqa: BLE001
+                log.info("播放器状态读不出来（不影响识屏）：%s", exc)
+            if player_block:
+                messages.insert(0, {"role": "system", "content": player_block})
+                log.info("播放器：带上进度和字幕（%s）", self.player.status().get("position") or "?")
+
         if scenario == "vision" and getattr(self, "video", None) is not None:
             # 通用视频模式：把刚才的对白/字幕条喂进去，她才知道片子在讲什么。
-            block = self.video.context_block()
-            if block:
-                messages.insert(0, {"role": "system", "content": block})
-                log.info("视频模式：带上 %d 条对白/字幕", self.video.transcript_count())
+            # 已经有了「按时间轴的字幕」就不再叠一份转写（重复且费 token）。
+            if not player_block or "B站字幕" not in player_block:
+                block = self.video.context_block()
+                if block:
+                    messages.insert(0, {"role": "system", "content": block})
+                    log.info("视频模式：带上 %d 条对白/字幕", self.video.transcript_count())
             hint = self.video.take_first_hint()
             if hint:
                 messages.insert(0, {"role": "system", "content": hint})
@@ -3662,6 +3690,7 @@ class Handler(BaseHTTPRequestHandler):
             "synth_ms": round(float(getattr(g.speech, "synth_ewma", 0.0)) * 1000),
             "api_key": bool(g.api_key),
             "video": getattr(g, "video", None).status() if getattr(g, "video", None) else None,
+            "player": getattr(g, "player", None).status() if getattr(g, "player", None) else None,
             "bubble": getattr(g, "bubble", None).status() if getattr(g, "bubble", None) else None,
             "voice": getattr(g, "voice", None).status() if getattr(g, "voice", None) else None,
         })

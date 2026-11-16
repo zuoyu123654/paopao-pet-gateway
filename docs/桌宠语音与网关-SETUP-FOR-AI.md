@@ -946,7 +946,7 @@ A: 唔，这游戏说简单也简单，就是抽角色、组一队人，然后�
 OCR/转写每读到的永远是「此刻那一行」，历史行排队留着，识屏时整段给模型。**没有时间轴**，
 所以切不出「前 90 秒」，只能按条数近似。
 
-**要做成设计稿那样，缺三样**：
+**要做成设计稿那样，缺三样**（2026-11-17 已按方案 B 实现，见 4.2p）：
 
 1. **视频标识**（bvid/cid）：浏览器 URL 里有；
 2. **播放进度**（currentTime）；
@@ -964,6 +964,72 @@ OCR/转写每读到的永远是「此刻那一行」，历史行排队留着，�
 
 拿到了之后：字幕按 bvid 缓存本地 → 每轮识屏取「currentTime-90s ~ currentTime」的台词给她，
 退化链照旧（没字幕 → 转写 → OCR → 帧拼图）。
+
+### 4.2p 方案 B 落地：B站视频模式按「播放进度」切字幕（2026-11-17 实现）
+
+4.2o 记的是「设计稿有、代码没有」。**这一节是把它做出来了**，走老大选的方案 B（Edge 调试端口）。
+
+**现在识屏时「视频上下文」的优先级**（新的退化链）：
+
+| 顺序 | 来源 | 精度 | 需要什么 |
+|---|---|---|---|
+| 1 | **CDP 读浏览器**：`location.href`、`document.title`、`video.currentTime/duration/paused` | 秒级、实时 | Edge/Chrome 带 `--remote-debugging-port=9222` |
+| 2 | **B站历史进度兜底**：`x/web-interface/history/cursor` 里的 `progress` | 晚十几秒 | `bili-cli/credential.json`（已登录，现成的） |
+| 3 | 环回转写 | 每 8 秒一段 | 系统声音能被环回录到 |
+| 4 | 字幕条 OCR | 每 2 秒一行 | 只在转写连续 60 秒没词时才开 |
+
+拿到 bvid 之后统一走字幕：`bili video subtitle <bvid> --page N` 返回 `{from,to,content}`（含 AI 字幕，需要登录，
+`bili` CLI 已经是登录态）。缓存到 `audio/subtitles/<bvid>_p<N>.json`，默认 24 小时，同一集反复看不重复拉。
+
+**注入长什么样**（识屏时插进 system，优先级最高那一条）：
+
+```
+【老大此刻在看的】『原神』7.3前瞻…｜进度 19:03 / 24:00（暂停着）
+【B站字幕（按时间轴，最近 90 秒，旧→新）】这些是给你看懂剧情的原文，
+19:00 …（这一段的台词逐行带时间戳）
+用它判断剧情走到哪了；**不要念字幕原文**，用自己的话讲你看到了什么、怎么想。
+```
+
+历史兜底时会多一句「（进度取自 B站历史，可能晚十几秒）」，并且窗口自动放宽到 180 秒补滞后。
+**有字幕就不再叠环回转写**（省 token、也不会重复）。
+
+**Edge 那边怎么开调试端口（重要）**：Edge 157 / Chromium 136+ **不允许在默认用户目录上开
+`--remote-debugging-port`**，参数会被直接忽略。所以仓库里带了 `start-edge-debug.ps1`：
+
+```powershell
+# 双击，或者做成桌面快捷方式
+D:\app1\paopao_pet_gateway\start-edge-debug.ps1
+# 它等价于：
+msedge.exe --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\paopao-edge-watch
+```
+
+用这个窗口看 B站就行（**不用登录**：播放不需要登录，字幕是 CLI 那边拿的；只是 1080p 可能要登录）。
+平时用原来的 Edge 也没关系——没开端口时自动退到「B站历史进度」，就是晚十几秒、而且只有 B站有效。
+
+**配置**（`config.json` → `player_watch`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | true | 总开关 |
+| `cdp_port` | 9222 | 调试端口 |
+| `poll_seconds` | 1.0 | 读一次的间隔 |
+| `fresh_seconds` | 8 | 多久没更新就算过期（过期就不用这层） |
+| `subtitle_window_seconds` | 90 | 往前切多少秒字幕（历史兜底时自动 ×2） |
+| `subtitle_cache_hours` | 24 | 字幕缓存多久 |
+| `history_fallback` | true | CDP 没数据时用 B站历史进度顶上 |
+| `history_refresh_seconds` | 15 | 历史接口多久问一次（别太勤，B站有风控） |
+| `history_max_age_minutes` | 10 | 历史记录超过这么久就不算「正在看」 |
+| `bili_cli` | bili | CLI 路径 |
+
+自查：`/status` → `player`：`{connected, url, title, position, duration, paused, bvid, error}`；
+日志：`播放器：带上进度和字幕（19:03）`、`字幕：BV… p1 拿到 44 行`。
+
+**已知限制（别当 bug 报）**：
+
+- **B站番剧**（`/bangumi/play/ep…`）暂时不支持——URL 里只有 ep 号没有 bvid，得再查一次 ep→bvid；先用通用视频的转写顶着；
+- 非 B站站点（YouTube）：CDP 能拿到进度，但字幕没有对应来源 → 退回环回转写；
+- 历史兜底的 `progress` 只在网页播放器定期上报时更新，**拖进度条/刚打开时可能还是旧的**；
+- 同一个 Edge 窗口里开多个视频标签时，只认「URL 像视频页」的第一个，切标签可能认错——真遇到再说。
 
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
