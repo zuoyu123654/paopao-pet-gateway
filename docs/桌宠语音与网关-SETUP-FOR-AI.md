@@ -58,11 +58,32 @@ AI 负责找到用户机器上的路径。顺序：
 **人设不用抄我们的**：让 AI 读用户已有的人设（桌宠 `chat.default_system_prompt`、AstrBot 人格、
 插件角色设定），把称呼/自称/禁区/说话风格对齐就行。网关只负责把话念出来，不掺人设。
 
-### 1.2 两个资源包（都在 dsh3 目录里）
+### 1.2 两个资源包（网关已做成仓库，2026-11-17）
+
+**网关本体在 GitHub 上，以后更新走 git，别再靠拷文件夹：**
+
+```
+https://github.com/zuoyu123654/paopao-pet-gateway
+```
+
+```powershell
+git clone https://github.com/zuoyu123654/paopao-pet-gateway.git
+cd paopao-pet-gateway
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+# 以后更新：
+powershell -ExecutionPolicy Bypass -File .\update.ps1   # git pull + 补依赖，不碰 config/logs/audio
+```
+
+仓库里带：全部代码、`bubble/`（附上游 MIT 声明）、`assets/`、`config.example.json`、
+`install.ps1` / `start.ps1` / `ensure_running.ps1` / `update.ps1`、`README-FOR-AI.md`、`docs/`。
+`.gitignore` 已经把 `config.json`、`logs/`、`audio/`、`ledger.jsonl` 挡在外面——**更新不会覆盖用户数据**。
+
+dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给不方便用 git 的人），内容一致，
+但以仓库为准。
 
 | 包 | 内容 | 怎么用 |
 |---|---|---|
-| `泡泡陪伴-网关包\` | `gateway.py` + 各模块 + `bubble/` + `assets/` + `config.example.json` + `install.ps1` / `start.ps1` / `ensure_running.ps1` + `README-FOR-AI.md` | 整个文件夹发给 AI，照 README 装：建 venv、装依赖、填配置、改桌宠 base_url |
+| 网关仓库（上面那个） | 代码 + 脚本 + 手册 + docs | `git clone` → `install.ps1` → 改 `config.json` → `start.ps1` |
 | `泡泡音色包-dafeiyu\` | GPT 权重（148 MB）+ SoVITS 权重（129 MB）+ 参考音频 + `tts_infer_dafeiyu.yaml` + README | 丢进用户的 GPT-SoVITS，改 yaml 里的路径，带 `-c` 启动 |
 
 网关包里**不包含**：TTS 模型、ASR 模型、`ledger` 历史、`config.json`（只给模板）、凭据。
