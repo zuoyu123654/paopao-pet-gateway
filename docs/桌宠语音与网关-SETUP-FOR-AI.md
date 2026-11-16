@@ -1039,7 +1039,8 @@ Invoke-WebRequest http://127.0.0.1:9888/health -UseBasicParsing
 
 **不限制（*）的取舍**：好处是换什么程序她都在看；代价是隐私面变大——
 任何前台窗口都可能被截图并发给 DeepSeek API（密码管理器、银行、私聊、敏感文档都算），
-而且她每 2 分钟就能开口一次（当前 cooldown 2 分钟、日上限 60），会比较吵、也更费 token。
+而且她每 2 分钟就能开口一次（当前 cooldown 2 分钟、**日上限 9999 = 不限量**），
+会比较吵、也更费 token。
 白名单**只支持正向 fnmatch，没有否定规则**，所以做不到「全开但排除某几类」；
 真要排除只能改成显式列举。
 
@@ -1049,12 +1050,17 @@ Invoke-WebRequest http://127.0.0.1:9888/health -UseBasicParsing
 |---|---|---|
 | enabled | true | |
 | whitelist | * | 2026-11-15 起不限制：任何前台窗口都可观察。见下方取舍 |
-| dwell_seconds | 10 | 同一窗口停留多久才开始观察（原 20） |
-| cooldown_minutes | 1.5 | 两次之间的冷却（原 3） |
-| min_request_interval_seconds | 25 | 请求最小间隔 |
+| dwell_seconds | 15 | 同一窗口停留多久才开始观察（原 20） |
+| cooldown_minutes | 2.0 | 两次之间的冷却（原 3） |
+| min_request_interval_seconds | 60 | 请求最小间隔 |
 | change_threshold | 5 | 画面变化（dHash）阈值，越小越敏感（原 8） |
-| daily_cap | 60 | 每天上限（原 25） |
+| **daily_cap** | **9999** | **每天上限 = 不限量（2026-11-17 改；原来是 60）**。看片/打游戏一坐一两小时，60 次不够用；9999 之后不会再因为「今天看够了」突然不吭声 |
 | pre_cue | true | 先冒一句「让我看看」再回答 |
+
+> **改法（UI 上限不够时）**：直接改文件 `%APPDATA%\dsh-pet-standalone-webm-chat\config.json`
+> 里的 `proactive_screen.daily_cap`，写成 **9999** 就等于不限制。写完存盘立刻生效（桌宠有
+> QFileSystemWatcher 热重载，不用重启）；网关自己写这个文件时会保留其它键，不会把它改回去。
+> 排查是不是被上限卡住：日志里出现「已达到每日上限」之类就不再看屏了，看一眼这个值就行。
 
 实测 02:01 在 Edge 上主动识屏成功（她说「老大，你刷这个视频刷得挺入迷啊…」），
 有语音（precue + 正片），也投进了记忆信箱。
