@@ -1,0 +1,17 @@
+# 泡泡陪伴网关 · 运行依赖
+# 核心（必须）
+numpy
+Pillow
+sounddevice
+soundcard
+
+# 可选：头顶气泡小工（不装就只是没有气泡，语音照常）
+PySide6-Essentials
+
+# 可选：QQ/桌宠用非 GPT-SoVITS 后端时才需要
+# comtypes      # Windows 本地语音（SAPI）
+# edge-tts      # 微软 edge 语音
+# keyring       # 从 Windows 凭据读 Key（也可以直接把 key 写进 config.json）
+
+# 可选：看视频/番剧的 OCR（建议单独 venv，见 README）
+# rapidocr_onnxruntime

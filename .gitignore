@@ -1,0 +1,17 @@
+# 运行产物
+config.json
+logs/
+audio/
+ledger.jsonl
+digest.json
+mode.json
+bubble_offset.json
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/

@@ -1,0 +1,529 @@
+# -*- coding: utf-8 -*-
+"""气泡小工：把桌宠那套原生气泡搬到一个独立进程里跑。
+
+为什么单独一个进程：气泡要 Qt 事件循环，而语音网关是纯 http 线程池——
+把 Qt 塞进网关，Qt 一崩语音就哑了。小工崩了最多没气泡。
+
+协议（stdin 一行一个 JSON，stdout 回一行 ack）：
+    {"cmd": "show", "text": "要说的话", "duration_ms": 3200}
+    {"cmd": "show", "text": "...", "anchor": [x, y, w, h]}
+    {"cmd": "hide"}
+    {"cmd": "quit"}
+
+**每次弹之前读一次桌宠的 config.json**：样式（self_talk_bubble_style）、
+字号（bubble_text_scale）、停留时长（self_talk_duration_seconds）。用户在桌宠
+设置里改完，下一句就是新样子；读坏了沿用上一次，不退回默认。
+
+位置：默认读 `%APPDATA%\\dsh-pet-standalone-webm-chat\\pet-runtime-v2-*-slot-*.json`
+里最新的窗口矩形，每 30ms 跟一次（mtime 缓存，文件没变不重新解析），四档大小自动跟。
+
+托盘菜单也住在这里（模式切换）：自动 / B站视频 / B站看番 / 通用视频 +
+语音关 / 按键说话 / 语音电话。点一下改网关模式，然后冒一句默认 3.2 秒的反馈。
+
+单独试：python bubble_host.py --demo "测试一下气泡"
+"""
+from __future__ import annotations
+
+import json
+import os
+import queue
+import sys
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QRect, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bubble.speech_bubble import PetSpeechBubble  # noqa: E402
+from phrases import TRAY_FEEDBACK  # noqa: E402
+
+GATEWAY_BASE = os.environ.get("PAOPAO_GATEWAY", "http://127.0.0.1:9888")
+
+PET_HOME = Path(os.environ.get("APPDATA", "")) / "dsh-pet-standalone-webm-chat"
+PET_CONFIG = PET_HOME / "config.json"
+ACK = {"ok": True}
+DEFAULT_STYLE = "classic_top"
+DEFAULT_DURATION_S = 3.2
+# 位置缓存：30ms 一跟，靠 mtime 判断要不要重新解析，别每次都读 JSON
+_RECT_CACHE: dict = {"path": "", "mtime": 0, "rect": None}
+_SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
+
+# ---------------------------------------------------------------- 托盘菜单
+# 观看：单选；语音：单选。键是模式名，值是菜单上那行字。
+WATCH_ITEMS = (
+    ("off", "关闭"),
+    ("auto", "自动模式"),
+    ("video", "B站视频"),
+    ("anime", "B站看番"),
+    ("generic", "通用视频"),
+)
+VOICE_ITEMS = (
+    ("off", "语音关"),
+    ("ptt", "按键说话"),
+    ("call", "语音电话"),
+)
+# 反馈文案在 phrases.py 里统一管理（网关预合成时用的是同一份）
+FEEDBACK = TRAY_FEEDBACK
+
+
+def make_tray_icon() -> QIcon:
+    """用我们那只头像当托盘图标（跟插件 logo 同一张）。"""
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "paopao.png")
+    if os.path.exists(icon_path):
+        pix = QPixmap(icon_path)
+        if not pix.isNull():
+            return QIcon(pix.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    # 兜底：画一个小蓝圆，不依赖外部图片
+    pix = QPixmap(64, 64)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#4aa3ff"))
+        painter.drawEllipse(4, 4, 56, 56)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(24, 22, 9, 9)
+        painter.drawEllipse(40, 22, 9, 9)
+        painter.setBrush(QColor("#b8e2ff"))
+        painter.drawEllipse(22, 40, 20, 8)
+    finally:
+        painter.end()
+    return QIcon(pix)
+
+
+class TrayMenu(QObject):
+    """托盘里的模式切换。改动一律走网关 HTTP，勾选状态每秒从 /status 拉一次。"""
+
+    def __init__(self, bubble, on_feedback):
+        super().__init__()
+        self.bubble = bubble
+        self.on_feedback = on_feedback          # 回调：传一句话，弹默认 3.2 秒的气泡
+        self.nam = QNetworkAccessManager(self)
+        self.syncing = False
+
+        self.menu = QMenu()
+        self.status_act = self.menu.addAction("当前：自动 · 按键说话")
+        self.status_act.setEnabled(False)
+        self.menu.addSeparator()
+
+        self.watch_group = QActionGroup(self)
+        self.watch_group.setExclusive(True)
+        self.watch_actions: dict[str, QAction] = {}
+        for key, label in WATCH_ITEMS:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setData(("watch", key))
+            self.watch_group.addAction(act)
+            self.menu.addAction(act)
+            act.triggered.connect(self._on_pick)
+            self.watch_actions[key] = act
+
+        self.menu.addSeparator()
+        self.voice_group = QActionGroup(self)
+        self.voice_group.setExclusive(True)
+        self.voice_actions: dict[str, QAction] = {}
+        for key, label in VOICE_ITEMS:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setData(("voice", key))
+            self.voice_group.addAction(act)
+            self.menu.addAction(act)
+            act.triggered.connect(self._on_pick)
+            self.voice_actions[key] = act
+
+        self.tray = QSystemTrayIcon(make_tray_icon(), self)
+        self.tray.setToolTip("泡泡 · 模式")
+        self.tray.setContextMenu(self.menu)
+        self.tray.activated.connect(self._on_activated)
+        self.tray.show()
+
+        self.watch_actions["auto"].setChecked(True)
+        self.voice_actions["ptt"].setChecked(True)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.sync)
+        self.timer.start(1000)
+        QTimer.singleShot(300, self.sync)
+        log("托盘就绪（系统托盘 %s）" % ("可用" if QSystemTrayIcon.isSystemTrayAvailable() else "不可用"))
+
+    # ------------------------------------------------------------ 点击
+    def _on_pick(self, _checked=False) -> None:
+        act = self.sender()
+        if not isinstance(act, QAction):
+            return
+        kind, key = act.data()
+        if kind == "watch":
+            payload = {"mode": "auto" if key == "auto" else key}
+            if key == "generic":
+                payload = {"mode": "video", "source": "tray-generic"}
+            elif key == "off":
+                payload = {"mode": "off", "source": "tray"}
+            else:
+                payload["source"] = "tray"
+            self._post("/mode", payload)
+        else:
+            self._post("/voice", {"action": "set_mode", "mode": key})
+        self._feedback("watch_off" if (kind == "watch" and key == "off")
+                       else ("voice_off" if (kind == "voice" and key == "off") else key))
+
+    def _on_activated(self, reason) -> None:
+        """左键单击：直接开关语音电话。"""
+        if reason != QSystemTrayIcon.Trigger:
+            return
+        current = self.voice_actions
+        turn_on = not (current["call"].isChecked())
+        self._post("/voice", {"action": "set_mode", "mode": "call" if turn_on else "ptt"})
+        self._feedback("call" if turn_on else "ptt")
+
+    def _feedback(self, key: str) -> None:
+        text = FEEDBACK.get(key)
+        if text:
+            try:
+                self.on_feedback(text)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ------------------------------------------------------------ 网络
+    def _post(self, path: str, payload: dict) -> None:
+        req = QNetworkRequest(QUrl(GATEWAY_BASE + path))
+        req.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        reply = self.nam.post(req, body)
+        reply.finished.connect(lambda: (reply.deleteLater(), QTimer.singleShot(150, self.sync)))
+
+    def sync(self) -> None:
+        reply = self.nam.get(QNetworkRequest(QUrl(GATEWAY_BASE + "/status")))
+        reply.finished.connect(lambda: self._apply_status(reply))
+
+    def _apply_status(self, reply) -> None:
+        try:
+            data = json.loads(bytes(reply.readAll()).decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001
+            data = {}
+        finally:
+            reply.deleteLater()
+        mode = str(data.get("mode") or "auto")
+        source = str(data.get("mode_source") or "")
+        if mode == "off":
+            watch = "off"
+        elif mode == "anime":
+            watch = "anime"
+        elif mode == "video":
+            watch = "generic" if ("generic" in source or source == "auto-video") else "video"
+        else:
+            watch = "auto"
+        voice = str(((data.get("voice") or {}).get("mode")) or "ptt")
+        labels = dict(WATCH_ITEMS)
+        self.status_act.setText("当前：%s · %s" % (labels.get(watch, watch),
+                                                  dict(VOICE_ITEMS).get(voice, voice)))
+        for key, act in self.watch_actions.items():
+            act.blockSignals(True)
+            act.setChecked(key == watch)
+            act.blockSignals(False)
+        for key, act in self.voice_actions.items():
+            act.blockSignals(True)
+            act.setChecked(key == voice)
+            act.blockSignals(False)
+
+
+def log(msg: str) -> None:
+    """日志走 stderr：stdout 专门留给 ack，别混在一起。"""
+    print("[bubble] %s" % msg, file=sys.stderr, flush=True)
+
+
+def _ack(**fields) -> None:
+    print(json.dumps({"ok": True, **fields}, ensure_ascii=False), flush=True)
+
+
+def read_bubble_cfg(prev: dict) -> dict:
+    """每次弹之前读一次。
+
+    读不到/读坏了 → 沿用上一次（别因为半截 JSON 把样式打回默认）；
+    读到了但**键不在** → 用默认值（她在设置里清掉就是回到默认，不是保留旧值）。
+    """
+    try:
+        data = json.loads(PET_CONFIG.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return prev
+    style = str(data.get("self_talk_bubble_style") or DEFAULT_STYLE)
+    try:
+        scale = float(data.get("bubble_text_scale") or 100) / 100.0
+    except (TypeError, ValueError):
+        scale = 1.0
+    try:
+        dur = float(data.get("self_talk_duration_seconds") or DEFAULT_DURATION_S) * 1000
+    except (TypeError, ValueError):
+        dur = DEFAULT_DURATION_S * 1000
+    return {
+        "style": style,
+        "scale": max(0.5, min(3.0, scale)) if scale else 1.0,
+        "duration_ms": int(dur) if dur and dur >= 500 else int(DEFAULT_DURATION_S * 1000),
+    }
+
+
+# 桌宠的位置标记只有 **1Hz**（它是"定期存档"，不是实时位置），所以她走着的时候
+# 最坏会差一步（~60px）。试过用两次样本估速度外推，拐弯/停下时会过冲，反而更糟，
+# 所以现在只用"新样本一到就瞬间对齐"（不做预测）。
+
+
+def read_pet_rect() -> QRect | None:
+    """返回桌宠精灵的全局矩形（桌宠自己写进 runtime json 的那个）。
+
+    桌宠**每帧移动都会重写**这个文件（`_position_sync_pending` 是 0ms 去抖），
+    所以我们跟得有多快只取决于自己的轮询频率。这里用 (路径, mtime) 做缓存：
+    50ms 一跟，只要文件没变就复用上次解析结果，不去重读 JSON。
+    """
+    try:
+        files = sorted(
+            PET_HOME.glob("pet-runtime-v2-*-slot-*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for path in files[:3]:
+        try:
+            mtime = path.stat().st_mtime_ns
+            if _RECT_CACHE["path"] == str(path) and _RECT_CACHE["mtime"] == mtime:
+                return _RECT_CACHE["rect"]
+            data = json.loads(path.read_text(encoding="utf-8"))
+            w, h = int(data.get("w") or 0), int(data.get("h") or 0)
+            if w > 0 and h > 0:
+                rect = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
+                rect.pet_pid = int(data.get("pid") or 0)  # type: ignore[attr-defined]
+                _RECT_CACHE.update(path=str(path), mtime=mtime, rect=rect)
+                return rect
+        except Exception:
+            continue
+    return None
+
+
+def pet_window_visible(pid: int) -> bool:
+    """这个 pid 有没有一块「像样的」可见窗口（她没被收进托盘/隐藏）。
+
+    气泡是挂在她头上的；她不在画面上时还弹一个气泡飘在桌面上会很怪——
+    桌宠自己的 show_bubble 第一行就是 ``if not self.isVisible(): return False``。
+    """
+    if not pid:
+        return True
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        found = {"ok": False}
+        user32 = ctypes.windll.user32
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+        def cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            wpid = wt.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if int(wpid.value) != pid:
+                return True
+            rect = wt.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            if (rect.right - rect.left) >= 60 and (rect.bottom - rect.top) >= 60:
+                found["ok"] = True
+                return False
+            return True
+
+        user32.EnumWindows(proc(cb), 0)
+        return bool(found["ok"])
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def read_pet_scale(prev: float = 1.0) -> float:
+    """桌宠当前的缩放（四档那个）。存在 config-slot-*.json 的 scale 里。"""
+    try:
+        files = sorted(PET_HOME.glob("config-slot-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        path = files[0]
+        mtime = path.stat().st_mtime_ns
+        if _SCALE_CACHE["mtime"] == mtime:
+            return _SCALE_CACHE["scale"] or prev
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        value = float(data.get("scale") or 0)
+        if 0.3 <= value <= 3.0:
+            _SCALE_CACHE.update(mtime=mtime, scale=value)
+            return value
+    except Exception:  # noqa: BLE001
+        pass
+    return prev
+
+
+def force_topmost(widget) -> None:
+    """再压一次最上层。
+
+    PetSpeechBubble 自己已经是 WS_EX_TOPMOST，但「置顶窗口」之间还按激活顺序排：
+    游戏那种自己也置顶的窗口会盖住我们（WA_ShowWithoutActivating 不会把它顶上去）。
+    这里用 HWND_TOPMOST + 不激活重排一次，气泡才压得住全屏游戏窗。
+    """
+    try:
+        import ctypes
+
+        hwnd = int(widget.winId())
+        HWND_TOPMOST = -1
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def main() -> int:
+    demo = ""
+    demo_anchor = None
+    if "--demo" in sys.argv:
+        idx = sys.argv.index("--demo")
+        demo = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else "测试一下"
+    if "--anchor" in sys.argv:
+        idx = sys.argv.index("--anchor")
+        try:
+            parts = [int(v) for v in sys.argv[idx + 1].split(",")]
+            if len(parts) == 4:
+                demo_anchor = QRect(*parts)
+        except Exception:  # noqa: BLE001
+            demo_anchor = None
+
+    app = QApplication(sys.argv[:1])
+    bubble = PetSpeechBubble(None, style_id="classic_top")
+    state = {"style": "classic_top", "scale": 1.0, "duration_ms": 3200}
+    cmds: "queue.Queue[dict]" = queue.Queue()
+
+    def reader() -> None:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                cmds.put(json.loads(line))
+            except Exception:
+                continue
+        cmds.put({"cmd": "quit"})
+
+    def do_show(cmd: dict) -> None:
+        nonlocal state
+        text = str(cmd.get("text") or "").strip()
+        if not text:
+            return
+        state = read_bubble_cfg(state)
+        try:
+            bubble.set_style(state["style"])
+        except Exception as exc:  # noqa: BLE001
+            log("样式切换失败（保持原样）：%s" % exc)
+        try:
+            bubble.set_text_scale(state["scale"])
+        except Exception:  # noqa: BLE001
+            pass
+        anchor = None
+        explicit = False
+        raw = cmd.get("anchor")
+        if isinstance(raw, list) and len(raw) == 4:
+            anchor = QRect(*(int(v) for v in raw))
+            explicit = True
+        if anchor is None:
+            anchor = read_pet_rect()
+        if anchor is None:
+            log("找不到桌宠窗口，气泡没法定位")
+            _ack(id=cmd.get("id"), shown=False, reason="no-pet")
+            return
+        # 她不在画面上（收进托盘/隐藏）或者缩成一条边栏时，桌宠自己也不弹 —— 照抄这个规矩
+        pid = int(getattr(anchor, "pet_pid", 0) or 0)
+        if not explicit and not pet_window_visible(pid):
+            log("桌宠当前不可见，跳过气泡")
+            _ack(id=cmd.get("id"), shown=False, reason="pet-hidden")
+            return
+        if not explicit and (anchor.width() < 80 or anchor.height() < 80):
+            log("桌宠缩成边栏了（%dx%d），跳过气泡" % (anchor.width(), anchor.height()))
+            _ack(id=cmd.get("id"), shown=False, reason="pet-docked")
+            return
+        duration = int(cmd.get("duration_ms") or state["duration_ms"])
+        state["pet_scale"] = read_pet_scale(state.get("pet_scale", 1.0))
+        # 完全照她 show_bubble 的写法：锚点用精灵包围盒，不额外挪
+        bubble.show_text(text, anchor, duration_ms=duration, pet_scale=state["pet_scale"])
+        force_topmost(bubble)
+        state["anchor"] = (anchor.x(), anchor.y(), anchor.width(), anchor.height())
+        state["pid"] = pid
+        shown = bool(bubble.isVisible())
+        log("弹：%s（样式 %s，字号 %.2f，缩放 %.2f，%dms，锚点 (%d,%d)，气泡 (%d,%d)，%s）"
+            % (text[:20], state["style"], state["scale"], state["pet_scale"], duration,
+               anchor.x(), anchor.y(), bubble.x(), bubble.y(),
+               "上屏" if shown else "没上屏"))
+        _ack(id=cmd.get("id"), shown=shown, anchor=[anchor.x(), anchor.y()],
+             size=[bubble.width(), bubble.height()],
+             screen=[bubble.x(), bubble.y()])
+
+    def poll() -> None:
+        quit_now = False
+        try:
+            while True:
+                cmd = cmds.get_nowait()
+                kind = str(cmd.get("cmd") or "")
+                if kind == "show":
+                    do_show(cmd)
+                elif kind == "hide":
+                    bubble.dismiss()
+                    _ack(id=cmd.get("id"), hidden=True)
+                elif kind == "quit":
+                    quit_now = True
+        except queue.Empty:
+            pass
+        if quit_now:
+            app.quit()
+
+    def follow() -> None:
+        """照桌宠的做法：窗口动了用 reposition，缩放变了用 reflow。"""
+        if not bubble.isVisible():
+            return
+        rect = read_pet_rect()
+        if rect is None:
+            return
+        cur = (rect.x(), rect.y(), rect.width(), rect.height())
+        scale = read_pet_scale(state.get("pet_scale", 1.0))
+        try:
+            if cur != state.get("anchor"):
+                state["anchor"] = cur
+                bubble.reposition(rect)
+                now = time.time()
+                if now - state.get("last_follow_log", 0.0) >= 1.0:
+                    state["last_follow_log"] = now
+                    log("跟随：(%d,%d) → 气泡 (%d,%d)" % (rect.x(), rect.y(), bubble.x(), bubble.y()))
+            if abs(scale - state.get("pet_scale", 1.0)) > 0.01:
+                state["pet_scale"] = scale
+                bubble.reflow(rect, pet_scale=scale)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if "--demo" not in sys.argv:
+        tray = TrayMenu(bubble, lambda text: do_show({"text": text, "duration_ms": 3200}))
+        app.aboutToQuit.connect(tray.tray.hide)
+
+    QTimer(bubble, timeout=poll).start(30)
+    # 跟得紧一点：桌宠每帧都在重写 runtime json，30ms 一次（读缓存不解析）
+    # 实测写入→气泡挪位 5~20ms；以前的 200ms 在她“跳着走”时会明显落后半步
+    QTimer(bubble, timeout=follow).start(30)
+    # --demo 是单独试用的：不接 stdin（不然没管道时立刻 EOF → 自己退出）
+    if "--demo" not in sys.argv:
+        threading.Thread(target=reader, name="stdin", daemon=True).start()
+    log("就绪（配置：%s）" % PET_CONFIG)
+
+    if demo:
+        rect = demo_anchor or read_pet_rect()
+        log("demo 位置：%s" % (rect,))
+        if rect is not None:
+            QTimer.singleShot(300, lambda: do_show({"text": demo, "anchor": [
+                rect.x(), rect.y(), rect.width(), rect.height()]}))
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,144 @@
+# -*- coding: utf-8 -*-
+"""气泡桥：网关 → 气泡小工（bubble_host.py）。
+
+为什么单独一个进程：气泡要 Qt 事件循环，网关是纯 http 线程池；Qt 崩了不能
+把语音一起带走。小工按需拉起，网关退出时它读到 stdin EOF 自己退。
+
+协议：stdin 一行一个 JSON 命令（带自增 id），stdout 一行一个 ack（带回同一个
+id）。日志走小工的 stderr，落到 logs\\bubble.log，不会和 ack 混。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import subprocess
+import sys
+import threading
+
+log = logging.getLogger("petgw")
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+class BubbleBridge:
+    def __init__(self, cfg: dict):
+        conf = cfg.get("bubble") or {}
+        self.enabled = bool(conf.get("enabled", True))
+        self.script = os.path.join(APP_DIR, "bubble_host.py")
+        self.duration_ms = int(conf.get("duration_ms", 3200) or 3200)
+        self.max_chars = int(conf.get("max_chars", 60) or 60)
+        self.ack_timeout = float(conf.get("ack_timeout", 3.0) or 3.0)
+        self.lock = threading.Lock()
+        self.proc: subprocess.Popen | None = None
+        self.acks: "queue.Queue[dict]" = queue.Queue()
+        self._seq = 0
+        self.last_error = ""
+        self.shown = 0
+        self.last_reason = ""
+
+    # ------------------------------------------------------------ 进程
+    def _spawn(self) -> None:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        log_path = os.path.join(APP_DIR, "logs", "bubble.log")
+        try:
+            stderr = open(log_path, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            stderr = subprocess.DEVNULL
+        self.proc = subprocess.Popen(
+            [sys.executable, self.script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
+            text=True, encoding="utf-8", errors="replace", env=env,
+            cwd=APP_DIR, creationflags=flags,
+        )
+        threading.Thread(target=self._read_acks, args=(self.proc,), daemon=True).start()
+        log.info("气泡小工已拉起（pid %s）", self.proc.pid)
+
+    def _read_acks(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.acks.put(json.loads(line))
+            except ValueError:
+                continue
+
+    def _ensure(self) -> bool:
+        if self.proc is not None and self.proc.poll() is None:
+            return True
+        try:
+            self._spawn()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            log.warning("气泡小工拉不起来：%s", exc)
+            return False
+
+    def _request(self, payload: dict) -> dict | None:
+        """发一条命令，等它自己那个 id 的 ack（超时返回 None）。"""
+        if not self.enabled:
+            return None
+        with self.lock:
+            if not self._ensure():
+                return None
+            self._seq += 1
+            payload = {**payload, "id": self._seq}
+            try:
+                assert self.proc is not None and self.proc.stdin is not None
+                self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = str(exc)
+                log.warning("气泡指令发不出去（%s），下一句重拉", exc)
+                self.proc = None
+                return None
+            want = self._seq
+        deadline = self.ack_timeout
+        while deadline > 0:
+            try:
+                ack = self.acks.get(timeout=min(0.5, deadline))
+            except queue.Empty:
+                deadline -= 0.5
+                continue
+            if ack.get("id") == want:
+                return ack
+            deadline -= 0.1
+        return None
+
+    # ------------------------------------------------------------ 对外
+    def start(self) -> None:
+        """开机就把小工拉起来：托盘菜单住在它里面，不能等到第一次弹气泡。"""
+        if not self.enabled:
+            return
+        threading.Thread(target=self._ensure, name="bubble-spawn", daemon=True).start()
+
+    def show(self, text: str, duration_ms: int | None = None) -> dict:
+        text = str(text or "").strip()
+        if not text:
+            return {"shown": False, "reason": "empty"}
+        if len(text) > self.max_chars:
+            text = text[: self.max_chars]
+        ack = self._request({"cmd": "show", "text": text,
+                             "duration_ms": int(duration_ms or self.duration_ms)})
+        if ack is None:
+            self.last_reason = "no-ack"
+            return {"shown": False, "reason": "no-ack"}
+        shown = bool(ack.get("shown"))
+        self.last_reason = str(ack.get("reason") or "")
+        if shown:
+            self.shown += 1
+        return ack
+
+    def hide(self) -> bool:
+        ack = self._request({"cmd": "hide"})
+        return bool(ack)
+
+    def status(self) -> dict:
+        alive = bool(self.proc is not None and self.proc.poll() is None)
+        return {"enabled": self.enabled, "alive": alive, "shown": self.shown,
+                "error": self.last_error, "last_reason": self.last_reason}
