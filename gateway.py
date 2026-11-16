@@ -120,6 +120,8 @@ DEFAULTS = {
         "attach_to_vision": True,
     },
     "inject_vision_context": True,
+    # 看片/看番/看直播/网课时：只聊内容，不提时间，不念字幕（老大 2026-11-17 要的）
+    "watch_focus": True,
     "vision_context_entries": 6,
     "vision_context_minutes": 30,
     "vision_context_budget_chars": 600,
@@ -454,6 +456,8 @@ class SpeechPipeline:
         self.tts_tight_edges = bool(cfg["tts"].get("tight_sentence_edges", True))
         # 这条锁留给「流式独占」和退路用：流式请求和整句合成偶尔还要互斥一下。
         self.synth_lock = threading.Lock()
+        # 写声卡和关声卡必须错开（PortAudio 不允许 write 和 stop 同时进行，撞上会崩进程）
+        self.stream_lock = threading.Lock()
         self.first_byte_ewma = 0.0      # 流式首字节平均耗时（秒）
         self.synth_ewma = 0.0           # 非流式整句合成平均耗时（秒）
         self.vision_text_ewma = 0.0     # 识屏从请求到出第一个字的平均耗时（秒）
@@ -703,7 +707,10 @@ class SpeechPipeline:
                         with self.lock:
                             if gen != self.generation:
                                 break
-                        stream.write(item)
+                        # 写和收尾用同一把锁：PortAudio 不允许一边 write 一边 stop，
+                        # 撞上就是 0xc0000005 崩进程（2026-11-17 01:36 实测）
+                        with self.stream_lock:
+                            stream.write(item)
                 except Exception:  # noqa: BLE001
                     pass
                 finally:
@@ -781,7 +788,7 @@ class SpeechPipeline:
                 threading.Thread(target=self._prefetch_next, args=(gen,),
                                  name="prefetch", daemon=True).start()
             try:
-                pcm_q.put(None, timeout=5)
+                pcm_q.put(None, timeout=0.3)
             except queue.Full:
                 pass
             t_put = time.time()
@@ -802,10 +809,14 @@ class SpeechPipeline:
             self._mark_stream_done(gen)
             if stream is not None:
                 try:
-                    t_stop = time.time()
-                    stream.stop()
-                    t_closed = time.time()
-                    stream.close()
+                    # 等写入线程退干净再收尾；万一它卡在 write 里，也拿同一把锁错开，
+                    # 绝不在它写的时候 stop。
+                    writer_done.wait(timeout=3.0)
+                    with self.stream_lock:
+                        t_stop = time.time()
+                        stream.stop()
+                        t_closed = time.time()
+                        stream.close()
                     # 这两步会等声卡把缓冲里剩下的放完：偶尔会拖出一大截，
                     # 那段时间播放线程也在里面，听感就是「一句之后空了半拍」。
                     stop_s, close_s = t_closed - t_stop, time.time() - t_closed
@@ -956,16 +967,14 @@ class SpeechPipeline:
                 self.pending.get_nowait()
             except queue.Empty:
                 break
-        stream = getattr(self, "current_stream", None)
-        if stream is not None:
-            try:
-                stream.stop()
-            except Exception:  # noqa: BLE001
-                pass
+        # 不在这里停 sounddevice 的流：那条流的写入线程正在 stream.write() 里，
+        # 从别的线程调 stop() 会和它撞上，PortAudio 直接 0xc0000005 崩整个进程
+        # （2026-11-17 01:36 就是这么崩的：新识屏打断了上一轮的流）。
+        # 改法是只翻 generation，写入线程下一块就自己退出，_play_stream 在自己线程里收尾。
         try:
             import winsound
 
-            winsound.PlaySound(None, 0)  # 立即停掉正在播的那句
+            winsound.PlaySound(None, 0)  # 立即停掉正在播的那句（winsound 是另一套接口，安全）
         except Exception:
             pass
         for item in stale:
@@ -2152,19 +2161,52 @@ def self_ref_recent(rows: list[dict], minutes: float) -> bool:
     return False
 
 
-def build_vision_context(rows: list[dict]) -> str:
+WATCH_MODES = ("video", "anime", "live", "course")
+_MODE_WORD = {"video": "视频", "anime": "番剧", "live": "直播", "course": "网课"}
+
+
+def build_watch_focus(mode: str) -> str:
+    """看片/看番时的「专心看」规矩。
+
+    老大原话：看番的时候她老说「这个点还不睡」，很影响体验；字幕她也当成稿子念。
+    所以这里把两件事一起按住：**不许拿时间/作息当话题**，**字幕只当剧情参考**。
+    """
+    kind = _MODE_WORD.get(mode, "视频")
+    return "\n".join([
+        "【现在你在陪老大看%s，这一轮只聊内容】" % kind,
+        "老大是专门在看这个的。你跟着剧情和画面走就行，下面几条是硬规矩：",
+        "1. 不许提时间，也不许拐着弯提：不说几点、不说「这么晚」「这个点」「后半夜」「天都快亮了」，"
+        "不催他睡觉、不劝他歇会儿、不操心眼睛、不说「明天还要上班」。看片的时候听到这些很扫兴，一个字都别提。",
+        "2. 字幕、台词、语音转写都是给你看懂剧情用的参考，**不是你该念的稿子**："
+        "不要念字幕原文、不要整句复述台词、不要说「字幕说」「上面写着」「台词里」「旁白说」这种话。"
+        "用你自己的话讲发生了什么、你怎么看、你猜接下来会怎样。",
+        "3. 画面也别逐条播报。挑一个真有意思的点说，一两句就够；不报进度、不剧透、不总结本集剧情。",
+        "4. 更早记录里带的时间只是给你判断新旧用的，不是话题。",
+    ])
+
+
+def build_vision_context(rows: list[dict], hide_clock: bool = False) -> str:
     """识屏请求的前情提要。带「多久以前」的标签，但**标签只给她判断，不许念出来**。"""
     if not rows:
         return ""
     now = time.time()
-    lines = [
-        "【你之前看到过的】（同一台电脑上的识屏记录，不是现在这张图）",
-        "每条后面标着「钟表时间（多久以前）」。这些数字是给你判断用的，**不要念出来**；",
-        "说的时候只能换成「刚才」「刚才那会儿」「之前」「早先」「下午那会儿」这类词，或者直接用内容指代。",
-        "时间分档：10 分钟以内才可以说「刚才/刚刚」；10～30 分钟说「刚才那会儿」「前一会儿」；",
-        "半小时以上只有跟眼下明显相关才提，而且只能说「之前」「早先」，不许说「刚才」，也不许报「多少分钟前」。",
-        "这些只是参考，不是必须提——眼下这张图够答就只说这张图，别每次都往回带。",
-    ]
+    if hide_clock:
+        # 看片模式：连钟表时间都不给（给了她就会拿「都一点了」当话题）
+        lines = [
+            "【你之前看到过的】（同一台电脑上的识屏记录，不是现在这张图）",
+            "每条只标「多久以前」。这些数字是给你判断新旧用的，**不要念出来**；",
+            "说的时候只能换成「刚才」「刚才那会儿」「之前」「早先」这类词，或者直接用内容指代。",
+            "这些只是参考，不是必须提——眼下这张图够答就只说这张图，别每次都往回带。",
+        ]
+    else:
+        lines = [
+            "【你之前看到过的】（同一台电脑上的识屏记录，不是现在这张图）",
+            "每条后面标着「钟表时间（多久以前）」。这些数字是给你判断用的，**不要念出来**；",
+            "说的时候只能换成「刚才」「刚才那会儿」「之前」「早先」「下午那会儿」这类词，或者直接用内容指代。",
+            "时间分档：10 分钟以内才可以说「刚才/刚刚」；10～30 分钟说「刚才那会儿」「前一会儿」；",
+            "半小时以上只有跟眼下明显相关才提，而且只能说「之前」「早先」，不许说「刚才」，也不许报「多少分钟前」。",
+            "这些只是参考，不是必须提——眼下这张图够答就只说这张图，别每次都往回带。",
+        ]
     for row in rows:
         stamp = row.get("ts", "")[11:16]
         age_min = max(0, int((now - float(row.get("epoch", now))) / 60))
@@ -2181,7 +2223,9 @@ def build_vision_context(rows: list[dict]) -> str:
             said = SELF_REF_RE.sub("", said).strip("，,。 　")
         said = said[:int(90)]
         if said:
-            lines.append("- %s（%s）在 %s，你说过：%s" % (stamp, age, app, said))
+            # 看片时连钟表时间都不给：给了她就会拿「都一点了」当话题
+            when = age if hide_clock else "%s（%s）" % (stamp, age)
+            lines.append("- %s 在 %s，你说过：%s" % (when, app, said))
     return "\n".join(lines)
 
 
@@ -2518,8 +2562,12 @@ class Gateway:
 
         messages = [
             {"role": "system", "content": self._persona()},
-            {"role": "user", "content": parts},
         ]
+        # 自己看一眼这条捷径也要守「看片专心」的规矩，不然看番时照样催睡觉
+        watching = self.mode.get()
+        if self.cfg.get("watch_focus", True) and watching in WATCH_MODES:
+            messages.append({"role": "system", "content": build_watch_focus(watching)})
+        messages.append({"role": "user", "content": parts})
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
                    "messages": messages, "max_tokens": 400, "stream": False}
         data = self.post_once(payload)
@@ -2879,6 +2927,7 @@ class Gateway:
             m = APP_RE.search(str(user_text or ""))
             if m:
                 app = m.group(1).strip()
+            watching = self.mode.get() in WATCH_MODES
             prev = self.ledger.recent_vision_for_app(
                 app,
                 max_minutes=float(self.cfg.get("vision_context_minutes", 30)),
@@ -2886,10 +2935,10 @@ class Gateway:
                 item_chars=int(self.cfg.get("vision_context_item_chars", 90)),
                 max_items=int(self.cfg.get("vision_context_entries", 6)),
             )
-            block = build_vision_context(prev)
+            block = build_vision_context(prev, hide_clock=watching)
             if block:
                 messages.insert(0, {"role": "system", "content": block})
-                log.info("识屏带上近况 %d 条", len(prev))
+                log.info("识屏带上近况 %d 条%s", len(prev), "（看片中，不给钟点）" if watching else "")
 
         if scenario == "chat" and self.cfg.get("inject_vision_ledger", True):
             rows = self.ledger.recent_vision(
@@ -2904,6 +2953,14 @@ class Gateway:
             if block:
                 messages.insert(0, {"role": "system", "content": block})
                 log.info("注入识屏：近况 %d 条 + 摘要 %d 字", len(rows), len(digest))
+        # 看片/看番/看直播/网课：这一轮只聊内容，不提时间，不念字幕。
+        # 放在最后 insert(0)，所以它是整段对话最前面那条 system（最有分量）。
+        if scenario == "vision" and self.cfg.get("watch_focus", True):
+            watching = self.mode.get()
+            if watching in WATCH_MODES:
+                messages.insert(0, {"role": "system", "content": build_watch_focus(watching)})
+                log.info("看片模式：注入「专心看」规矩（%s）", watching)
+
         payload["messages"] = messages
         payload["stream"] = True
         return payload, scenario, user_text

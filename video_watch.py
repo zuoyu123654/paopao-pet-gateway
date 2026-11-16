@@ -396,13 +396,17 @@ class VideoWatcher(threading.Thread):
         for ts, source, text in rows[-self.keep:]:
             tag = "（OCR）" if source == "ocr" else ""
             lines.append("- [%s]%s %s" % (time.strftime("%H:%M:%S", time.localtime(ts)), tag, text[:120]))
-        head = "【你正在和老大一起看视频（通用模式%s）】" % ("，字幕是 OCR 读的" if ocr_on else "")
+        head = "【你在陪老大看视频，下面是剧情参考，不是台词稿%s】" % (
+            "（字幕是 OCR 读的，可能有错字，别照着念）" if ocr_on else "")
         return "\n".join([
             head,
             "窗口：%s｜%s" % (app, title[:60]),
             "最近听到/看到的（旧→新）：",
             *lines,
-            "说话规矩：只在有值得说的点开口，一两句；不要复述台词、不要剧透、不要报进度。",
+            "这些行是给你看懂剧情用的，**不是你该念的台词**：不要念字幕原文、不要整句复述台词、"
+            "不要说「字幕说」「上面写着」「台词里」「旁白说」。用它判断剧情走到哪了，"
+            "然后说你自己看到什么、怎么想、猜接下来会怎样。",
+            "说话规矩：只在有值得说的点开口，一两句；不剧透、不报进度、不提时间、不催他睡觉。",
         ])
 
     def take_first_hint(self) -> str:
