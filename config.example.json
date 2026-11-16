@@ -153,5 +153,6 @@
     "vision_fresh_minutes": 10,
     "vision_mention_minutes": 30,
     "mute_vision_when_off": false,
-    "watch_focus": true
+    "watch_focus": true,
+    "see_howto": true
 }

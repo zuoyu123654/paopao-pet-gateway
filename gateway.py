@@ -122,6 +122,8 @@ DEFAULTS = {
     "inject_vision_context": True,
     # 看片/看番/看直播/网课时：只聊内容，不提时间，不念字幕（老大 2026-11-17 要的）
     "watch_focus": True,
+    # 识屏时先描述清楚场景、认得出作品就报名字（老大 2026-11-17 要的）
+    "see_howto": True,
     "vision_context_entries": 6,
     "vision_context_minutes": 30,
     "vision_context_budget_chars": 600,
@@ -152,6 +154,63 @@ DEFAULTS = {
 }
 
 log = logging.getLogger("petgw")
+
+
+# --------------------------------------------------------------- 作品小抄（游戏/番剧）
+# 识别出「这是绝区零」之后她还得知道这游戏是啥，不然只会说「哦，绝区零啊」然后没话了。
+# 这张表就是给她的小抄：键是标题/进程名里能匹配到的名字，值是一句话说明。
+TITLES_PATH = os.path.join(APP_DIR, "titles.json")
+_TITLE_NOTES: dict[str, str] = {}
+_TITLE_MTIME = 0.0
+
+
+def title_notes(refresh: bool = False) -> dict[str, str]:
+    """读 titles.json（改了不用重启，按修改时间自动重载）。"""
+    global _TITLE_NOTES, _TITLE_MTIME
+    try:
+        mtime = os.path.getmtime(TITLES_PATH)
+    except OSError:
+        return _TITLE_NOTES
+    if refresh or mtime != _TITLE_MTIME:
+        try:
+            with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            _TITLE_NOTES = {
+                str(k).strip().lower(): str(v).strip()
+                for k, v in (data or {}).items() if str(k).strip()
+            }
+            _TITLE_MTIME = mtime
+        except Exception as exc:  # noqa: BLE001
+            log.warning("titles.json 读不了（先不注入小抄）：%s", exc)
+    return _TITLE_NOTES
+
+
+def title_hint(app: str = "", title: str = "") -> str:
+    """按窗口标题/进程名在这张小抄里找一条，找不到就返回空。"""
+    notes = title_notes()
+    if not notes:
+        return ""
+    hay = ("%s %s" % (app or "", title or "")).lower()
+    for key, note in notes.items():
+        if key and key in hay:
+            return note
+    return ""
+
+
+def build_see_howto() -> str:
+    """识屏时「怎么看」的规矩：先把场景看清楚，再挑一两句说出口。"""
+    return "\n".join([
+        "【先看清，再说话】",
+        "1. 按顺序扫一遍：标题栏写的是什么 → 画面主体是谁、在哪儿、在干什么 → 角落的界面元素"
+        "（血条、技能栏、进度条、弹幕、按钮、数字）。心里先把它描述成一句完整的话，"
+        "**说出口时也要让人听得出这是哪儿、在干什么**，但别逐条罗列、别报数字。",
+        "2. 认作品：**窗口标题里写着的作品名可以直接说出来**。上面那句「标题只是参考、不要逐字念」"
+        "说的是别把整条标题念一遍，不是不让你说名字——老大问「我在玩什么」「这是哪部」，就报名字。"
+        "标题和画面对不上时，先信画面，再说「看着倒像是……」；两个都判断不出来就说「像是什么什么」，别编。",
+        "3. 认出来的作品，就接着聊你知道的（类型、玩法、角色、梗）；真不熟，就只说名字，"
+        "再加上画面里能看到的，别装懂也别装不知道。",
+        "4. 画面上的文字（字幕、台词、界面上的字）不要念出来。",
+    ])
 
 
 # --------------------------------------------------------------------------- 配置
@@ -2103,6 +2162,8 @@ class Ledger:
 
 
 APP_RE = re.compile(r"前台应用为\s*([^|\n）)]+)")
+# 同一行里「应用 | 窗口标题」两段都抓出来：标题里通常就写着游戏/番剧的名字
+SCREEN_META_RE = re.compile(r"前台应用为\s*([^|\n）)]+)(?:\s*\|\s*([^\n）)]+))?")
 
 
 def build_ledger_block(rows: list[dict], digest: str = "") -> str:
@@ -2162,6 +2223,11 @@ def self_ref_recent(rows: list[dict], minutes: float) -> bool:
 
 
 WATCH_MODES = ("video", "anime", "live", "course")
+# 问到「屏幕上的东西」的信号：这类问题必须带上当前前台/截图才答得出来
+SCREEN_QUESTION_HINTS = (
+    "游戏", "番", "视频", "画面", "屏幕", "直播", "在玩", "在看", "玩什么", "看什么",
+    "这部", "那部", "这个是", "那个是", "我在干", "我这样",
+)
 _MODE_WORD = {"video": "视频", "anime": "番剧", "live": "直播", "course": "网课"}
 
 
@@ -2658,8 +2724,37 @@ class Gateway:
         text = str(text or "").strip()
         if not text:
             return ""
-        want_look = any(w in text for w in LOOK_HINTS) or self.mode.get() in ("video", "anime")
+        # 语音问「我在玩什么游戏」原来答不出来：这条路上**没有眼睛也没有前台信息**，
+        # 模型手里只有一句问话，只能回「不知道」。现在把三样东西一起给她：
+        # 当前前台（应用 + 窗口标题）、titles.json 里的小抄、刚才看到过的记录。
+        app = title = ""
+        try:
+            from video_watch import foreground
+
+            app, title = foreground()
+        except Exception:  # noqa: BLE001
+            pass
+        screen_q = any(w in text for w in SCREEN_QUESTION_HINTS)
+        want_look = (any(w in text for w in LOOK_HINTS) or screen_q
+                     or self.mode.get() in ("video", "anime", "live", "course"))
+        context = []
+        if title or app:
+            context.append("【老大此刻的前台】%s（%s）" % (title or app, app or "?"))
+        note = title_hint(app, title)
+        if note:
+            context.append("【这个作品你认识】%s" % note)
+        try:
+            rows = self.ledger.recent_vision(1, 15)
+            if rows:
+                last = rows[-1]
+                said = (last.get("assistant") or "").strip().replace("\n", " ")[:80]
+                if said:
+                    context.append("【你刚才看到过】%s，你说过：%s" % (Ledger.app_of(last) or "某处", said))
+        except Exception:  # noqa: BLE001
+            pass
         parts = [{"type": "text", "text": text}]
+        if context:
+            parts.insert(0, {"type": "text", "text": "\n".join(context)})
         if want_look:
             try:
                 snap = self.frames.snapshot(1)
@@ -2676,6 +2771,9 @@ class Gateway:
         system = self._persona() + (
             "\n\n【语音模式】老大是在用嘴跟你说话。回答短一点、口语一点，"
             "不要分点、不要标题、不要长段；一两句就够，像平时聊天那样。"
+            "\n【问屏幕上的事】老大问你在玩什么、在看什么、这是哪部的时候，"
+            "照【老大此刻的前台】和【你刚才看到过】回答：标题里写着的名字直接说；"
+            "认得出来就报名字，再顺手说一句你知道的；真判断不出来就说「看不太出来，像是什么什么」，别编。"
         )
         content = parts if len(parts) > 1 else text
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
@@ -2920,6 +3018,22 @@ class Gateway:
             if hint:
                 messages.insert(0, {"role": "system", "content": hint})
                 log.info("视频模式：第一次开口的引导已注入")
+
+        if scenario == "vision":
+            # 「先看清再说话」+ 作品小抄：认得出是哪款游戏/哪部番，也接得住话。
+            m = SCREEN_META_RE.search(str(user_text or ""))
+            app = (m.group(1) or "").strip() if m else ""
+            title = (m.group(2) or "").strip() if m else ""
+            note = title_hint(app, title)
+            if note:
+                messages.insert(0, {"role": "system", "content": (
+                    "【这个作品你认识】%s\n（这是你自己的印象，顺着聊就行，别背简介、别逐字念。）" % note)})
+                log.info("识屏：带上作品小抄（%s）", (title or app)[:30])
+            elif title or app:
+                # 记一笔，方便以后往 titles.json 里补
+                log.info("识屏：小抄里没有这个作品（%s）", (title or app)[:40])
+            if self.cfg.get("see_howto", True):
+                messages.insert(0, {"role": "system", "content": build_see_howto()})
 
         if scenario == "vision" and self.cfg.get("inject_vision_context", True):
             # 识屏也要有前后文：把刚才几次「她看到过什么」带上，她才接得上
