@@ -1113,6 +1113,31 @@ title: 『原神』7.3前瞻日期确定…
 > 装完网关后，跑 `install-browser-ext.ps1 -RestartEdge`（Edge 没开就不用加参数），
 > 然后打开 B站视频，`/status` 里 `player.source` 应该是 `ext`。
 
+
+#### 4.2q.2 实测：Edge 157 在默认配置下**不认** `--load-extension`（2026-11-17 04:0x）
+
+老大让「试一次」，于是真跑了一遍全自动：改桌面快捷方式 → 关 Edge → 用带参数的快捷方式启动。结果：
+
+| 做法 | 结果 |
+|---|---|
+| 默认配置 + `--load-extension=<browser_ext>`（快捷方式里确实带上了这个参数，进程命令行也确认有） | **扩展没加载**：`%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Preferences` 的 `extensions.settings` 里没有它，`/status.player.connected = false` |
+| 独立配置 + `--load-extension`（`--user-data-dir=%TEMP%\paopao-ext-check2`） | **自动加载成功**：`source: ext`、`position: 0:11 / 1:47`、`bvid: BV16cWd6pEBh`，标题也对 |
+
+结论：跟 `--remote-debugging-port` 一样，Chromium 136+ 把「默认用户目录」这个口子堵了；
+`--load-extension` 在**独立配置目录**里还能用。所以现在有三条路，按省事程度排：
+
+| 方案 | 要不要点击 | 代价 |
+|---|---|---|
+| **① 主浏览器里手动装一次**（`edge://extensions` → 开发人员模式 → 加载解压缩的扩展 → 选 `browser_ext`） | 点三下，**只一次**（之后跟着 profile 走，重启还在） | 无（会多一条「开发者模式扩展」提示） |
+| **② `start-edge-watch.ps1`**：独立配置目录的「看片窗口」，扩展预装 | **零点击** | 那是另一个配置目录，没有平时的登录态（B站 720p 能播，1080p 可能要登录；字幕不受影响，走 bili CLI） |
+| ③ 老版本 Edge / Chrome（136 以前） | 零点击 | 版本新了就失效，`--load-extension` 会被忽略 |
+
+`install-browser-ext.ps1` 现在两个开关：`-DedicatedProfile`（=方案 ②，直接开窗口）、
+`-RestartEdge`（=试着走 ③，默认配置下按实测无效，所以脚本会提示你转手动或方案 ②）。
+
+**给 AI 的说法**（别人装的时候）：先试 `install-browser-ext.ps1 -DedicatedProfile`，
+成了就有进度；想用主浏览器就让人点那三下（AI 代替不了那一下，Chromium 没有 CLI 加载未打包扩展的接口）。
+
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
 做过、试过、撤了。经过记在这里，免得后人又走一遍：

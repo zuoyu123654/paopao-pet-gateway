@@ -7,7 +7,8 @@
 # -RestartEdge 会关掉当前的 Edge 窗口（标签页不一定自动恢复），确认没开着要留的东西再用。
 
 param(
-    [switch]$RestartEdge
+    [switch]$RestartEdge,        # 关掉 Edge 再用带参数的快捷方式启动（默认配置目录下 Edge 157 会忽略，实测无效）
+    [switch]$DedicatedProfile    # 开一个独立配置目录的「看片窗口」，扩展能自动加载（推荐免点击方案）
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +22,12 @@ $edge = @(
 if (-not (Test-Path -LiteralPath (Join-Path $ext 'manifest.json'))) {
     Write-Host "扩展目录不完整：$ext" -ForegroundColor Red
     exit 1
+}
+
+# 0) 独立配置目录的看片窗口：扩展能自动加载，最省事
+if ($DedicatedProfile) {
+    & (Join-Path $here 'start-edge-watch.ps1')
+    exit 0
 }
 
 # 1) 先把桌面快捷方式弄好（幂等）
@@ -56,5 +63,8 @@ if (Test-Path -LiteralPath $userLnk) {
 } elseif ($edge) {
     Start-Process -FilePath $edge -ArgumentList @("--load-extension=$ext", 'https://www.bilibili.com')
 }
+Write-Host '注意：Edge 157 在默认配置目录下会忽略 --load-extension（实测）。' -ForegroundColor Yellow
+Write-Host '如果等下 /status 里没有 source=ext，就走手动：edge://extensions → 开发人员模式 → 加载解压缩的扩展' -ForegroundColor Yellow
+Write-Host '（或者用 .\install-browser-ext.ps1 -DedicatedProfile 开一个自动加载扩展的看片窗口）' -ForegroundColor Yellow
 Write-Host '已启动。打开任意 B站视频播几秒，然后验证：' -ForegroundColor Cyan
 Write-Host '  (Invoke-WebRequest http://127.0.0.1:9888/status -UseBasicParsing).Content | ConvertFrom-Json | % player'
