@@ -315,10 +315,24 @@ class PlayerWatch(threading.Thread):
             return hs
         return {}
 
+    BROWSERS = ("msedge", "chrome", "firefox", "brave", "opera", "vivaldi", "browser")
+
+    def _foreground_is_browser(self) -> bool:
+        """前台得是浏览器才算「在看」。不然人在打游戏、B站挂在后台，她会对着游戏说视频。"""
+        try:
+            from video_watch import foreground
+
+            app = (foreground()[0] or "").lower().replace(".exe", "")
+        except Exception:  # noqa: BLE001
+            return True
+        return (not app) or any(app.startswith(b) or b in app for b in self.BROWSERS)
+
     def context_block(self) -> str:
         """识屏时插进 system 的那段：现在在看什么、放到哪、前 N 秒台词。"""
         st = self.snapshot()
         if not st:
+            return ""
+        if not self._foreground_is_browser():
             return ""
         title = st.get("title") or ""
         pos = _fmt(st.get("t"))
