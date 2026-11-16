@@ -22,7 +22,7 @@
         "early_sentences": 3,
         "early_min_chars": 8,
         "timeout": 180,
-        "volume": 1.2,
+        "volume": 1.0,
         "synth_workers": 3,
         "pre_cue": [
             "让我看看……",

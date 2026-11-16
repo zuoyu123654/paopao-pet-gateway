@@ -77,7 +77,7 @@ DEFAULTS = {
         "max_sentences": 40,
         "max_chars_per_sentence": 60,
         "timeout": 180,
-        "volume": 1.8,
+        "volume": 1.0,
         "synth_workers": 3,
         "synth_parallel": 2,
         "early_sentences": 3,
