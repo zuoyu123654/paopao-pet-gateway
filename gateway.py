@@ -77,7 +77,11 @@ DEFAULTS = {
         "max_chars_per_sentence": 60,
         "timeout": 180,
         "volume": 1.8,
-        "synth_workers": 2,
+        "synth_workers": 3,
+        "synth_parallel": 2,
+        "early_sentences": 3,
+        "early_min_chars": 8,
+        "first_min_chars": 24,
         "pre_cue": ["让我看看……", "唔，我瞅瞅。"],
         "pre_cue_min_interval": 20,
         "cache_pre_cue": True,
@@ -417,8 +421,21 @@ class SpeechPipeline:
         self.cue_durations: list[float] = []
         # 首句真的开声了没有：后面的句子合成要等它，别抢 GPU；提示音也靠它判断
         self.first_audio_started = threading.Event()
-        # 文件合成同一时间只跑一条：流式 + 两条文件会抢 GPU，把流拖到比实时还慢，
-        # 听感就是「念一个词卡一下」。流式 + 一条文件是安全的（实测 RTF 0.62）。
+        # 整句合成同一时间最多 `synth_parallel` 条（实测 2 条并发每条只慢 10%，总吞吐
+        # 1.5 倍；3 条 1.7 倍、4 条 2.2 倍）。以前只跑 1 条：一条 20 字要合成 4 秒，
+        # 而前一句只播 3.5 秒，尾巴上的句子就只能干等，「后面几句卡」就是这么来的。
+        self.synth_parallel = max(1, int(cfg["tts"].get("synth_parallel", 2) or 2))
+        # 但首句还在流式吐音频的时候只许一条陪跑：三条一起挤 GPU，流式那条会掉到
+        # 实时以下，第一句就变成「念两个词停一下」。等首句的音频全到手了再放开。
+        # 按「第几代」记，不是简单的布尔：上一代的流收尾时不能把这一代的额度提前放开。
+        self.stream_done_gen = -1
+        self.synth_gate = threading.Condition()
+        self.synth_busy = 0     # 正在合成几条（也是「句间空档」监测用的）
+        self.play_end_at = 0.0  # 上一句声音什么时候结束（量句间空档用）
+        # 句子两头留多少静音：GPT-SoVITS 每句后面拖 0.35~0.56 秒，留原样的话
+        # 每接一句就多出半秒空白，听着像「一句一句往外蹦」。只掐两头，句中不动。
+        self.tts_tight_edges = bool(cfg["tts"].get("tight_sentence_edges", True))
+        # 这条锁留给「流式独占」和退路用：流式请求和整句合成偶尔还要互斥一下。
         self.synth_lock = threading.Lock()
         self.first_byte_ewma = 0.0      # 流式首字节平均耗时（秒）
         self.synth_ewma = 0.0           # 非流式整句合成平均耗时（秒）
@@ -470,6 +487,7 @@ class SpeechPipeline:
         os.makedirs(self.audio_dir, exist_ok=True)
         os.makedirs(self.phrase_dir, exist_ok=True)
         workers = max(1, int(cfg["tts"].get("synth_workers", 2)))
+        workers = max(workers, self.synth_parallel)
         for i in range(workers):
             threading.Thread(target=self._synth_loop, name="synth-%d" % i, daemon=True).start()
         threading.Thread(target=self._play_loop, name="player", daemon=True).start()
@@ -518,12 +536,12 @@ class SpeechPipeline:
                 # 否则每一句都被当流式、也绕过了「等首句开声」的让路逻辑。
                 if gen not in self._first_idx:
                     self._first_idx[gen] = idx
+                # 新一轮：先清掉上一轮的开声标记再入队
+                if self._cue_gen != gen:
+                    self._cue_gen = gen
+                    self.first_audio_started.clear()
             self.pending.put((idx, gen, s, tag))
             n += 1
-        # 新一轮的第一句入队：清掉上一轮的开声标记
-        if first_of_gen is not None and self._cue_gen != gen:
-            self._cue_gen = gen
-            self.first_audio_started.clear()
         return n
 
     def _gen_first_idx(self, gen: int):
@@ -733,6 +751,8 @@ class SpeechPipeline:
                         pass
             if not self.first_audio_started.is_set():
                 self._mark_first_audio(gen)
+            # 首句的音频已经全到手了：放开并发的合成额度，后面的句子两条一起上。
+            self._mark_stream_done(gen)
             # 音频已经全进播放队列了：现在放开 GPU，后面的句子可以开始合成/开流，
             # 正好赶在这句还没播完的时候接上。
             if lock_held:
@@ -747,9 +767,10 @@ class SpeechPipeline:
                 pcm_q.put(None, timeout=5)
             except queue.Full:
                 pass
+            t_put = time.time()
             # 等这段播完再返回，下一句才接得上；被打断时最多等 5 秒
             writer_done.wait(timeout=max(5.0, played + 5.0))
-            log.info("这一小句说完：%.2fs 音频", played)
+            log.info("这一小句说完：%.2fs 音频（收队 %.2fs）", played, time.time() - t_put)
             with self.lock:
                 if gen != self.generation:
                     return "cancelled", played
@@ -760,20 +781,37 @@ class SpeechPipeline:
         finally:
             if lock_held:
                 self.synth_lock.release()
+            # 流式这条路不管成没成，都别再让别人干等着额度
+            self._mark_stream_done(gen)
             if stream is not None:
                 try:
+                    t_stop = time.time()
                     stream.stop()
+                    t_closed = time.time()
                     stream.close()
+                    # 这两步会等声卡把缓冲里剩下的放完：偶尔会拖出一大截，
+                    # 那段时间播放线程也在里面，听感就是「一句之后空了半拍」。
+                    stop_s, close_s = t_closed - t_stop, time.time() - t_closed
+                    if stop_s + close_s > 0.3:
+                        log.info("流式收尾用了 %.2fs（stop %.2fs / close %.2fs）",
+                                 stop_s + close_s, stop_s, close_s)
                 except Exception:  # noqa: BLE001
                     pass
             self.current_stream = None
+            t_resp = time.time()
             try:
                 resp.close()
             except Exception:  # noqa: BLE001
                 pass
+            t_close = time.time()
             with self.lock:
                 if gen == self.generation and played > 0.2:
                     self.spoken_sentences += 1
+            t_lock = time.time()
+            # 收尾这三步（关响应 / 抢锁 / 记数）任何一步拖住，都会让下一句晚开口。
+            if t_lock - t_resp > 0.3 or t_close - t_resp > 0.3:
+                log.info("流式收尾明细：关响应 %.2fs / 抢锁 %.2fs",
+                         t_close - t_resp, t_lock - t_close)
 
     def _prefetch_next(self, gen: int) -> None:
         """上一句的音频已经吐完、GPU 空着：把下一句的流式请求先开出去，
@@ -862,6 +900,27 @@ class SpeechPipeline:
                 self.vision_total_last = total
                 self._vision_totals.append(total)
                 self._vision_req_at = 0.0
+
+    def _mark_stream_done(self, gen: int) -> None:
+        """首句的流式音频已经全部到手（或根本没有流）：这一代可以放开并发了。"""
+        with self.synth_gate:
+            self.stream_done_gen = max(self.stream_done_gen, gen)
+            self.synth_gate.notify_all()
+
+    def _synth_slot(self, gen: int) -> None:
+        """领一个合成额度：这一代的流还没吐完时只有 1 个，之后 synth_parallel 个。"""
+        with self.synth_gate:
+            while True:
+                cap = self.synth_parallel if self.stream_done_gen >= gen else 1
+                if self.synth_busy < cap:
+                    self.synth_busy += 1
+                    return
+                self.synth_gate.wait(timeout=0.5)
+
+    def _synth_slot_done(self) -> None:
+        with self.synth_gate:
+            self.synth_busy = max(0, self.synth_busy - 1)
+            self.synth_gate.notify_all()
 
     def interrupt(self) -> None:
         """停掉当前播放、丢掉还没播的句子与临时音频。"""
@@ -1173,6 +1232,7 @@ class SpeechPipeline:
                         self.cond.notify_all()
                         if idx == self._gen_first_idx(gen):
                             self.first_audio_started.set()
+                            self._mark_stream_done(gen)   # 首句是缓存文件，没有流要保护
                 continue
             # 第一句一律走流式：整句合成要 1～2 秒，流式首字节 0.5 秒就能开口。
             # 以前短句会退到整句合成，结果就是「文字都出来了，声音还要再等一两秒」。
@@ -1190,11 +1250,23 @@ class SpeechPipeline:
             # 而那点合成时间正好落在第一小句还在说话的时候。
             if idx != self._gen_first_idx(gen):
                 self.first_audio_started.wait(timeout=1.5)
+            if idx == self._gen_first_idx(gen):
+                # 首句本来就该走整句合成（后端不支持流式）：那就没有流要保护，
+                # 后面几句直接放开并发。
+                self._mark_stream_done(gen)
+            # 并发额度：首句还在吐音频时只给 1 条，吐完了才放到 synth_parallel 条。
+            # 一条 20 字的句子合成要 4 秒，播出来只有 3.5 秒——只跑一条的话越往后
+            # 越跟不上，尾巴上那几句只能干等，听感就是「后面几句卡」。
+            self._synth_slot(gen)
             try:
-                with self.synth_lock:
-                    path = self._synthesize(sentence)
+                with self.lock:
+                    if gen != self.generation:      # 等额度的时候被新的一段话顶掉了
+                        continue
+                path = self._synthesize(sentence)
             except Exception as exc:
                 log.warning("合成失败(%s): %s | %s", tag, exc, sentence[:30])
+            finally:
+                self._synth_slot_done()
             with self.cond:
                 if gen != self.generation:
                     if path:
@@ -1370,11 +1442,23 @@ class SpeechPipeline:
                         gen, path, stream_text = self.ready.pop(idx)
                         self.play_next += 1
                         break
+
                     self.cond.wait(timeout=0.5)
+            # 跟上一次开口之间隔了多久（0 = 接着上一句，没断）：
+            # 这就是「后面几句卡」的量，别的都是猜。
+            lead = (time.time() - self.play_end_at) if self.play_end_at else 0.0
+
+            # 「后面几句卡」的量化指标：这一句开口之前，上一句早就念完了，中间是空的。
+            # 只算同一段话里的空档（这一轮是在上一句念完之前就喂进来的），
+            # 两段话之间闲着的那几秒不算。
+            if (0.35 < lead < 8 and self.last_feed_at < self.play_end_at
+                    and (self.pending.qsize() > 0 or self.synth_busy > 0)):
+                log.info("句间空档 %.2fs（后面那句还没合成好）", lead)
             if stream_text:
                 status, played = self._play_stream(
                     stream_text, gen, first=(idx == self._gen_first_idx(gen)), idx=idx
                 )
+                self.play_end_at = time.time()
                 if status in ("ok", "cancelled"):
                     continue
                 with self.lock:
@@ -1405,7 +1489,25 @@ class SpeechPipeline:
                     continue
             try:
                 self._mark_first_audio(gen)
+                # 句首句尾的静音剪到很短：GPT-SoVITS 每句前面垫 0.06~0.2 秒、后面拖
+                # 0.35~0.56 秒，一句一句排下来，每接一句就多出半秒空白——听着就是
+                # 「一句一句往外蹦」。只掐两头，句中一个字都不动。
+                if self.tts_tight_edges:
+                    self._trim_silence(
+                        path,
+                        head_pad=float(self.cfg["tts"].get("sentence_head_pad", 0.03) or 0.0),
+                        tail_pad=float(self.cfg["tts"].get("sentence_tail_pad", 0.08) or 0.0),
+                    )
+                # 记一下这句多长：查「哪一句后面空了一下」就靠它和上面那行空档日志对时间
+                dur = 0.0
+                try:
+                    with wave.open(path, "rb") as _w:
+                        dur = _w.getnframes() / float(_w.getframerate() or 1)
+                except Exception:  # noqa: BLE001
+                    pass
+                log.info("念第%d句：%.2fs 音频（跟上一句隔着 %.2fs）", idx, dur, lead)
                 winsound.PlaySound(path, winsound.SND_FILENAME)  # 阻塞；被打断时会被 PlaySound(None) 截断
+                self.play_end_at = time.time()
                 with self.lock:
                     if gen == self.generation:
                         self.spoken_sentences += 1
@@ -2596,12 +2698,17 @@ class Gateway:
                 # 只有第一小句走流式（要它最快开口），后面的照常整句合成——
                 # 流式那套分块出来的音质差一截，老大嫌不好听。
                 while True:
-                    # 前三段都按标点切（。！？；，、：… 都算），够 8 个字就切：
+                    # 前三段都按标点切（。！？；，、：… 都算），够长就切：
                     # 前几段要的是「快点开口」，切碎了先播出去，后面再慢慢合成。
+                    # 但第一段要更长一点（first_min_chars，默认 24 字 ≈ 5.5 秒音频）：
+                    # 第一段太短（8 字只有 1.6 秒）的话，等它念完第二句还没合成好，
+                    # 中间就空一下——「后面几句卡」最早那一空就是这么来的。
                     early = int(self.cfg["tts"].get("early_sentences", 3) or 3)
                     early_min = int(self.cfg["tts"].get("early_min_chars", 8) or 8)
+                    first_min = int(self.cfg["tts"].get("first_min_chars", 24) or 24)
                     if fed_count < early:
-                        sentence, rest = take_first_sentence(buf, early_min)
+                        need = max(early_min, first_min) if fed_count == 0 else early_min
+                        sentence, rest = take_first_sentence(buf, need)
                     else:
                         sentence, rest = take_ready_sentence(buf, 6)
                     if not sentence:
