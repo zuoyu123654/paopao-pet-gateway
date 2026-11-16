@@ -2615,6 +2615,16 @@ class Gateway:
 
         parts = []
         text = prompt or "看看老大现在屏幕上是什么，用你的人设口吻说一两句。"
+        # 这条捷径原来没有窗口信息，认游戏/番剧全靠猜，顺手把前台也带上
+        app = title = ""
+        try:
+            from video_watch import foreground
+
+            app, title = foreground()
+        except Exception:  # noqa: BLE001
+            pass
+        if title or app:
+            text = "（老大当前前台应用为 %s | %s）\n%s" % (app or "?", title or "?", text)
         if n and grid_b64:
             parts.append({"type": "text", "text": "刚才 %d 帧（每秒一张）拼成的 2×2，左上→右下按时间。" % n})
             parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + grid_b64}})
@@ -2633,6 +2643,13 @@ class Gateway:
         watching = self.mode.get()
         if self.cfg.get("watch_focus", True) and watching in WATCH_MODES:
             messages.append({"role": "system", "content": build_watch_focus(watching)})
+        # 「先看清再说话」和作品小抄，这条路也不能少（它不走 prepare）
+        if self.cfg.get("see_howto", True):
+            messages.append({"role": "system", "content": build_see_howto()})
+        note = title_hint(app, title)
+        if note:
+            messages.append({"role": "system", "content": (
+                "【这个作品你认识】%s\n（这是你自己的印象，顺着聊就行，别背简介、别逐字念。）" % note)})
         messages.append({"role": "user", "content": parts})
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
                    "messages": messages, "max_tokens": 400, "stream": False}
