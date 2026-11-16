@@ -1031,6 +1031,49 @@ msedge.exe --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\paopao-ed
 - 历史兜底的 `progress` 只在网页播放器定期上报时更新，**拖进度条/刚打开时可能还是旧的**；
 - 同一个 Edge 窗口里开多个视频标签时，只认「URL 像视频页」的第一个，切标签可能认错——真遇到再说。
 
+### 4.2q 方案 A（浏览器扩展）也做好了，现在是第一优先（2026-11-17）
+
+老大试了 B 之后说「这方案好像不行，还不如 A」，于是 A 也做了。**两条并存，扩展优先。**
+
+**扩展长什么样**：`D:\app1\paopao_pet_gateway\browser_ext\`（MV3，三个文件 + README）
+
+| 文件 | 干什么 |
+|---|---|
+| `manifest.json` | 只在视频站生效：bilibili / YouTube / 爱奇艺 / 优酷 / 芒果 / 腾讯视频 / 抖音；只授权 `http://127.0.0.1:9888/*` |
+| `content.js` | 每秒读一次页面里的 `<video>`：`url / title / currentTime / duration / paused / fullscreen / visible`，发给后台 |
+| `background.js` | service worker 把收到的 POST 给网关 `/player`（放在后台是为了绕开页面跨域） |
+
+**装它**（三下，不用重启浏览器）：`edge://extensions` → 开发人员模式 → 加载解压缩的扩展 → 选 `browser_ext`。
+或者跑 `install-browser-ext.ps1`（帮你把扩展页和文件夹都打开）。
+本机任务栏那个 Edge 快捷方式已经把 `--load-extension=…\browser_ext` 加进去了（原始参数备份在
+`logs\edge-shortcuts-backup.json`），下次启动 Edge 自动带上；公共桌面那个因权限没改，不影响。
+
+**网关这边**：`POST /player` 收上报，`PlayerWatch.push_ext()` 存一份；`GET /player` 返回当前状态给扩展自检。
+现在是**四层来源**，优先级从高到低：
+
+| 顺序 | 来源 | 精度 | 需要什么 |
+|---|---|---|---|
+| 1 | **浏览器扩展（A）** | 秒级 | 装一次扩展 |
+| 2 | CDP 调试端口（B） | 秒级 | Edge 带 `--remote-debugging-port=9222`（默认配置开不了，见 4.2p） |
+| 3 | B站历史进度 | 晚十几秒 | B站登录态（现成的） |
+| 4 | 环回转写 / 字幕 OCR | 8 秒 / 2 秒 | 系统声音能被环回录到 |
+
+拿到 bvid 之后的字幕流程跟 4.2p 一样（`bili video subtitle` + 90 秒窗口 + 本地缓存 24h）。
+
+**实测（2026-11-17 03:4x）**：用临时配置的 Edge 带 `--load-extension` 打开
+`bilibili.com/video/BV16cWd6pEBh`，2 秒内 `/status.player` 就变成：
+
+```
+source: ext | position: 0:11 | duration: 1:47 | bvid: BV16cWd6pEBh
+title: 『原神』7.3前瞻日期确定…
+```
+
+**隐私边界**：扩展只报「地址、标题、进度、暂停、全屏、可见」，不读 DOM、不改页面、只发到 127.0.0.1:9888；
+而且只在上面那七个视频站生效。
+
+**排障**：`/status.player.connected=false` → 扩展没启用/页面不是视频站/视频没播；
+扩展没装或关掉时会自动退到 CDP → B站历史 → 转写。
+
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
 做过、试过、撤了。经过记在这里，免得后人又走一遍：

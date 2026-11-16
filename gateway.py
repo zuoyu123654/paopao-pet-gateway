@@ -3494,6 +3494,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/status"):
             self._handle_status()
             return
+        if self.path.startswith("/player"):
+            # 浏览器扩展（方案 A）每秒钟推一小段进度；GET 是给它自检用的
+            self._send_json({"ok": True, "player": getattr(GATEWAY, "player", None).status()
+                             if getattr(GATEWAY, "player", None) else None})
+            return
         if self.path.startswith("/titles"):
             # 现在小抄里有什么 / 存哪儿（改了文件按 mtime 自动重载）
             notes = title_notes(refresh=True)
@@ -3525,6 +3530,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_lookself()
         elif path.endswith("/look"):
             self._handle_look()
+        elif path.endswith("/player"):
+            self._handle_player()
         elif path.endswith("/divination"):
             self._handle_divination()
         elif path.endswith("/mode"):
@@ -3575,6 +3582,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, 500)
             return
         self._send_json({"ok": bool(reply), "reply": reply[:300]})
+
+    def _handle_player(self):
+        """浏览器扩展推上来的播放进度（方案 A）：{url,title,t,d,paused,fullscreen,visible}。"""
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"ok": False, "error": "bad json"}, 400)
+            return
+        player = getattr(GATEWAY, "player", None)
+        if player is None:
+            self._send_json({"ok": False, "error": "播放器跟踪没启动"}, 503)
+            return
+        player.push_ext(req)
+        self._send_json({"ok": True})
 
     def _handle_look(self):
         """主动让她看一眼：按一次「看看屏幕」，等她真的看（识屏计数涨）。"""

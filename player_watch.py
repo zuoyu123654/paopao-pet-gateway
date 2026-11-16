@@ -66,6 +66,8 @@ class PlayerWatch(threading.Thread):
             os.environ.get("APPDATA", ""), "bili-cli", "credential.json"))
         self._history_at = 0.0
         self._history_state: dict = {}
+        # 浏览器扩展（方案 A）推上来的状态：{url,title,t,d,paused,fullscreen,visible,at}
+        self._ext_state: dict = {}
         os.makedirs(self.cache_dir, exist_ok=True)
 
         self.lock = threading.Lock()
@@ -304,7 +306,35 @@ class PlayerWatch(threading.Thread):
         return items
 
     # ------------------------------------------------------------ 对外
+    def push_ext(self, data: dict) -> None:
+        """浏览器扩展（方案 A）推上来的一条状态。"""
+        try:
+            url = str(data.get("url") or "")
+            bv = BV_RE.search(url)
+            page = PAGE_RE.search(url)
+            t = data.get("t")
+            d = data.get("d")
+            self._ext_state = {
+                "url": url,
+                "title": str(data.get("title") or "")[:100],
+                "t": float(t) if isinstance(t, (int, float)) else 0.0,
+                "d": float(d) if isinstance(d, (int, float)) else 0.0,
+                "paused": data.get("paused"),
+                "fullscreen": bool(data.get("fullscreen")),
+                "visible": bool(data.get("visible", True)),
+                "bvid": bv.group(1) if bv else "",
+                "page": int(page.group(1)) if page else 1,
+                "source": "ext",
+                "at": time.time(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = "ext: %s" % exc
+
     def snapshot(self) -> dict:
+        # 优先级：扩展（方案 A，最准、任何站点）→ CDP（方案 B）→ B站历史兜底
+        ext = dict(self._ext_state)
+        if ext and time.time() - ext.get("at", 0) <= self.fresh:
+            return ext
         with self.lock:
             st = dict(self.state)
         if st and time.time() - st.get("at", 0) <= self.fresh:
@@ -374,6 +404,7 @@ class PlayerWatch(threading.Thread):
             "enabled": self.enabled,
             "port": self.port,
             "connected": bool(st),
+            "source": st.get("source") or ("cdp" if st else ""),
             "error": self.last_error,
             "url": (st.get("url") or "")[:80],
             "title": (st.get("title") or "")[:40],
