@@ -3602,6 +3602,12 @@ class Gateway:
             if block:
                 messages.insert(0, {"role": "system", "content": block})
                 log.info("注入识屏：近况 %d 条 + 摘要 %d 字", len(rows), len(digest))
+        # 自动/普通模式下的识屏：说清「这是你自己瞥了一眼」，别当成老大在跟她说话
+        if scenario == "vision" and self.mode.get() in ("auto", "normal"):
+            messages.insert(0, {"role": "system", "content":
+                "【此刻】老大没叫你，是你自己瞥了一眼屏幕（自动模式）。别问「你叫我？」"
+                "「有事吗」这种话，也别把自己当被点名；看到什么就直接说，一两句。"})
+
         # 看片/看番/看直播/网课/打游戏：这一轮只聊内容，不提时间，不念字幕（游戏不念界面文字）。
         # 放在最后 insert(0)，所以它是整段对话最前面那条 system（最有分量）。
         if scenario == "vision" and self.cfg.get("watch_focus", True):
