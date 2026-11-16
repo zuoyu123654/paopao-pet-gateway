@@ -3136,6 +3136,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/status"):
             self._handle_status()
             return
+        if self.path.startswith("/titles"):
+            # 现在小抄里有什么 / 存哪儿（改了文件按 mtime 自动重载）
+            notes = title_notes(refresh=True)
+            self._send_json({"ok": True, "count": len(notes), "items": notes,
+                             "path": TITLES_PATH})
+            return
         if self.path.startswith("/doctor"):
             self._handle_doctor()
             return
@@ -3171,6 +3177,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_bubble()
         elif path.endswith("/warm"):
             self._handle_warm()
+        elif path.endswith("/titles"):
+            self._handle_titles()
         elif path.endswith("/voice/input"):
             self._handle_voice_input()
         elif path.endswith("/voice"):
@@ -3294,11 +3302,23 @@ class Handler(BaseHTTPRequestHandler):
         day_start = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
         rows = [r for r in g.ledger.rows() if r.get("epoch", 0) >= day_start]
         frames = len(g.frames.buf)
+        # 前台是谁、小抄里有没有：想确认「她认得出现在这个吗」看这一项
+        front = {"app": "", "title": "", "note": "", "hit": False}
+        try:
+            from video_watch import foreground
+
+            app, title = foreground()
+            front.update({"app": app, "title": title,
+                          "note": title_hint(app, title), "hit": bool(title_hint(app, title))})
+        except Exception:  # noqa: BLE001
+            pass
         self._send_json({
             "ok": True,
             "mode": g.mode.get(),
             "mode_since": g.mode.since,
             "mode_source": g.mode.source,
+            "front": front,
+            "titles": len(title_notes()),
             "frames": frames,
             "precue": len(getattr(g.speech, "cue_paths", []) or []),
             "digest_chars": len(str(g.ledger.digest().get("text") or "")),
@@ -3406,6 +3426,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         reply = GATEWAY.voice_reply(text)
         self._send_json({"ok": bool(reply), "reply": reply[:300]})
+
+    def _handle_titles(self):
+        """往作品小抄里加/改条目：POST {"绝区零": "一句话说明"}，存盘即生效（热重载）。"""
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"error": "bad json"}, 400)
+            return
+        items = req.get("items") if isinstance(req.get("items"), dict) else req
+        if not isinstance(items, dict) or not items:
+            self._send_json({"ok": False, "error": "给我 {作品名: 一句话说明}"}, 400)
+            return
+        try:
+            with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except Exception:  # noqa: BLE001
+            data = {}
+        added = []
+        for key, val in items.items():
+            key = str(key).strip()
+            if not key or key == "items":
+                continue
+            data[key] = str(val).strip()
+            added.append(key)
+        tmp = TITLES_PATH + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(tmp, TITLES_PATH)
+        except OSError as exc:
+            self._send_json({"ok": False, "error": "写不进去：%s" % exc}, 500)
+            return
+        title_notes(refresh=True)
+        log.info("作品小抄加了 %d 条：%s", len(added), "、".join(added[:6]))
+        self._send_json({"ok": True, "added": added, "count": len(data)})
 
     def _handle_warm(self):
         """重新预热固定句子（DSH 状态、气泡文案）；force=true 时先删缓存重合成。"""
