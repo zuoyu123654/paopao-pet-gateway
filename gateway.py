@@ -3310,8 +3310,11 @@ class Gateway:
         """
         if not self.cfg.get("mode_feedback", True):
             return
-        # 游戏就一句（手动点、自动进都用它），不再分两版
-        text = fixed_phrases.MODE_PHRASES.get(mode, "")
+        # 每个模式备两句，随机挑一句（都预合成好了，零等待）
+        choices = fixed_phrases.MODE_PHRASES.get(mode) or []
+        if not choices:
+            return
+        text = random.choice(list(choices))
         if not text:
             return
         try:

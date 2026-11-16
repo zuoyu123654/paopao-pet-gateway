@@ -168,10 +168,10 @@ class TrayMenu(QObject):
             else:
                 payload["source"] = "tray"
             self._post("/mode", payload)
-        else:
-            self._post("/voice", {"action": "set_mode", "mode": key})
-        self._feedback("watch_off" if (kind == "watch" and key == "off")
-                       else ("voice_off" if (kind == "voice" and key == "off") else key))
+            # 气泡交给网关：它要随机挑那句提示，跟语音保持一致（这里再冒一个就会打架）
+            return
+        self._post("/voice", {"action": "set_mode", "mode": key})
+        self._feedback("voice_off" if key == "off" else key)
 
     def _on_activated(self, reason) -> None:
         """左键单击：直接开关语音电话。"""

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""固定文案：语音模式的三句气泡 + 托盘切换的反馈。
+"""固定文案：语音模式的三句气泡 + 模式切换的提示。
 
 放一处是为了**预合成**：这些都是固定句子，启动时合成好，播的时候直接用缓存，
 不再当场等 TTS（第一句流式再快也要 300ms 起步）。
+
+2026-11-17 改：每个模式**备两句**，切换时随机挑一句说（老大要的），
+而且句子里**不出现「XX 模式」**这种机器人腔。
 """
 from __future__ import annotations
 
@@ -13,47 +16,70 @@ HEARD_NOTHING = "没听清，再说一遍？"
 STUCK = "我这会儿有点卡壳…"
 VOICE_OFF_HINT = "语音关着呢"
 
-# 托盘菜单切换后的反馈（默认 3.2 秒气泡）
-# 别写「XX模式」这种词——听起来像机器在报告状态（老大 2026-11-17 说的）。
+# 托盘里语音那几项的反馈（这几个不走网关，气泡小工直接冒）
 TRAY_FEEDBACK = {
-    "auto": "好，我自己看着来。",
-    "video": "哦，刷B站视频啊。",
-    "anime": "哦，看番去啦。",
-    "game": "哦，打上了呀——那我蹲旁边陪你打，不吵你。",
-    "generic": "哦，看视频啊。",
     "voice_off": "语音关掉了。",
     "ptt": "按键说话，Ctrl+Alt+V。",
     "call": "语音电话开着呢。",
-    "watch_off": "行，不看了。",
 }
+
 MODE_TIMEOUT = "回自动了"
-# 每次模式切换都播一句（老大 2026-11-17 要的：切换必须有提示音 + 气泡）
-MODE_BACK = "好，我自己看着来。"
-LIVE_ON = "哦，看直播啊。"
-COURSE_ON = "哦，上课时间。"
-# 进游戏模式只有这一句（手动点、自动进都用它，不再分两版）
-GAME_ON = "哦，打上了呀——那我蹲旁边陪你打，不吵你。"
-GAME_OFF = "不打啦？那我先眯一会儿。"
-MODE_PHRASES = {
-    "auto": MODE_BACK,
-    "normal": MODE_BACK,
-    "off": "行，不看了。",
-    "video": TRAY_FEEDBACK["video"],
-    "anime": TRAY_FEEDBACK["anime"],
-    "live": LIVE_ON,
-    "course": COURSE_ON,
-    "game": GAME_ON,
+
+# 每个模式两句，随机挑一句（都要预合成）
+MODE_PHRASES: dict[str, list[str]] = {
+    "auto": [
+        "好，我自己看着来。",
+        "行，那我继续自己瞅。",
+    ],
+    "normal": [
+        "好，我自己看着来。",
+        "行，那我继续自己瞅。",
+    ],
+    "off": [
+        "行，不看了。",
+        "好，那我先不看了。",
+    ],
+    "video": [
+        "哦，刷B站视频啊。",
+        "哦，看视频呢，我跟你一块儿看。",
+    ],
+    "anime": [
+        "哦，看番去啦。",
+        "哦，看番啊，那我跟着看。",
+    ],
+    "live": [
+        "哦，看直播啊。",
+        "哦，直播开了，我陪你唠。",
+    ],
+    "course": [
+        "哦，上课时间。",
+        "哦，上网课啊，我跟着听。",
+    ],
+    "game": [
+        "哦，打上了呀——那我蹲旁边陪你，边打边聊。",
+        "哦，开局了？我在这儿陪你，顺便点评两句。",
+    ],
 }
+
+# 自动进游戏时的那两句（本来想单独一版，老大说只留一句口径：随机就行）
+GAME_ON = MODE_PHRASES["game"]
+GAME_OFF = ["不打啦？那我先眯一会儿。", "哦，收工了？那我先歇会儿。"]
 # 跟着桌宠「主动识屏」开关走的两句：
 # 开 → 桌宠那边已经有气泡了，我们只出声（用她那句原文）
 # 关 → 桌宠那边没气泡，我们既出声也冒泡
 PROACTIVE_ON = "主动识屏已开启，我会偶尔看看你正在用的软件。"
 PROACTIVE_OFF = "行，不看了"
 
+
+def _flat() -> list[str]:
+    out = [THINKING, HEARD_NOTHING, STUCK, VOICE_OFF_HINT, MODE_TIMEOUT,
+           PROACTIVE_ON, PROACTIVE_OFF]
+    out += list(TRAY_FEEDBACK.values())
+    for phrases in MODE_PHRASES.values():
+        out += phrases
+    out += GAME_OFF
+    return out
+
+
 # 全部要预合成的固定句子
-ALL = (
-    [THINKING, HEARD_NOTHING, STUCK, VOICE_OFF_HINT, MODE_TIMEOUT, PROACTIVE_ON, PROACTIVE_OFF,
-     GAME_ON, GAME_OFF, LIVE_ON, COURSE_ON, MODE_BACK]
-    + list(TRAY_FEEDBACK.values())
-    + list(MODE_PHRASES.values())
-)
+ALL = tuple(dict.fromkeys(_flat()))     # 去重但保序
