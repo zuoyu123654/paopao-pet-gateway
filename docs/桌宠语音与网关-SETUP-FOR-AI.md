@@ -1074,6 +1074,45 @@ title: 『原神』7.3前瞻日期确定…
 **排障**：`/status.player.connected=false` → 扩展没启用/页面不是视频站/视频没播；
 扩展没装或关掉时会自动退到 CDP → B站历史 → 转写。
 
+
+#### 4.2q.1 桌面快捷方式 + 给别人的一键装法（2026-11-17 补）
+
+**为什么改的是「用户桌面」的快捷方式**：本机桌面那个 `Microsoft Edge.lnk` 实际在 **公共桌面**
+（`C:\Users\Public\Desktop`），属主是 `BUILTIN\Administrators`，普通权限存不进去（实测
+`Unable to save shortcut`）。所以做法是：**在用户桌面放一个同名 lnk**
+（`%USERPROFILE%\Desktop\Microsoft Edge.lnk`），资源管理器会优先用它，桌面上还是那一个图标，
+点下去就带 `--load-extension`。公共桌面那个原样不动，随时可还原（删用户桌面那个就行）。
+
+**`make-edge-shortcut.ps1`（打包在网关目录里）**：
+
+- 自己找 Edge 路径（x86 / 非 x86 都试）、自己算 `browser_ext` 的绝对路径（装到哪都行）；
+- **幂等**：参数里已经有 `--load-extension` 就不再动；
+- 会把原来的参数备份到 `logs\edge-shortcuts-backup.json`；
+- 写完打印生效的「目标 + 参数」，方便核对。
+
+**`install-browser-ext.ps1`（两个模式）**：
+
+| 用法 | 干什么 |
+|---|---|
+| `install-browser-ext.ps1` | 先跑 `make-edge-shortcut.ps1`，再把扩展文件夹和 `edge://extensions` 都弹出来，人点三下 |
+| `install-browser-ext.ps1 -RestartEdge` | **全自动**：改快捷方式 → 关掉 Edge（先关窗口，3 秒后强杀）→ 用桌面快捷方式重新启动（自带 `--load-extension`） |
+
+**AI 能不能全自动装好？** 能，但有个前提和一条边界：
+
+- 前提：**Edge 得是关着的**。`-RestartEdge` 就是替 AI 做「关掉再带参数启动」这件事；
+  注意它会关掉当前窗口，标签页不一定自动恢复，用之前要确认没开着要留的东西。
+- 边界：**不能在不重启浏览器的情况下把未打包扩展塞进去**。Chromium 没有「命令行动态加载扩展」的接口，
+  `edge://extensions` 那三下点击必须有人（或 AI 用 UI 自动化）做。所以：
+  - Edge 已关 / 允许重启 → 脚本全自动，一次到位；
+  - Edge 正在用、不想关 → 只能手动点三下（装一次就跟着 profile 走，以后不用再装）。
+
+**给别人装的时候**：包里已经有 `browser_ext/`、`make-edge-shortcut.ps1`、`install-browser-ext.ps1`，
+`install.ps1` 也加了第 5 步——默认**不动**别人的快捷方式，只打印两条命令；想一步到位就
+`install.ps1 -EdgeShortcut`。给 AI 的说法：
+
+> 装完网关后，跑 `install-browser-ext.ps1 -RestartEdge`（Edge 没开就不用加参数），
+> 然后打开 B站视频，`/status` 里 `player.source` 应该是 `ext`。
+
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
 做过、试过、撤了。经过记在这里，免得后人又走一遍：
