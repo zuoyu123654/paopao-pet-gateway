@@ -26,6 +26,24 @@ TRAY_FEEDBACK = {
     "watch_off": "行，不看了",
 }
 MODE_TIMEOUT = "回自动了"
+# 每次模式切换都播一句（老大 2026-11-17 要的：切换必须有提示音 + 气泡）
+MODE_BACK = "哦，回自动了"
+LIVE_ON = "哦，看直播啊。"
+COURSE_ON = "哦，上课时间。"
+MODE_PHRASES = {
+    "auto": MODE_BACK,
+    "normal": MODE_BACK,
+    "off": "行，不看了",
+    "video": TRAY_FEEDBACK["video"],
+    "anime": TRAY_FEEDBACK["anime"],
+    "live": LIVE_ON,
+    "course": COURSE_ON,
+    "game": TRAY_FEEDBACK["game"],
+}
+# 自动进「玩游戏」模式时说的那一句（老大 2026-11-17 要的：预存好，别当场合成）
+# 语气：认出来了、愿意陪玩、不吵他、也不催时间。
+GAME_ON = "哦，打上了呀——那我蹲旁边陪你打，不吵你。"
+GAME_OFF = "不打啦？那我先眯一会儿。"
 # 跟着桌宠「主动识屏」开关走的两句：
 # 开 → 桌宠那边已经有气泡了，我们只出声（用她那句原文）
 # 关 → 桌宠那边没气泡，我们既出声也冒泡
@@ -34,6 +52,8 @@ PROACTIVE_OFF = "行，不看了"
 
 # 全部要预合成的固定句子
 ALL = (
-    [THINKING, HEARD_NOTHING, STUCK, VOICE_OFF_HINT, MODE_TIMEOUT, PROACTIVE_ON, PROACTIVE_OFF]
+    [THINKING, HEARD_NOTHING, STUCK, VOICE_OFF_HINT, MODE_TIMEOUT, PROACTIVE_ON, PROACTIVE_OFF,
+     GAME_ON, GAME_OFF, LIVE_ON, COURSE_ON, MODE_BACK]
     + list(TRAY_FEEDBACK.values())
+    + list(MODE_PHRASES.values())
 )

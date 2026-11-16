@@ -174,5 +174,6 @@
     "skip_black_frames": true,
     "vision_black_ratio": 0.92,
     "vision_black_frames": 2,
-    "fix_black_request_image": true
+    "fix_black_request_image": true,
+    "mode_feedback": true
 }

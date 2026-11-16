@@ -2061,6 +2061,7 @@ class Mode:
         self.value = "auto"
         self.source = "default"
         self.since = time.time()
+        self.on_change = None       # 切换成功后的回调（网关挂上去，播提示音 + 气泡）
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -2098,7 +2099,9 @@ class Mode:
         mode = (mode or "").strip().lower()
         if mode not in ("auto", "normal", "video", "anime", "live", "course", "game", "off"):
             raise ValueError("mode 只能是 auto/normal/video/anime/live/course/game/off")
+        changed = False
         with self.lock:
+            changed = mode != self.value
             self.value = mode
             self.source = source
             self.since = time.time()
@@ -2108,7 +2111,13 @@ class Mode:
                     json.dump(data, f, ensure_ascii=False)
             except OSError:
                 pass
-            return data
+        # 回调放在锁外面：它要播语音、弹气泡，里面还会再读 mode
+        if changed and callable(getattr(self, "on_change", None)):
+            try:
+                self.on_change(mode, source)
+            except Exception as exc:  # noqa: BLE001
+                log.info("模式切换提示出错（不影响切换）：%s", exc)
+        return data
 
 
 class TitleLearner(threading.Thread):
@@ -2311,6 +2320,7 @@ class GameWatcher(threading.Thread):
                 and now - self.last_seen > self.away_grace):
             self.gateway.mode.set("auto", source="auto-game")
             log.info("游戏模式：自动退出（切走 %.0f 秒）", now - self.last_seen)
+
 
 
 class FrameBuffer(threading.Thread):
@@ -2979,6 +2989,8 @@ class Gateway:
         self.digester = Digester(cfg, self.ledger, self)
         self.digester.start()
         self.mode = Mode(cfg)
+        # 每次模式真的变了，就播一句 + 冒个泡（两种都是预合成好的固定句子）
+        self.mode.on_change = self._announce_mode
         self.divination = DivinationWatcher(cfg, self.speech)
         self.last_vision_at = time.time()
         self.frames = FrameBuffer(cfg)
@@ -3290,6 +3302,29 @@ class Gateway:
         except Exception:  # noqa: BLE001
             pass
         return "你是泡泡，一只住在他电脑里的蓝色鲸鱼娘，只叫他老大。"
+
+    def _announce_mode(self, mode: str, source: str) -> None:
+        """模式一变就出声 + 冒泡（老大 2026-11-17 要的：每次切换都要有提示）。
+
+        这些都是 phrases.py 里的固定句子，启动时就预合成好了，播的时候零等待。
+        """
+        if not self.cfg.get("mode_feedback", True):
+            return
+        if mode == GAME_MODE and str(source).startswith("auto"):
+            text = fixed_phrases.GAME_ON          # 自动进游戏：更像在陪玩
+        else:
+            text = fixed_phrases.MODE_PHRASES.get(mode, "")
+        if not text:
+            return
+        try:
+            self.bubble.show(text, 3600)
+        except Exception as exc:  # noqa: BLE001
+            log.info("模式提示气泡没冒出来：%s", exc)
+        try:
+            self.speech.say(text, tag="mode")
+        except Exception as exc:  # noqa: BLE001
+            log.info("模式提示没说成：%s", exc)
+        log.info("模式提示：%s（%s / %s）", text, mode, source)
 
     # ------------------------------------------------- 角色对照（老大聊天里教的）
     CHARACTER_HINTS = ("头发", "穿", "戴", "那个", "这个", "不是", "记住", "是", "叫")
