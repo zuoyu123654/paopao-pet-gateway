@@ -112,7 +112,7 @@ DEFAULTS = {
     "frame_buffer": {
         "enabled": True,
         "interval_seconds": 1.0,
-        "keep": 5,
+        "keep": 8,
         "frame_width": 640,
         "jpeg_quality": 82,
         "grid_frames": 4,
@@ -124,6 +124,16 @@ DEFAULTS = {
     "watch_focus": True,
     # 识屏时先描述清楚场景、认得出作品就报名字（老大 2026-11-17 要的）
     "see_howto": True,
+    # 托盘选的模式锁几分钟：锁住期间自动判定不许动，到点只放开不退出
+    "mode_lock_minutes": 5,
+    # 前台是游戏稳着待够 enter_seconds 就自动进游戏模式（不看键鼠活跃度）
+    "game_watch": {
+        "enabled": True,
+        "poll_seconds": 5,
+        "enter_seconds": 120,
+        "away_grace_seconds": 180,
+        "game_apps": [],
+    },
     # 看到不认识的游戏/番剧，自己问一下写进 titles.json（作品小抄）
     "title_learner": {
         "enabled": True,
@@ -165,15 +175,18 @@ log = logging.getLogger("petgw")
 
 # --------------------------------------------------------------- 作品小抄（游戏/番剧）
 # 识别出「这是绝区零」之后她还得知道这游戏是啥，不然只会说「哦，绝区零啊」然后没话了。
-# 这张表就是给她的小抄：键是标题/进程名里能匹配到的名字，值是一句话说明。
+# 这张表就是给她的小抄：键是标题/进程名里能匹配到的名字。
+# 值可以是一句话（老格式），也可以是 {"kind": "game|anime|video", "note": "..."}——
+# kind 是给「游戏模式自动进」判断用的（前台是游戏才自动进）。
 TITLES_PATH = os.path.join(APP_DIR, "titles.json")
 _TITLE_NOTES: dict[str, str] = {}
+_TITLE_KINDS: dict[str, str] = {}
 _TITLE_MTIME = 0.0
 
 
 def title_notes(refresh: bool = False) -> dict[str, str]:
     """读 titles.json（改了不用重启，按修改时间自动重载）。"""
-    global _TITLE_NOTES, _TITLE_MTIME
+    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_MTIME
     try:
         mtime = os.path.getmtime(TITLES_PATH)
     except OSError:
@@ -182,30 +195,56 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
         try:
             with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
-            _TITLE_NOTES = {
-                str(k).strip().lower(): str(v).strip()
-                for k, v in (data or {}).items() if str(k).strip()
-            }
+            notes: dict[str, str] = {}
+            kinds: dict[str, str] = {}
+            for k, v in (data or {}).items():
+                key = str(k).strip().lower()
+                if not key:
+                    continue
+                if isinstance(v, dict):
+                    note = str(v.get("note") or "").strip()
+                    kind = str(v.get("kind") or "").strip().lower()
+                else:
+                    note, kind = str(v).strip(), ""
+                if note:
+                    notes[key] = note
+                    kinds[key] = kind
+            _TITLE_NOTES, _TITLE_KINDS = notes, kinds
             _TITLE_MTIME = mtime
         except Exception as exc:  # noqa: BLE001
             log.warning("titles.json 读不了（先不注入小抄）：%s", exc)
     return _TITLE_NOTES
 
 
-def title_hint(app: str = "", title: str = "") -> str:
-    """按窗口标题/进程名在这张小抄里找一条，找不到就返回空。"""
+def _title_key(app: str = "", title: str = "") -> str:
+    """命中哪一条（返回小写的键），没命中返回空串。"""
     notes = title_notes()
     if not notes:
         return ""
     hay = ("%s %s" % (app or "", title or "")).lower()
-    for key, note in notes.items():
+    for key in notes:
         if key and key in hay:
-            return note
+            return key
     return ""
 
 
+def title_hint(app: str = "", title: str = "") -> str:
+    """按窗口标题/进程名在这张小抄里找一条说明，找不到就返回空。"""
+    key = _title_key(app, title)
+    return title_notes().get(key, "") if key else ""
+
+
+def title_kind(app: str = "", title: str = "") -> str:
+    """这一条是什么类型：game / anime / video / 空（不知道）。"""
+    key = _title_key(app, title)
+    return _TITLE_KINDS.get(key, "") if key else ""
+
+
 def save_title_notes(updates: dict) -> int:
-    """把几条写进 titles.json（原子替换），返回写入后的总条数。"""
+    """把几条写进 titles.json（原子替换），返回写入后的总条数。
+
+    值可以是字符串，也可以是 {"kind": ..., "note": ...}；已有的条目原样保留。
+    """
     try:
         with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
@@ -215,7 +254,14 @@ def save_title_notes(updates: dict) -> int:
         data = {}
     for key, val in (updates or {}).items():
         key = str(key).strip()
-        if key and val:
+        if not key or not val:
+            continue
+        if isinstance(val, dict):
+            note = str(val.get("note") or "").strip()
+            kind = str(val.get("kind") or "").strip().lower()
+            if note:
+                data[key] = {"kind": kind, "note": note} if kind else note
+        else:
             data[key] = str(val).strip()
     tmp = TITLES_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -1929,6 +1975,25 @@ class Mode:
         with self.lock:
             return self.value
 
+    def release(self, why: str = "lock-timeout") -> None:
+        """锁到期但不退出：只把 source 标成 released，交给自动判定（老大 2026-11-17 要的）。
+
+        以前是「满 10 分钟直接回自动」，等于托盘选的模式被悄悄取消；现在改成
+        「锁 N 分钟，期间谁都不许动；到点就放开，由视频/游戏那些自动判定决定进还是退」。
+        """
+        with self.lock:
+            if not str(self.source).startswith("tray"):
+                return
+            self.source = "tray-released"
+            self.since = time.time()
+            data = {"mode": self.value, "source": self.source, "since": self.since}
+            try:
+                with open(self.path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+            except OSError:
+                pass
+        log.info("模式锁到期（%s），「%s」交回自动判定", why, self.value)
+
     def set(self, mode: str, source: str = "api") -> dict:
         mode = (mode or "").strip().lower()
         if mode not in ("auto", "normal", "video", "anime", "live", "course", "game", "off"):
@@ -2062,18 +2127,90 @@ class TitleLearner(threading.Thread):
             return
         name = str(obj.get("name") or "").strip()
         note = str(obj.get("note") or "").strip()
+        kind = str(obj.get("kind") or "").strip().lower()
         if not name or not note:
             return
-        updates = {name: note}
+        entry = {"kind": kind, "note": note}
+        updates = {name: entry}
         low_app = (app or "").lower().replace(".exe", "")
         if low_app and low_app not in self.BROWSER_LIKE:
-            updates.setdefault(low_app, note)   # 进程名也记一条，标题被吞也能命中
+            updates.setdefault(low_app, entry)   # 进程名也记一条，标题被吞也能命中
         try:
             total = save_title_notes(updates)
         except Exception as exc:  # noqa: BLE001
             log.warning("作品小抄：写不进去（%s）", exc)
             return
-        log.info("作品小抄：自动记下「%s」（%s，共 %d 条）", name, obj.get("kind"), total)
+        log.info("作品小抄：自动记下「%s」（%s，共 %d 条）", name, kind or "未知", total)
+
+
+class GameWatcher(threading.Thread):
+    """前台是游戏、并且**稳着待够 enter_seconds**，就自动进游戏模式（老大 2026-11-17 要的）。
+
+    判定只看两样：titles.json 里 kind=game 的作品，或者 config 里点名过的进程。
+    **不看键鼠活跃度**（老大专门说了不要这个条件）——挂着游戏看攻略也是在看游戏。
+    退出：窗口切走 / 游戏关掉，超过 away_grace 就回自动。模式被托盘锁住的期间不许动。
+    """
+
+    def __init__(self, cfg: dict, gateway):
+        super().__init__(name="game-watch", daemon=True)
+        conf = cfg.get("game_watch") or {}
+        self.cfg = cfg
+        self.gateway = gateway
+        self.enabled = bool(conf.get("enabled", True))
+        self.poll = max(3.0, float(conf.get("poll_seconds", 5)))
+        self.enter_seconds = max(10.0, float(conf.get("enter_seconds", 120)))
+        self.away_grace = max(30.0, float(conf.get("away_grace_seconds", 180)))
+        self.extra_apps = [str(x).strip().lower().replace(".exe", "")
+                           for x in (conf.get("game_apps") or []) if str(x).strip()]
+        self.first_seen = 0.0
+        self.last_seen = 0.0
+        self.app = ""
+
+    def _is_game(self, app: str, title: str) -> bool:
+        if title_kind(app, title) == "game":
+            return True
+        low = (app or "").lower().replace(".exe", "")
+        return bool(low) and low in self.extra_apps
+
+    def _locked(self) -> bool:
+        mode = self.gateway.mode
+        if str(mode.source).startswith("tray") and not str(mode.source).endswith("released"):
+            return True
+        return time.time() < getattr(self.gateway, "mode_lock_until", 0.0)
+
+    def run(self) -> None:
+        if not self.enabled:
+            return
+        while True:
+            time.sleep(self.poll)
+            try:
+                self._tick()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("游戏模式判定出错：%s", exc)
+
+    def _tick(self) -> None:
+        from video_watch import foreground
+
+        app, title = foreground()
+        now = time.time()
+        cur = self.gateway.mode.get()
+        if self._is_game(app, title):
+            self.last_seen = now
+            if self.app != app:
+                self.app, self.first_seen = app, now
+            if cur == "auto" and not self._locked():
+                if now - self.first_seen >= self.enter_seconds:
+                    self.gateway.mode.set(GAME_MODE, source="auto-game")
+                    log.info("游戏模式：自动进入（%s｜%s）", app, title[:40])
+            return
+        # 不是游戏了：只负责「自己自动进来的」那一次退出
+        self.app = ""
+        self.first_seen = 0.0
+        if (cur == GAME_MODE and self.gateway.mode.source == "auto-game"
+                and not self._locked() and self.last_seen
+                and now - self.last_seen > self.away_grace):
+            self.gateway.mode.set("auto", source="auto-game")
+            log.info("游戏模式：自动退出（切走 %.0f 秒）", now - self.last_seen)
 
 
 class FrameBuffer(threading.Thread):
@@ -2145,9 +2282,14 @@ class FrameBuffer(threading.Thread):
         return items[-n:] if n > 0 else items
 
     # ---- 拼图
-    def grid_jpeg(self) -> tuple[str, int]:
-        """把缓冲里前 N 张按时间拼成 2×2（左上→右下），返回 (base64, 张数)。"""
-        items = self.snapshot(self.grid_frames)
+    def grid_jpeg(self, count: int = 0, cols: int = 2) -> tuple[str, int]:
+        """把缓冲里前 N 张按时间拼成 cols 列的网格（左上→右下），返回 (base64, 张数)。
+
+        游戏模式会要更多帧（6 张、3 列），因为「精彩操作」得连着几秒看才看得出来。
+        """
+        n = max(1, int(count or self.grid_frames))
+        cols = max(1, int(cols))
+        items = self.snapshot(n)
         if not items:
             return "", 0
         try:
@@ -2155,16 +2297,17 @@ class FrameBuffer(threading.Thread):
         except Exception:
             return "", 0
         w, h = items[0][1].size
-        canvas = Image.new("RGB", (w * 2, h * 2), (24, 24, 24))
-        for i, (_ts, im) in enumerate(items[:4]):
-            canvas.paste(im, ((i % 2) * w, (i // 2) * h))
+        rows = (len(items) + cols - 1) // cols
+        canvas = Image.new("RGB", (w * cols, h * rows), (24, 24, 24))
+        for i, (_ts, im) in enumerate(items):
+            canvas.paste(im, ((i % cols) * w, (i // cols) * h))
         buf = io.BytesIO()
         canvas.save(buf, "JPEG", quality=self.quality)
-        return base64.b64encode(buf.getvalue()).decode(), len(items[:4])
+        return base64.b64encode(buf.getvalue()).decode(), len(items)
 
-    def attach_to(self, msg: dict) -> int:
+    def attach_to(self, msg: dict, count: int = 0, cols: int = 2) -> int:
         """把拼图插进这条消息（在它自己的当前截图之前）。"""
-        b64, n = self.grid_jpeg()
+        b64, n = self.grid_jpeg(count, cols)
         if not b64:
             return 0
         content = msg.get("content")
@@ -2176,8 +2319,8 @@ class FrameBuffer(threading.Thread):
                     if isinstance(p, dict) and p.get("type") in ("image_url", "input_image")), -1)
         note = {
             "type": "text",
-            "text": ("刚才 %d 秒里每秒一张，拼成这张 2×2（左上 → 右下，按时间先后）；"
-                     "紧接着的那张才是此刻的屏幕。先别逐格描述，只在说得出变化时才提。" % n),
+            "text": ("这 %d 张是刚才几秒里按时间截的，拼成 %d 列（左上 → 右下，从左往右、从上往下看）；"
+                     "紧接着的那张才是此刻的屏幕。先别逐格描述，只在说得出变化时才提。" % (n, cols)),
         }
         image = {"type": "image_url",
                  "image_url": {"url": "data:image/jpeg;base64," + b64}}
@@ -2407,12 +2550,11 @@ def build_watch_focus(mode: str) -> str:
             "【现在老大在打游戏，你在旁边陪玩】这一轮只聊游戏里的内容。硬规矩：",
             "1. 不许提时间，也不许拐着弯提：不说几点、不说「这么晚」「这个点」「后半夜」「天都快亮了」，"
             "不催他睡觉、不劝他歇会儿、不操心眼睛、不说「明天还要上班」。打游戏的时候听到这些很扫兴。",
-            "2. 不指挥、不当教练：不说「该放技能了」「往左走」，别替他判断该干什么；"
-            "吐槽、惊叹、跟着一起紧张都可以。",
-            "3. 画面上的字（任务提示、技能说明、伤害数字、聊天框、弹幕）不要念出来。",
-            "4. 认得出是什么游戏，就按你记得的说（玩法、这个角色是谁、这关大概什么机制）；"
+            "2. 认得出是什么游戏，就按你记得的说（玩法、这个角色是谁、这关大概什么机制）；"
             "认得出画面里的角色也直接说名字。不熟就只说名字和看得到的样子，别编。",
-            "5. 挑一个真有意思的点说，一两句就够；不报进度、不刷屏。",
+            "3. 前面附的那几张是刚才几秒的连续画面，**连起来看**：能看到一串动作（连招、极限躲、反打、"
+            "一波清完、开大爆发）才算精彩。真看到精彩的就带着情绪说出来，一两句，别泼冷水。",
+            "4. 挑一个真有意思的点说，一两句就够；不报进度、不刷屏。",
         ])
     return "\n".join([
         "【现在你在陪老大看%s，这一轮只聊内容】" % kind,
@@ -2725,6 +2867,9 @@ class Gateway:
         # 看到不认识的游戏/番剧，自己查一下补进 titles.json（作品小抄）
         self.title_learner = TitleLearner(cfg, self)
         self.title_learner.start()
+        # 前台是游戏、稳着待够 2 分钟：自动进游戏模式（不看键鼠活跃度）
+        self.game_watch = GameWatcher(cfg, self)
+        self.game_watch.start()
         # 头顶原生气泡（独立 Qt 小工，按需拉起）
         self.bubble = BubbleBridge(cfg)
         self.bubble.start()
@@ -2900,24 +3045,22 @@ class Gateway:
         return ok
 
     def _mode_lock_loop(self) -> None:
-        """托盘里手动选的模式只锁 10 分钟，之后回自动（跟原来的自动判定接上）。
+        """托盘里手动选的模式锁几分钟（默认 5 分钟），**锁到期不退出**。
 
-        游戏模式例外：打一局往往超过 10 分钟，中途被拨回自动，她就开始念时间了。
+        老大 2026-11-17 的原话：「锁这个模式多少分钟，不会退出，过了这几分钟按退出判断算」。
+        所以这里只调用 `mode.release()`（把 source 标成 released），退出交给
+        VideoWatcher / GameWatcher 各自的判断——没有自动判定的模式（番剧/直播/网课）
+        就一直保持，直到手动换掉。
         """
+        lock_minutes = max(1.0, float(self.cfg.get("mode_lock_minutes", 5)))
         while True:
-            time.sleep(10)
+            time.sleep(5)
             try:
-                # 「关闭」是用户明确不要看，别 10 分钟后自己把看屏又打开
                 if self.mode.get() == "off":
                     continue
-                if self.mode.get() == GAME_MODE:
-                    continue
-                if (str(self.mode.source).startswith("tray")
-                        and not str(self.mode.source).startswith("tray-timeout")
-                        and time.time() - self.mode.since > 600):
-                    self.mode.set("auto", source="tray-timeout")
-                    log.info("手动模式满 10 分钟，回自动")
-                    self.bubble.show("回自动了")
+                if (str(self.mode.source) == "tray"
+                        and time.time() - self.mode.since > lock_minutes * 60):
+                    self.mode.release("满 %.0f 分钟" % lock_minutes)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -3199,9 +3342,11 @@ class Gateway:
         if scenario == "vision" and getattr(self, "frames", None) is not None:
             attached = 0
             if self.frames.attach:
+                # 游戏模式多给几帧（6 张、3 列）：精彩操作要连着看几秒才看得出来
+                want, cols = (6, 3) if self.mode.get() == GAME_MODE else (0, 2)
                 for msg in reversed(messages):
                     if msg.get("role") == "user":
-                        attached = self.frames.attach_to(msg)
+                        attached = self.frames.attach_to(msg, count=want, cols=cols)
                         break
             if attached:
                 try:
@@ -3468,8 +3613,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         log.info("模式切换 → %s（%s）", data["mode"], data["source"])
         if source.startswith("tray"):
+            # 托盘选的模式先锁住 N 分钟（期间自动判定都不许动它）
+            lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
+            GATEWAY.mode_lock_until = time.time() + lock_min * 60
+            log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
             # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
-            # （关闭 = 识屏关；其它三个模式 = 识屏开）
+            # （关闭 = 识屏关；其它模式 = 识屏开）
             GATEWAY.set_proactive(data["mode"] != "off")
             if data["mode"] == "off":
                 # 气泡由气泡小工那边弹（「行，不看了」），这里补一句声
