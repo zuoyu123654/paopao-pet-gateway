@@ -120,7 +120,7 @@
         "away_grace_seconds": 300,
         "paused_grace_seconds": 600,
         "paused_away_grace_seconds": 120,
-        "asr_chunk_seconds": 10,
+        "asr_chunk_seconds": 8,
         "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions",
         "asr_min_cjk_ratio": 0.25,
         "ocr_interval_seconds": 2.0,
@@ -128,7 +128,8 @@
         "ocr_bottom_ratio": 0.34,
         "transcript_keep": 12,
         "speak_hint": true,
-        "loopback_device": ""
+        "loopback_device": "",
+        "subtitle_ocr": false
     },
     "soften_self_recognition": true,
     "self_recognition": {

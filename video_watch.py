@@ -126,6 +126,7 @@ class AudioLoop(threading.Thread):
         self.block = 0.5
         self.chunk_seconds = float(conf.get("asr_chunk_seconds", 10))
         self.level = collections.deque(maxlen=200)   # (ts, rms)
+        self.names: list[str] = []                   # 正在录的环回端点名
         self.q: "queue.Queue" = queue.Queue(maxsize=4)
         self.lock = threading.Lock()
         self.alive = False
@@ -141,66 +142,103 @@ class AudioLoop(threading.Thread):
         return self.recent_level(seconds) > threshold
 
     def run(self) -> None:
+        self.run_multi()
+
+    # ------------------------------------------------------- 多端点兜底（本轮新加）
+    def run_multi(self) -> None:
+        """同时录几个输出端点的环回，挑「真的有声音」那一路给转写。
+
+        为什么要有这个（2026-11-17 实测）：蓝牙耳机的 WASAPI 环回是**哑的**
+        （放 440Hz 测试音，Realtek/NVIDIA 环回 RMS 0.15，蓝牙环回 0.0003）。
+        媒体跑在蓝牙上时，只录默认端点就一句都转不出来。这里把默认端点之外
+        的板载/HDMI 也一起录，谁在响就用谁的。
+        """
         try:
             import numpy as np
             import soundcard as sc
         except Exception as exc:  # noqa: BLE001
             self.error = "soundcard 不可用：%s" % exc
-            log.warning("环回录音不可用：%s", self.error)
             return
         import warnings
 
-        # 换设备/游戏切窗口时会丢一点数据，soundcard 每次都喊一嗓子，压掉
         warnings.filterwarnings("ignore", message="data discontinuity.*")
+
+        want = str(self.conf.get("loopback_device") or "").strip().lower()
+        speakers = []
         try:
-            want = str(self.conf.get("loopback_device") or "").strip().lower()
-            speaker = None
+            allspk = sc.all_speakers()
             if want:
-                for sp in sc.all_speakers():
-                    if want in str(sp.name).lower():
-                        speaker = sp
-                        break
-            if speaker is None:
-                speaker = sc.default_speaker()
-                # 默认扬声器是蓝牙耳机（尤其 Hands-Free 那档）时，环回会录到一片安静，
-                # 换回板载扬声器
-                if any(k in str(speaker.name).lower() for k in ("hands-free", "bthhfenum", "蓝牙")):
-                    for sp in sc.all_speakers():
-                        if not any(k in str(sp.name).lower() for k in
-                                   ("hands-free", "bthhfenum", "蓝牙")):
-                            speaker = sp
-                            break
-            mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
+                speakers = [sp for sp in allspk if want in str(sp.name).lower()][:1]
+            if not speakers:
+                speakers = [sc.default_speaker()]
+                # 默认是蓝牙（蓝牙环回常常是哑的），顺手把非蓝牙端点也录上
+                others = [sp for sp in allspk
+                          if not any(k in str(sp.name).lower() for k in
+                                     ("hands-free", "bthhfenum", "蓝牙", "bluetooth"))]
+                for sp in others:
+                    if all(str(sp.name) != str(x.name) for x in speakers) and len(speakers) < 3:
+                        speakers.append(sp)
         except Exception as exc:  # noqa: BLE001
             self.error = "找不到环回设备：%s" % exc
             log.warning("环回设备不可用：%s", self.error)
             return
-        self.alive = True
-        log.info("环回就绪：%s", speaker.name)
-        buf = []
-        need = int(self.rate * self.chunk_seconds)
-        while True:
+
+        self.names = [str(sp.name) for sp in speakers]
+        log.info("环回端点 %d 个：%s", len(self.names), "、".join(n[:18] for n in self.names))
+        blocks: "queue.Queue" = queue.Queue(maxsize=300)
+
+        def _rec(i: int, spk):
             try:
+                mic = sc.get_microphone(id=str(spk.name), include_loopback=True)
                 with mic.recorder(samplerate=self.rate, channels=1) as rec:
                     while True:
-                        block = rec.record(numframes=int(self.rate * self.block))
-                        if block is None or len(block) == 0:
-                            continue
-                        rms = float(np.sqrt((block ** 2).mean()))
-                        with self.lock:
-                            self.level.append((time.time(), rms))
-                        buf.append(block.reshape(-1))
-                        if sum(len(x) for x in buf) >= need:
-                            pcm = np.concatenate(buf)[:need]
-                            buf = []
+                        b = rec.record(numframes=int(self.rate * self.block))
+                        if b is not None and len(b):
                             try:
-                                self.q.put_nowait(pcm)
+                                blocks.put_nowait((i, b))
                             except queue.Full:
                                 pass
             except Exception as exc:  # noqa: BLE001
-                self.error = str(exc)
-                log.warning("环回录音断了，2 秒后重开：%s", exc)
-                time.sleep(2.0)
+                log.warning("环回[%s]断开：%s", str(spk.name)[:20], exc)
+
+        for i, sp in enumerate(speakers):
+            threading.Thread(target=_rec, args=(i, sp), daemon=True,
+                             name="loopback-%d" % i).start()
+
+        self.alive = True
+        need = int(self.rate * self.chunk_seconds)
+        acc: dict[int, list] = {i: [] for i in range(len(speakers))}
+        loud: dict[int, float] = {i: 0.0 for i in range(len(speakers))}
+        sel = 0
+        quiet_since = time.time()
+        warned = False
+        while True:
+            try:
+                i, b = blocks.get(timeout=2.0)
+            except queue.Empty:
+                # 全军覆没（或者断流）：给一句明确的提示，别让人以为转写坏了
+                if not warned and time.time() - quiet_since > 120:
+                    warned = True
+                    log.warning("环回已经 2 分钟没声音：媒体是不是在蓝牙耳机上？"
+                                "把输出换到扬声器/HDMI，或设 video_watch.loopback_device")
+                continue
+            rms = float(np.sqrt((b ** 2).mean()))
+            with self.lock:
+                self.level.append((time.time(), rms))
+            acc[i].append(b.reshape(-1))
+            loud[i] = max(rms, loud[i] * 0.6)
+            sel = max(loud, key=loud.get)
+            if sum(len(x) for x in acc[i]) >= need:
+                if i == sel and loud[i] > 0.002:
+                    pcm = np.concatenate(acc[i])[:need]
+                    try:
+                        self.q.put_nowait(pcm)
+                    except queue.Full:
+                        pass
+                    quiet_since = time.time()
+                    warned = False
+                acc[i] = []
+                loud[i] = 0.0
 
 
 # --------------------------------------------------------------------- 转写
@@ -339,6 +377,9 @@ class VideoWatcher(threading.Thread):
         self.keep = int(self.conf.get("transcript_keep", 12))
         self.min_cjk = float(self.conf.get("asr_min_cjk_ratio", 0.25))
         self.speak_hint = bool(self.conf.get("speak_hint", True))
+        # 字幕 OCR 默认关（老大 2026-11-17 说的：很多视频根本没字幕条，OCR 白跑；
+        # 有声音就够了，环回转写才是主路）。真要 OCR 兜底再开。
+        self.use_ocr = bool(self.conf.get("subtitle_ocr", False))
 
         self.lock = threading.Lock()
         self.transcript: "collections.deque" = collections.deque(maxlen=self.keep)
@@ -366,7 +407,10 @@ class VideoWatcher(threading.Thread):
             return
         self.audio.start()
         self.asr.start()
-        self.ocr.start()
+        if self.use_ocr:
+            self.ocr.start()
+        else:
+            log.info("通用视频模式：字幕 OCR 关着（只靠环回转写，省一个常驻进程）")
         super().start()
         log.info("通用视频模式：已就绪（前台播放器 + 环回有声 + 键鼠低活跃 %ds 后自动进入）",
                  int(self.enter_seconds))
@@ -378,11 +422,19 @@ class VideoWatcher(threading.Thread):
     def force(self) -> None:
         """托盘里手动选「通用视频」：不等 2 分钟的条件，直接进。"""
         app, title = foreground()
+        now = time.time()
         with self.lock:
             self.state = "active"
             self.active = True
-            self.session_since = time.time()
+            self.session_since = now
+            # 这两个时间戳不补，_tick 下一轮就会以为「早就没声了、人也不在」立刻退出
+            self.last_audio_at = now
+            self.last_fore_at = now
+            self.asr_bad = 0
+            self.ocr_on = False
+            self.first_hint = self.speak_hint
             self.app, self.title = app, title
+        self.asr.active.set()
         log.info("通用视频模式：手动进入（%s / %s）", app or "?", (title or "")[:40])
 
     def context_block(self) -> str:
@@ -429,8 +481,12 @@ class VideoWatcher(threading.Thread):
                 "title": self.title[:60],
                 "lines": len(self.transcript),
                 "ocr": self.ocr_on,
+                "ocr_enabled": self.use_ocr,
+                "asr": bool(self.transcript),
+                "loopback": list(getattr(self.audio, "names", []) or []),
+                "last": (self.transcript[-1][2][:60] if self.transcript else ""),
                 "audio": self.audio.has_signal(self.audio_window, self.audio_threshold),
-                "error": self.error or self.audio.error or self.asr.error or self.ocr.error,
+                "error": self.error or self.audio.error or self.asr.error,
             }
 
     # ---------------------------------------------------------- 内部
@@ -438,16 +494,28 @@ class VideoWatcher(threading.Thread):
         text = text.strip()
         if not text:
             return
-        with self.lock:
-            self.transcript.append((time.time(), source, text))
         if source == "asr":
             ratio = _cjk_ratio(text)
-            with self.lock:
-                self.asr_bad = self.asr_bad + 1 if ratio < self.min_cjk else 0
-                if self.asr_bad >= 3 and not self.ocr_on:
-                    self.ocr_on = True
-                    self.ocr.active.set()
-                    log.info("视频模式：转写不像中文（%.0f%%），改读字幕条", ratio * 100)
+            if ratio < self.min_cjk:
+                # 外文片/噪音：转出来是一堆不像中文的东西，喂给模型只会添乱，直接丢
+                with self.lock:
+                    self.asr_bad += 1
+                    bad = self.asr_bad
+                if bad == 3:
+                    log.info("视频模式：转写不像中文（%.0f%%），这几条丢掉%s",
+                             ratio * 100, "" if self.use_ocr else "（字幕 OCR 关着）")
+                return
+        with self.lock:
+            self.transcript.append((time.time(), source, text))
+            if source == "asr":
+                self.asr_bad = 0
+
+    def _mode_locked(self) -> bool:
+        """托盘选的模式还在锁里吗（锁住期间自动判定一律不动手）。"""
+        src = str(self.gateway.mode.source)
+        if src.startswith("tray") and not src.endswith("released"):
+            return True
+        return time.time() < getattr(self.gateway, "mode_lock_until", 0.0)
 
     def _is_player(self, app: str) -> bool:
         name = app.lower().replace(".exe", "")
@@ -473,8 +541,13 @@ class VideoWatcher(threading.Thread):
             self.ocr_on = False
             self.first_hint = self.speak_hint
         self.asr.active.set()
-        self.last_audio_at = time.time()
+        # 只有显式开了 subtitle_ocr 才让 OCR 小工干活（默认关：很多视频根本没有字幕条）
+        if self.use_ocr:
+            with self.lock:
+                self.ocr_on = True
+            self.ocr.active.set()
         self.last_fore_at = time.time()
+        self.last_audio_at = time.time()
         try:
             cur = self.gateway.mode.get()
             if cur == "auto":
@@ -491,11 +564,16 @@ class VideoWatcher(threading.Thread):
             self.app = ""
             self.title = ""
         self.asr.active.clear()
-        self.ocr.active.clear()
+        if self.use_ocr:
+            self.ocr.active.clear()
         log.info("通用视频模式：退出（%s）", reason)
         try:
-            if self.gateway.mode.get() == "video" and self.gateway.mode.source == "auto-video":
-                self.gateway.mode.set("auto", source="auto-video")
+            # 番剧/直播/网课跟视频用同一套退出判断（老大 2026-11-17 说的）：
+            # 播放停了/窗口走了就回自动。锁在托盘里的时候不动。
+            m = self.gateway.mode
+            if m.get() in ("video", "anime", "live", "course") and not self._mode_locked():
+                m.set("auto", source="video-leave")
+                log.info("视频类模式：%s 回自动（%s）", m.get(), reason)
         except Exception as exc:  # noqa: BLE001
             log.warning("切回 auto 失败：%s", exc)
 
@@ -527,6 +605,19 @@ class VideoWatcher(threading.Thread):
         playing = self.audio.has_signal(3.0, self.audio_threshold)
         player = self._is_player(app)
         same = (app and app == self.app and title == self.title)
+
+        # 番剧/直播/网课：退出判断跟视频一样——没声音在响就算没在看。
+        # 托盘锁住的那几分钟不判；锁一放开（source=tray-released，since 重置）开始计时。
+        try:
+            m = self.gateway.mode
+            if m.get() in ("anime", "live", "course") and not self._mode_locked():
+                silent_for = now - max(m.since, self.last_audio_at or 0)
+                if not playing and silent_for > self.paused_away_grace:
+                    log.info("%s 模式：已经 %.0f 秒没声音，回自动", m.get(), silent_for)
+                    m.set("auto", source="video-leave")
+                    return
+        except Exception:  # noqa: BLE001
+            pass
 
         if self.state in ("idle", "probe"):
             if player and playing:
