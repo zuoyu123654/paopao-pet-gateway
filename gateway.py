@@ -130,8 +130,6 @@ DEFAULTS = {
     "vision_black_ratio": 0.92,
     "vision_black_frames": 2,
     "fix_black_request_image": True,
-    # 老大在聊天里纠正「那个角色是谁」时，抽一条存进 characters.json
-    "learn_characters": True,
     # 托盘选的模式锁几分钟：锁住期间自动判定不许动，到点只放开不退出
     "mode_lock_minutes": 5,
     # 前台是游戏稳着待够 enter_seconds 就自动进游戏模式（不看键鼠活跃度）
@@ -307,86 +305,6 @@ def build_see_howto() -> str:
         "这种说法，也不要把它们当成几张不同的图分别描述；只说你从这几秒里看出来的事。",
         "6. 画面上的文字（字幕、台词、界面上的字）不要念出来。",
     ])
-
-
-# ------------------------------------------------------------ 角色对照（老大教的）
-# 她认错角色时，老大在聊天里说过「那个蓝头发的是某某」——那种话要留下来，下次识屏直接对上号。
-# 结构：{"作品名或标题片段": [{"look": "蓝头发双马尾", "name": "千斗五十铃"}, ...]}
-CHARACTERS_PATH = os.path.join(APP_DIR, "characters.json")
-_CHARS: dict[str, list] = {}
-_CHARS_MTIME = 0.0
-
-
-def characters(refresh: bool = False) -> dict[str, list]:
-    global _CHARS, _CHARS_MTIME
-    try:
-        mtime = os.path.getmtime(CHARACTERS_PATH)
-    except OSError:
-        return _CHARS
-    if refresh or mtime != _CHARS_MTIME:
-        try:
-            with open(CHARACTERS_PATH, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-            _CHARS = {str(k).strip(): list(v or []) for k, v in (data or {}).items() if str(k).strip()}
-            _CHARS_MTIME = mtime
-        except Exception as exc:  # noqa: BLE001
-            log.warning("characters.json 读不了：%s", exc)
-    return _CHARS
-
-
-def characters_for(app: str = "", title: str = "") -> list:
-    """按作品名（小抄命中的键或标题片段）找角色对照。"""
-    table = characters()
-    if not table:
-        return []
-    hay = ("%s %s" % (app or "", title or "")).lower()
-    for key, rows in table.items():
-        if key.lower() in hay:
-            return rows
-    return []
-
-
-def save_character(work: str, look: str, name: str) -> bool:
-    """记一条「长这样的是谁」。work 是作品名/标题片段。"""
-    work = str(work or "").strip()
-    look = str(look or "").strip()
-    name = str(name or "").strip()
-    if not work or not name or len(name) > 12:
-        return False
-    try:
-        with open(CHARACTERS_PATH, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:  # noqa: BLE001
-        data = {}
-    rows = [r for r in (data.get(work) or []) if str(r.get("name") or "") != name]
-    rows.append({"look": look[:40], "name": name})
-    data[work] = rows[-20:]
-    tmp = CHARACTERS_PATH + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, CHARACTERS_PATH)
-    except OSError as exc:
-        log.warning("characters.json 写不进去：%s", exc)
-        return False
-    characters(refresh=True)
-    log.info("角色对照：记下「%s → %s」（%s）", look or "?", name, work[:20])
-    return True
-
-
-def build_character_block(rows: list) -> str:
-    if not rows:
-        return ""
-    lines = ["【角色对照（老大亲口告诉过你的，认准这个，别再认错）】"]
-    for r in rows:
-        look = str(r.get("look") or "").strip()
-        name = str(r.get("name") or "").strip()
-        if name:
-            lines.append("- 看到「%s」就是 **%s**" % (look or "这个角色", name))
-    lines.append("画面里出现这些特征就直接叫名字；对不上就只说外形，别硬套。")
-    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- 配置
@@ -3237,9 +3155,6 @@ class Gateway:
         note = title_hint(app, title)
         if note:
             context.append("【这个作品你认识】%s" % note)
-        chars = characters_for(app, title)
-        if chars:
-            context.append(build_character_block(chars))
         try:
             rows = self.ledger.recent_vision(1, 15)
             if rows:
@@ -3351,71 +3266,6 @@ class Gateway:
         except Exception as exc:  # noqa: BLE001
             log.info("模式提示没说成：%s", exc)
         log.info("模式提示：%s（%s / %s）", text, mode, source)
-
-    # ------------------------------------------------- 角色对照（老大聊天里教的）
-    CHARACTER_HINTS = ("头发", "穿", "戴", "那个", "这个", "不是", "记住", "是", "叫")
-
-    def _maybe_learn_character(self, text: str) -> None:
-        """老大在聊天里纠正「那个是谁」时，抽一条存进 characters.json。
-
-        为什么不在识屏里学：识屏那一路是模型自己在猜；老大亲口说的才算数，
-        所以只在 chat 场景里、并且句子里有「是/叫」这类断言时才问一次模型。
-        """
-        text = (text or "").strip()
-        if not text or len(text) > 200:
-            return
-        if not any(w in text for w in self.CHARACTER_HINTS):
-            return
-        if "是" not in text and "叫" not in text:
-            return
-        threading.Thread(target=self._learn_character_worker, args=(text,), daemon=True).start()
-
-    def _learn_character_worker(self, text: str) -> None:
-        work = ""
-        try:
-            rows = self.ledger.recent_vision(1, 30)
-            if rows:
-                m = SCREEN_META_RE.search(str(rows[-1].get("user") or ""))
-                if m:
-                    work = (m.group(2) or m.group(1) or "").strip()[:40]
-        except Exception:  # noqa: BLE001
-            work = ""
-        if not work:
-            return
-        prompt = (
-            "用户在跟桌面宠物聊天，可能在纠正「画面里某个角色是谁」。\n"
-            "用户刚说：%s\n最近在看的作品：%s\n\n"
-            "如果用户是在告诉/纠正某个角色的身份（例如「那个蓝头发双马尾的是千斗五十铃」"
-            "、「不是她，是拉媞珐」），只回 JSON："
-            '{"ok":true,"look":"用用户原话里的外观特征描述这个角色（十个字以内最好）","name":"角色名"}；'
-            '否则回 {"ok":false}。只回 JSON，不要解释。' % (text, work)
-        )
-        try:
-            data = self.post_once({
-                "model": self.cfg.get("model") or "deepseek-v4-flash",
-                "max_tokens": 120, "stream": False,
-                "messages": [
-                    {"role": "system", "content": "只回 JSON。"},
-                    {"role": "user", "content": prompt},
-                ],
-            })
-            raw = (data["choices"][0]["message"].get("content") or "").strip()
-        except Exception as exc:  # noqa: BLE001
-            log.info("角色对照：问不出来（%s）", exc)
-            return
-        raw = raw.strip("`").strip()
-        if raw.startswith("json"):
-            raw = raw[4:].strip()
-        try:
-            obj = json.loads(raw)
-        except ValueError:
-            return
-        if not obj.get("ok"):
-            return
-        name = str(obj.get("name") or "").strip()
-        look = str(obj.get("look") or "").strip()
-        if name and save_character(work, look, name):
-            log.info("角色对照：老大说过「%s 是 %s」（%s）", look or "?", name, work[:20])
 
     # ---- 一次对话
     def stream_reply(self, payload: dict, scenario: str, sink: list[str]):
@@ -3767,11 +3617,6 @@ class Gateway:
                 log.info("识屏：小抄里没有这个作品（%s）", (title or app)[:40])
             if self.cfg.get("see_howto", True):
                 messages.insert(0, {"role": "system", "content": build_see_howto()})
-            # 老大亲口教过的角色对照：认准这个，别认错
-            chars = characters_for(app, title)
-            if chars:
-                messages.insert(0, {"role": "system", "content": build_character_block(chars)})
-                log.info("识屏：带上角色对照 %d 条", len(chars))
 
         if scenario == "vision" and self.cfg.get("inject_vision_context", True):
             # 识屏也要有前后文：把刚才几次「她看到过什么」带上，她才接得上
@@ -3818,9 +3663,6 @@ class Gateway:
             if watching in FOCUS_MODES:
                 messages.insert(0, {"role": "system", "content": build_watch_focus(watching)})
                 log.info("专注模式：注入「专心」规矩（%s）", watching)
-
-        if scenario == "chat" and self.cfg.get("learn_characters", True):
-            self._maybe_learn_character(user_text)
 
         # 桌宠那张图是黑的、我们自己截得到 → 换成我们的；两边都黑就交给黑屏守卫整轮跳过
         if scenario == "vision":
