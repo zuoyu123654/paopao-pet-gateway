@@ -14,36 +14,36 @@ STUCK = "我这会儿有点卡壳…"
 VOICE_OFF_HINT = "语音关着呢"
 
 # 托盘菜单切换后的反馈（默认 3.2 秒气泡）
+# 别写「XX模式」这种词——听起来像机器在报告状态（老大 2026-11-17 说的）。
 TRAY_FEEDBACK = {
-    "auto": "哦，回自动了",
-    "video": "嗯，B站视频模式",
-    "anime": "哦，看番模式",
-    "game": "哦，游戏模式",
-    "generic": "通用视频，看着呢",
-    "voice_off": "语音关掉了",
-    "ptt": "按键说话，Ctrl+Alt+V",
-    "call": "语音电话开着呢",
-    "watch_off": "行，不看了",
+    "auto": "好，我自己看着来。",
+    "video": "哦，刷B站视频啊。",
+    "anime": "哦，看番去啦。",
+    "game": "哦，打上了呀——那我蹲旁边陪你打，不吵你。",
+    "generic": "哦，看视频啊。",
+    "voice_off": "语音关掉了。",
+    "ptt": "按键说话，Ctrl+Alt+V。",
+    "call": "语音电话开着呢。",
+    "watch_off": "行，不看了。",
 }
 MODE_TIMEOUT = "回自动了"
 # 每次模式切换都播一句（老大 2026-11-17 要的：切换必须有提示音 + 气泡）
-MODE_BACK = "哦，回自动了"
+MODE_BACK = "好，我自己看着来。"
 LIVE_ON = "哦，看直播啊。"
 COURSE_ON = "哦，上课时间。"
+# 进游戏模式只有这一句（手动点、自动进都用它，不再分两版）
+GAME_ON = "哦，打上了呀——那我蹲旁边陪你打，不吵你。"
+GAME_OFF = "不打啦？那我先眯一会儿。"
 MODE_PHRASES = {
     "auto": MODE_BACK,
     "normal": MODE_BACK,
-    "off": "行，不看了",
+    "off": "行，不看了。",
     "video": TRAY_FEEDBACK["video"],
     "anime": TRAY_FEEDBACK["anime"],
     "live": LIVE_ON,
     "course": COURSE_ON,
-    "game": TRAY_FEEDBACK["game"],
+    "game": GAME_ON,
 }
-# 自动进「玩游戏」模式时说的那一句（老大 2026-11-17 要的：预存好，别当场合成）
-# 语气：认出来了、愿意陪玩、不吵他、也不催时间。
-GAME_ON = "哦，打上了呀——那我蹲旁边陪你打，不吵你。"
-GAME_OFF = "不打啦？那我先眯一会儿。"
 # 跟着桌宠「主动识屏」开关走的两句：
 # 开 → 桌宠那边已经有气泡了，我们只出声（用她那句原文）
 # 关 → 桌宠那边没气泡，我们既出声也冒泡

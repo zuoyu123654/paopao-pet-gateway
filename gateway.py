@@ -3310,10 +3310,8 @@ class Gateway:
         """
         if not self.cfg.get("mode_feedback", True):
             return
-        if mode == GAME_MODE and str(source).startswith("auto"):
-            text = fixed_phrases.GAME_ON          # 自动进游戏：更像在陪玩
-        else:
-            text = fixed_phrases.MODE_PHRASES.get(mode, "")
+        # 游戏就一句（手动点、自动进都用它），不再分两版
+        text = fixed_phrases.MODE_PHRASES.get(mode, "")
         if not text:
             return
         try:
