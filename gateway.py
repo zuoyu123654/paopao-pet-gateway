@@ -125,6 +125,11 @@ DEFAULTS = {
     "watch_focus": True,
     # 识屏时先描述清楚场景、认得出作品就报名字（老大 2026-11-17 要的）
     "see_howto": True,
+    # 黑屏守卫：连续几张几乎全黑就跳过这一轮；桌宠那张黑、我们截得到就换掉
+    "skip_black_frames": True,
+    "vision_black_ratio": 0.92,
+    "vision_black_frames": 2,
+    "fix_black_request_image": True,
     # 老大在聊天里纠正「那个角色是谁」时，抽一条存进 characters.json
     "learn_characters": True,
     # 托盘选的模式锁几分钟：锁住期间自动判定不许动，到点只放开不退出
@@ -2323,8 +2328,26 @@ class FrameBuffer(threading.Thread):
         self.attach = bool(conf.get("attach_to_vision", True))
         self.idle_interval = max(1.0, float(conf.get("frame_idle_interval", 4.0)))
         self.buf: "collections.deque" = collections.deque(maxlen=self.keep)
+        # 每帧的「黑屏比例」：游戏独占全屏 / 锁屏 / DRM 画面截出来就是一片黑，
+        # 这种帧不该送进模型，也不该进拼图（2026-11-17 老大提的）
+        self.darks: "collections.deque" = collections.deque(maxlen=max(12, self.keep))
+        self.black_ratio = float(conf.get("black_ratio", 0.92))
         self.lock = threading.Lock()
         self.last_error = ""
+
+    def is_black(self, n: int = 2, fresh: float = 15.0, ratio: float | None = None) -> bool:
+        """最近 n 张是不是都几乎全黑（默认 92% 以上像素接近纯黑）。"""
+        thr = self.black_ratio if ratio is None else float(ratio)
+        now = time.time()
+        with self.lock:
+            rows = [(ts, r) for ts, r in list(self.darks) if now - ts <= fresh]
+        if len(rows) < n:
+            return False
+        return all(r >= thr for _ts, r in rows[-n:])
+
+    def dark_now(self) -> float:
+        with self.lock:
+            return self.darks[-1][1] if self.darks else 0.0
 
     def run(self) -> None:
         if not self.enabled:
@@ -2359,7 +2382,15 @@ class FrameBuffer(threading.Thread):
                     diff = sum(1 for a, b in zip(px, last_sig) if abs(a - b) > 12)
                     changed = diff / len(px) > 0.03   # 超过 3% 的像素变了才算
                 last_sig = px
+                # 这一张有多黑：纯黑占 92% 以上就不进缓冲（不送给模型看）
+                dark = sum(1 for v in px if v < 24) / max(1, len(px))
+                with self.lock:
+                    self.darks.append((now, dark))
                 stale = (now - last_store) >= idle
+                if dark >= self.black_ratio:
+                    still_rounds += 1          # 黑屏不算「画面变了」，也放慢采样
+                    time.sleep(idle)
+                    continue
                 if changed or stale:
                     with self.lock:
                         self.buf.append((now, shot))
@@ -3024,6 +3055,11 @@ class Gateway:
         """不看她的脸色，自己看一眼：抓当前屏 + 前几帧拼图 → 调模型 → 我们的 TTS 念。"""
         import base64 as _b64
 
+        # 独占全屏/锁屏时截出来是黑的：这种时候别硬看，省得她开口就是「一片黑」
+        if self.vision_is_black():
+            log.info("自己看一眼：画面几乎是黑的（%.0f%%），这次不开口", self.vision_dark_ratio() * 100)
+            return ""
+
         frames = []
         try:
             grid_b64, n = self.frames.grid_jpeg()
@@ -3477,6 +3513,112 @@ class Gateway:
             log.warning("记忆信箱投递失败: %s", exc)
 
     # ---- 请求预处理
+    def vision_dark_ratio(self) -> float:
+        """最近几帧里最黑的那张有多黑（0~1）。取不到就 -1。
+
+        为什么不用请求里那张图：桌宠传的图和我们的帧缓冲截的是同一块屏幕，
+        而解码请求里的 base64 每轮要多花几十毫秒；帧缓冲这边顺手就算好了。
+        """
+        try:
+            if not getattr(self, "frames", None):
+                return -1.0
+            with self.frames.lock:
+                rows = list(self.frames.darks)[-3:]
+            if not rows:
+                return -1.0
+            return max(r for _ts, r in rows)
+        except Exception:  # noqa: BLE001
+            return -1.0
+
+    def vision_is_black(self) -> bool:
+        """这一轮要不要因为「画面几乎全黑」直接跳过。"""
+        if not self.cfg.get("skip_black_frames", True):
+            return False
+        ratio = float(self.cfg.get("vision_black_ratio", self.frames.black_ratio
+                                   if getattr(self, "frames", None) else 0.92))
+        n = max(1, int(self.cfg.get("vision_black_frames", 2)))
+        if not getattr(self, "frames", None):
+            return False
+        return self.frames.is_black(n=n, ratio=ratio)
+
+    def fix_black_request_image(self, messages: list) -> str:
+        """桌宠传来的那张图如果是黑的，而我们自己截得没问题，就用我们的换掉。
+
+        黑屏多半不是「屏幕上真是黑的」，是**截屏方式抓不到**：独占全屏的 DirectX 游戏、
+        DRM 保护的视频、锁屏/息屏，GDI 截出来就是一片黑。桌宠用哪套我们改不了，
+        但我们自己的帧缓冲是同一块屏幕，能截到就直接顶上去。
+        返回 "ok"（没黑）/ "replaced"（换掉了）/ "black"（两边都黑，交给黑屏守卫跳过）。
+        """
+        if not self.cfg.get("fix_black_request_image", True):
+            return "ok"
+        try:
+            import base64 as _b64
+            import io as _io
+
+            from PIL import Image
+
+            last_user = None
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    last_user = msg
+                    break
+            if last_user is None:
+                return "ok"
+            content = last_user.get("content")
+            if not isinstance(content, list):
+                return "ok"
+            target = None
+            # 注意取**最后一张**：我们自己的帧拼图是插在桌宠那张之前的，
+            # 最后那张才是「此刻的屏幕」（第一张是我拼的过去几秒）。
+            for part in reversed(content):
+                if isinstance(part, dict) and part.get("type") in ("image_url", "input_image"):
+                    url = (part.get("image_url") or {}).get("url") or part.get("url") or ""
+                    if "base64," in url:
+                        target = (part, url)
+                        break
+            if target is None:
+                return "ok"
+            part, url = target
+            raw = _b64.b64decode(url.split("base64,", 1)[1][:6 * 1024 * 1024])
+            img = Image.open(_io.BytesIO(raw)).convert("L").resize((64, 36))
+            px = list(img.getdata())
+            dark = sum(1 for v in px if v < 24) / max(1, len(px))
+            if dark >= 0.6:
+                log.info("识屏：请求里那张图有 %.0f%% 接近纯黑", dark * 100)
+            if dark < 0.92:
+                return "ok"
+            # 请求里那张是黑的：看我们自己帧缓冲里有没有好帧
+            frames = getattr(self, "frames", None)
+            shot = None
+            if frames is not None:
+                snap = frames.snapshot(1)
+                if snap:
+                    ts, im = snap[-1]
+                    if time.time() - ts <= 10:
+                        shot = im
+            if shot is None:
+                return "black"
+            # 我们自己截的也得不是黑的，否则换上去还是黑
+            try:
+                g64 = shot.convert("L").resize((64, 36))
+                gpx = list(g64.getdata())
+                if sum(1 for v in gpx if v < 24) / max(1, len(gpx)) >= 0.92:
+                    return "black"
+            except Exception:  # noqa: BLE001
+                pass
+            buf = _io.BytesIO()
+            shot.save(buf, "JPEG", quality=82)
+            b64 = _b64.b64encode(buf.getvalue()).decode()
+            new_url = "data:image/jpeg;base64," + b64
+            if part.get("type") == "image_url":
+                part["image_url"] = dict(part.get("image_url") or {}, url=new_url)
+            else:
+                part["url"] = new_url
+            return "replaced"
+        except Exception as exc:  # noqa: BLE001
+            log.info("换掉黑图失败（不换也照答）：%s", exc)
+            return "ok"
+
     def prepare(self, payload: dict) -> tuple[dict, str, str]:
         messages = payload.get("messages") or []
         scenario = detect_scenario(messages, self.cfg.get("vision_markers", []))
@@ -3618,6 +3760,14 @@ class Gateway:
 
         if scenario == "chat" and self.cfg.get("learn_characters", True):
             self._maybe_learn_character(user_text)
+
+        # 桌宠那张图是黑的、我们自己截得到 → 换成我们的；两边都黑就交给黑屏守卫整轮跳过
+        if scenario == "vision":
+            fixed = self.fix_black_request_image(messages)
+            if fixed == "replaced":
+                log.info("识屏：桌宠那张图是黑的，用我们自己截的换掉了")
+            elif fixed == "black":
+                log.info("识屏：两边都截成黑的（独占全屏/DRM/锁屏？）")
 
         payload["messages"] = messages
         payload["stream"] = True
@@ -4040,6 +4190,33 @@ class Handler(BaseHTTPRequestHandler):
         n = GATEWAY.speech.say(str(req.get("text") or ""), tag="say")
         self._send_json({"ok": bool(n), "sentences": n})
 
+    def _send_blank_completion(self, client_stream: bool, model: str) -> None:
+        """回一个空的完成（一个字都不说），让桌宠那边安静地收场。"""
+        try:
+            if client_stream:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                done = {
+                    "id": "chatcmpl-gw", "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+                self.wfile.write(b"data: " + json.dumps(done, ensure_ascii=False).encode() + b"\n\n")
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            else:
+                self._send_json({
+                    "id": "chatcmpl-gw", "object": "chat.completion",
+                    "created": int(time.time()), "model": model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": ""},
+                                 "finish_reason": "stop"}],
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.info("回空完成失败（反正也不说）：%s", exc)
+
     def _handle_chat(self):
         try:
             payload = self._read_json()
@@ -4057,6 +4234,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         log.info("请求 scenario=%s stream=%s user=%r", scenario, client_stream, user_text[:60])
+        # 黑屏守卫：独占全屏游戏 / 锁屏 / DRM 画面截出来一片黑，说出去就是「我什么也看不见」。
+        # 连续 2 张都黑就整轮跳过（不叫模型、不说话、不冒泡），也不占账本。
+        if scenario == "vision" and GATEWAY.vision_is_black():
+            log.info("识屏：这一帧太黑（%.0f%% 接近纯黑），跳过这一轮", GATEWAY.vision_dark_ratio() * 100)
+            self._send_blank_completion(client_stream, model)
+            return
         # 新一轮开始：前一段还没念完就掐掉，直接改念这一轮
         GATEWAY.speech.interrupt()
         # 「让我看看」按最近的实测耗时推迟到首句开口前（见 arm_vision_cue）

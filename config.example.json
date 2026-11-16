@@ -88,7 +88,8 @@
         "frame_width": 640,
         "jpeg_quality": 82,
         "grid_frames": 4,
-        "attach_to_vision": true
+        "attach_to_vision": true,
+        "black_ratio": 0.92
     },
     "bubble": {
         "enabled": true,
@@ -169,5 +170,9 @@
         "enter_seconds": 120,
         "away_grace_seconds": 180,
         "game_apps": []
-    }
+    },
+    "skip_black_frames": true,
+    "vision_black_ratio": 0.92,
+    "vision_black_frames": 2,
+    "fix_black_request_image": true
 }
