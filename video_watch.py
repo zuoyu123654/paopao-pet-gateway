@@ -392,6 +392,7 @@ class VideoWatcher(threading.Thread):
         self.last_fore_at = 0.0
         self.asr_bad = 0
         self.ocr_on = False
+        self.last_asr_at = 0.0
         self.first_hint = False
         self.error = ""
         self._prev_idle = 99.0
@@ -509,6 +510,7 @@ class VideoWatcher(threading.Thread):
             self.transcript.append((time.time(), source, text))
             if source == "asr":
                 self.asr_bad = 0
+                self.last_asr_at = time.time()
 
     def _mode_locked(self) -> bool:
         """托盘选的模式还在锁里吗（锁住期间自动判定一律不动手）。"""
@@ -541,11 +543,8 @@ class VideoWatcher(threading.Thread):
             self.ocr_on = False
             self.first_hint = self.speak_hint
         self.asr.active.set()
-        # 只有显式开了 subtitle_ocr 才让 OCR 小工干活（默认关：很多视频根本没有字幕条）
-        if self.use_ocr:
-            with self.lock:
-                self.ocr_on = True
-            self.ocr.active.set()
+        # 字幕 OCR 只当兜底：先靠环回转写，转不出来（没声/外文）再开 OCR
+        self.last_asr_at = time.time()
         self.last_fore_at = time.time()
         self.last_audio_at = time.time()
         try:
@@ -618,6 +617,21 @@ class VideoWatcher(threading.Thread):
                     return
         except Exception:  # noqa: BLE001
             pass
+
+        # 字幕 OCR 只是兜底：转写一直没词（没声/外文/纯音乐）才打开，转写一回来就关掉。
+        if self.use_ocr and self.active:
+            no_asr = now - max(self.last_asr_at, self.session_since or 0)
+            want_ocr = no_asr > 60 and not self.ocr_on
+            if want_ocr:
+                with self.lock:
+                    self.ocr_on = True
+                self.ocr.active.set()
+                log.info("视频模式：%.0f 秒没转写出词，开字幕 OCR 兜底", no_asr)
+            elif self.ocr_on and now - self.last_asr_at < 10:
+                with self.lock:
+                    self.ocr_on = False
+                self.ocr.active.clear()
+                log.info("视频模式：转写恢复了，关掉字幕 OCR")
 
         if self.state in ("idle", "probe"):
             if player and playing:
