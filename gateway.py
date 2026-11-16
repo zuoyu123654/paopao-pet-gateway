@@ -82,6 +82,7 @@ DEFAULTS = {
         "early_sentences": 3,
         "early_min_chars": 8,
         "first_min_chars": 24,
+        "reading_fixes": {},
         "pre_cue": ["让我看看……", "唔，我瞅瞅。"],
         "pre_cue_min_interval": 20,
         "cache_pre_cue": True,
@@ -200,6 +201,7 @@ def load_config() -> dict:
         cfg["dsh"]["event_dir"] = os.path.join(
             os.environ.get("APPDATA", os.path.expanduser("~")), "dsh-pet-bridge"
         )
+    set_reading_fixes(cfg["tts"].get("reading_fixes"))
     return cfg
 
 
@@ -277,6 +279,17 @@ _SOFT_BREAK = re.compile(r"[,，、：:—\-\s]")
 _FIRST_BREAK = "。！？!?；;…~，,、：:"
 
 
+# 多音字/生僻字读错时的「换字读」表：键是屏幕上写的字，值是送去合成的字。
+# 只影响念出来的声音，气泡、账本、记忆里还是原来的字。config.json 的
+# tts.reading_fixes 一改就生效（重启网关），不用动 GPT-SoVITS。
+READING_FIXES: dict[str, str] = {}
+
+
+def set_reading_fixes(mapping) -> None:
+    global READING_FIXES
+    READING_FIXES = {str(k): str(v) for k, v in (mapping or {}).items() if str(k)}
+
+
 def clean_for_speech(text: str) -> str:
     if not text:
         return ""
@@ -290,6 +303,10 @@ def clean_for_speech(text: str) -> str:
     text = _BRACKETS.sub("", text)         # 括号里的动作不用念
     text = _ASTERISK_ACTION.sub("", text)   # *动作* 也不念
     text = _SPACES.sub(" ", text)
+    if READING_FIXES:
+        for src, dst in READING_FIXES.items():
+            if src in text:
+                text = text.replace(src, dst)
     return text.strip()
 
 

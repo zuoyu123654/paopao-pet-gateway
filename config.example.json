@@ -51,7 +51,10 @@
                 "synth_parallel":  2,
                 "tight_sentence_edges":  true,
                 "sentence_head_pad":  0.03,
-                "sentence_tail_pad":  0.08
+                "sentence_tail_pad":  0.08,
+                "reading_fixes":  {
+
+                                  }
             },
     "speak_chat":  true,
     "speak_vision":  true,
