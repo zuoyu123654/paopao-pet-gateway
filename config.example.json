@@ -107,7 +107,8 @@
         "no_speech_timeout": 3.0,
         "call_window": 8,
         "barge_in": false,
-        "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions"
+        "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions",
+        "screenshot": "always"
     },
     "video_watch": {
         "enabled": true,

@@ -192,6 +192,8 @@ class VoiceMode(threading.Thread):
         self.last_error = ""
         self.turns = 0
         self._last_rms = 0.0
+        # 这一次「开口」的时间戳（第一个超过阈值的音频块）：语音问答要拿这一刻的屏幕
+        self.last_onset_at = 0.0
 
     # ------------------------------------------------------------ 对外
     def start(self) -> None:
@@ -440,6 +442,8 @@ class VoiceMode(threading.Thread):
                     rms = float(np.sqrt((block ** 2).mean()))
                     self._last_rms = rms
                     if rms >= self.threshold:
+                        if not heard:
+                            self.last_onset_at = time.time()
                         heard = True
                         silence = 0.0
                     elif heard:

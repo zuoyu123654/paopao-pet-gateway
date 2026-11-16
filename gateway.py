@@ -3252,17 +3252,42 @@ class Gateway:
         parts = [{"type": "text", "text": text}]
         if context:
             parts.insert(0, {"type": "text", "text": "\n".join(context)})
-        if want_look:
+        # 语音截图（2026-11-17 老大定的）：**取「开口那一刻」的帧**，从帧缓冲里挑最近的，
+        # 不额外触发截屏（每秒本来就在截），零额外延迟。默认 always = 每句话都带一张。
+        shot_mode = str((self.cfg.get("voice") or {}).get("screenshot", "always")).lower()
+        take_shot = shot_mode == "always" or (shot_mode == "auto" and want_look)
+        if take_shot:
             try:
-                snap = self.frames.snapshot(1)
-                if snap:
-                    from PIL import Image
+                from PIL import Image
 
+                onset = float(getattr(getattr(self, "voice", None), "last_onset_at", 0) or 0)
+                snap = None
+                frames = getattr(self, "frames", None)
+                if frames is not None:
+                    with frames.lock:
+                        items = list(frames.buf)
+                    if items:
+                        if onset > 0:
+                            # 挑离「开口」最近的那一帧（黑帧本来就没进缓冲）
+                            snap = min(items, key=lambda it: abs(it[0] - onset))
+                        else:
+                            snap = items[-1]
+                age = 0.0
+                if snap is None:
+                    live = frames.snapshot(1) if frames is not None else []
+                    if live:
+                        snap = live[-1]
+                if snap is not None:
+                    ts, im = snap
+                    age = max(0.0, time.time() - ts)
                     buf = io.BytesIO()
-                    snap[-1][1].save(buf, "JPEG", quality=82)
-                    parts.append({"type": "text", "text": "这张是老大此刻的屏幕。"})
+                    im.save(buf, "JPEG", quality=82)
+                    parts.append({"type": "text", "text":
+                                  "这张是你开口说话那一刻的屏幕，大约 %.0f 秒前——**不是现在的**。"
+                                  "这期间画面可能已经变了，别把它当此刻，也别拿它当「很久以前的图」。" % age})
                     parts.append({"type": "image_url", "image_url": {
                         "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}})
+                    log.info("语音：带上开口那一刻的帧（%.0f 秒前）", age)
             except Exception as exc:  # noqa: BLE001
                 log.debug("语音带图失败（不带也照答）：%s", exc)
         system = self._persona() + (
