@@ -124,6 +124,13 @@ DEFAULTS = {
     "watch_focus": True,
     # 识屏时先描述清楚场景、认得出作品就报名字（老大 2026-11-17 要的）
     "see_howto": True,
+    # 看到不认识的游戏/番剧，自己问一下写进 titles.json（作品小抄）
+    "title_learner": {
+        "enabled": True,
+        "interval_seconds": 60,
+        "min_checks": 2,
+        "cooldown_minutes": 360,
+    },
     "vision_context_entries": 6,
     "vision_context_minutes": 30,
     "vision_context_budget_chars": 600,
@@ -197,6 +204,27 @@ def title_hint(app: str = "", title: str = "") -> str:
     return ""
 
 
+def save_title_notes(updates: dict) -> int:
+    """把几条写进 titles.json（原子替换），返回写入后的总条数。"""
+    try:
+        with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:  # noqa: BLE001
+        data = {}
+    for key, val in (updates or {}).items():
+        key = str(key).strip()
+        if key and val:
+            data[key] = str(val).strip()
+    tmp = TITLES_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    os.replace(tmp, TITLES_PATH)
+    title_notes(refresh=True)
+    return len(data)
+
+
 def build_see_howto() -> str:
     """识屏时「怎么看」的规矩：先把场景看清楚，再挑一两句说出口。"""
     return "\n".join([
@@ -209,7 +237,9 @@ def build_see_howto() -> str:
         "标题和画面对不上时，先信画面，再说「看着倒像是……」；两个都判断不出来就说「像是什么什么」，别编。",
         "3. 认出来的作品，就接着聊你知道的（类型、玩法、角色、梗）；真不熟，就只说名字，"
         "再加上画面里能看到的，别装懂也别装不知道。",
-        "4. 画面上的文字（字幕、台词、界面上的字）不要念出来。",
+        "4. 画面里的人物：能对上号就**直接叫名字**（「这不是 XXX 吗」），这是老大最爱听的；"
+        "对不上号就说外形特征，别硬安名字、别把人认成别的作品里的角色。",
+        "5. 画面上的文字（字幕、台词、界面上的字）不要念出来。",
     ])
 
 
@@ -1202,7 +1232,7 @@ class SpeechPipeline:
         mode = getattr(getattr(self, "_gateway", None), "mode", None)
         # 只在「正在看片/看番/直播/网课」时不说这句——那些场景本来就有声音，插一句很吵。
         # 模式「关闭」不拦：那是老大主动让她看一眼，提示音当然要有。
-        if mode is not None and mode.get() in ("video", "anime", "live", "course"):
+        if mode is not None and mode.get() in FOCUS_MODES:
             return
         cues = self.cfg["tts"].get("pre_cue") or []
         interval = float(self.cfg["tts"].get("pre_cue_min_interval", 20))
@@ -1273,7 +1303,7 @@ class SpeechPipeline:
         # 「让我看看」只在平时（含 auto/关闭）说。看番/看视频/直播/网课时不打扰——
         # 那些场景本来就在放声音，再来一句提示音很吵。
         mode = getattr(getattr(self, "_gateway", None), "mode", None)
-        if mode is not None and mode.get() in ("video", "anime", "live", "course"):
+        if mode is not None and mode.get() in FOCUS_MODES:
             return
         cues = self.cfg["tts"].get("pre_cue") or []
         interval = float(self.cfg["tts"].get("pre_cue_min_interval", 20))
@@ -1873,7 +1903,7 @@ class DivinationWatcher(threading.Thread):
 
 
 class Mode:
-    """陪伴模式：auto / normal / video / anime / live / course / off。
+    """陪伴模式：auto / normal / video / anime / live / course / game / off。
 
     只存一个值，落到 mode.json；插件（AstrBot）通过 HTTP 读写它。
     """
@@ -1901,8 +1931,8 @@ class Mode:
 
     def set(self, mode: str, source: str = "api") -> dict:
         mode = (mode or "").strip().lower()
-        if mode not in ("auto", "normal", "video", "anime", "live", "course", "off"):
-            raise ValueError("mode 只能是 auto/normal/video/anime/live/course/off")
+        if mode not in ("auto", "normal", "video", "anime", "live", "course", "game", "off"):
+            raise ValueError("mode 只能是 auto/normal/video/anime/live/course/game/off")
         with self.lock:
             self.value = mode
             self.source = source
@@ -1914,6 +1944,136 @@ class Mode:
             except OSError:
                 pass
             return data
+
+
+class TitleLearner(threading.Thread):
+    """自己把不认识的游戏/番剧补进 titles.json（老大 2026-11-17 要的）。
+
+    只看「像作品」的前台窗口：游戏进程（排除浏览器/编辑器/终端）或带番剧字样的浏览器标题。
+    同一个标题要连着看到 `min_checks` 次才动手（切一下就走的窗口不浪费一次调用），
+    问过的不再重复问（`cooldown_minutes` 内）。写进去的值是 2~3 句：游戏写玩法，
+    番剧写剧情概要 + 主要人物，**不要公司/平台/发售时间这类共识**。
+    """
+
+    SKIP_APPS = ("explorer", "code", "devenv", "pycharm", "idea", "notepad", "wezterm",
+                 "windowsterminal", "cmd", "powershell", "conhost", "taskmgr", "python",
+                 "pythonw", "astrbot", "dsh", "chrome", "msedge", "firefox", "brave")
+    BROWSER_LIKE = ("chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "browser")
+    VIDEO_HINTS = ("番剧", "动画", "第", "集", "ova", "动漫", "bilibili", "哔哩哔哩",
+                   "直播", "电影", "纪录片", "综艺", "字幕")
+
+    def __init__(self, cfg: dict, gateway):
+        super().__init__(name="title-learner", daemon=True)
+        conf = cfg.get("title_learner") or {}
+        self.cfg = cfg
+        self.gateway = gateway
+        self.enabled = bool(conf.get("enabled", True))
+        self.interval = max(20.0, float(conf.get("interval_seconds", 60)))
+        self.min_checks = max(1, int(conf.get("min_checks", 2)))
+        self.cooldown = float(conf.get("cooldown_minutes", 360)) * 60
+
+    def _interesting(self, app: str, title: str) -> bool:
+        low_app = (app or "").lower().replace(".exe", "")
+        if not low_app or not title.strip():
+            return False
+        if low_app in ("", "-"):
+            return False
+        if any(low_app.startswith(skip) for skip in self.SKIP_APPS) and not any(
+                h in title for h in self.VIDEO_HINTS):
+            return False
+        if len(title.strip()) < 2 or title.strip() in ("Program Manager", "Microsoft​ Edge"):
+            return False
+        return True
+
+    def run(self) -> None:
+        if not self.enabled:
+            return
+        seen: dict[tuple[str, str], list] = {}
+        while True:
+            time.sleep(self.interval)
+            try:
+                from video_watch import foreground
+
+                app, title = foreground()
+                if not self._interesting(app, title):
+                    continue
+                if title_hint(app, title):
+                    continue                       # 小抄里已经有了
+                key = (app, title)
+                rec = seen.setdefault(key, [0, 0.0])
+                rec[0] += 1
+                if rec[0] < self.min_checks:
+                    continue
+                if time.time() - rec[1] < self.cooldown:
+                    continue
+                rec[1] = time.time()
+                self.learn(app, title)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("作品小抄自动补条目出错：%s", exc)
+
+    def learn(self, app: str, title: str) -> None:
+        parts = []
+        try:
+            snap = self.gateway.frames.snapshot(1)
+            if snap:
+                from PIL import Image
+
+                buf = io.BytesIO()
+                snap[-1][1].save(buf, "JPEG", quality=78)
+                parts.append({"type": "text", "text": "这张是老大此刻的屏幕。"})
+                parts.append({"type": "image_url", "image_url": {
+                    "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}})
+        except Exception:  # noqa: BLE001
+            pass
+        ask = (
+            "窗口标题：%s\n进程：%s\n\n"
+            "如果这明显是一款游戏、一部番剧/动画、或者正在播的影视，只回一个 JSON：\n"
+            '{"kind":"game|anime|video|other","name":"作品的中文常用名","note":"2~3 句：'
+            '游戏写怎么玩/核心机制/大致流程；番剧和影视写大体剧情 + 主要人物名字。'
+            '不要写公司、平台、发售时间、评分这类常识。"}\n'
+            "其他情况（网页、文档、代码、聊天、工具）就回 {\"kind\":\"other\"}。只回 JSON，不要解释。"
+            % (title, app)
+        )
+        parts.insert(0, {"type": "text", "text": ask})
+        payload = {
+            "model": self.cfg.get("model") or "deepseek-v4-flash",
+            "max_tokens": 400, "stream": False,
+            "messages": [
+                {"role": "system", "content": "你在给桌面宠物维护一张作品小抄，只回 JSON。"},
+                {"role": "user", "content": parts},
+            ],
+        }
+        try:
+            data = self.gateway.post_once(payload)
+            text = (data["choices"][0]["message"].get("content") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("作品小抄：问不出来（%s）：%s", title[:30], exc)
+            return
+        text = text.strip("`").strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            log.info("作品小抄：回答不是 JSON，跳过（%s）", title[:30])
+            return
+        if str(obj.get("kind") or "").lower() == "other":
+            log.info("作品小抄：判断不是作品，跳过（%s）", title[:30])
+            return
+        name = str(obj.get("name") or "").strip()
+        note = str(obj.get("note") or "").strip()
+        if not name or not note:
+            return
+        updates = {name: note}
+        low_app = (app or "").lower().replace(".exe", "")
+        if low_app and low_app not in self.BROWSER_LIKE:
+            updates.setdefault(low_app, note)   # 进程名也记一条，标题被吞也能命中
+        try:
+            total = save_title_notes(updates)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("作品小抄：写不进去（%s）", exc)
+            return
+        log.info("作品小抄：自动记下「%s」（%s，共 %d 条）", name, obj.get("kind"), total)
 
 
 class FrameBuffer(threading.Thread):
@@ -2223,21 +2383,37 @@ def self_ref_recent(rows: list[dict], minutes: float) -> bool:
 
 
 WATCH_MODES = ("video", "anime", "live", "course")
+# 游戏模式：跟看片一样「专心」，但**不吃字幕/转写**（游戏没有字幕可读，也不该念界面文字）
+GAME_MODE = "game"
+FOCUS_MODES = WATCH_MODES + (GAME_MODE,)
 # 问到「屏幕上的东西」的信号：这类问题必须带上当前前台/截图才答得出来
 SCREEN_QUESTION_HINTS = (
     "游戏", "番", "视频", "画面", "屏幕", "直播", "在玩", "在看", "玩什么", "看什么",
     "这部", "那部", "这个是", "那个是", "我在干", "我这样",
 )
-_MODE_WORD = {"video": "视频", "anime": "番剧", "live": "直播", "course": "网课"}
+_MODE_WORD = {"video": "视频", "anime": "番剧", "live": "直播", "course": "网课", "game": "游戏"}
 
 
 def build_watch_focus(mode: str) -> str:
-    """看片/看番时的「专心看」规矩。
+    """看片/看番/**打游戏**时的「专心」规矩。
 
     老大原话：看番的时候她老说「这个点还不睡」，很影响体验；字幕她也当成稿子念。
     所以这里把两件事一起按住：**不许拿时间/作息当话题**，**字幕只当剧情参考**。
+    游戏模式（2026-11-17 加）同一套，但不吃字幕，改成一件事：别指挥、别剧透、别念界面文字。
     """
     kind = _MODE_WORD.get(mode, "视频")
+    if mode == GAME_MODE:
+        return "\n".join([
+            "【现在老大在打游戏，你在旁边陪玩】这一轮只聊游戏里的内容。硬规矩：",
+            "1. 不许提时间，也不许拐着弯提：不说几点、不说「这么晚」「这个点」「后半夜」「天都快亮了」，"
+            "不催他睡觉、不劝他歇会儿、不操心眼睛、不说「明天还要上班」。打游戏的时候听到这些很扫兴。",
+            "2. 不指挥、不当教练：不说「该放技能了」「往左走」，别替他判断该干什么；"
+            "吐槽、惊叹、跟着一起紧张都可以。",
+            "3. 画面上的字（任务提示、技能说明、伤害数字、聊天框、弹幕）不要念出来。",
+            "4. 认得出是什么游戏，就按你记得的说（玩法、这个角色是谁、这关大概什么机制）；"
+            "认得出画面里的角色也直接说名字。不熟就只说名字和看得到的样子，别编。",
+            "5. 挑一个真有意思的点说，一两句就够；不报进度、不刷屏。",
+        ])
     return "\n".join([
         "【现在你在陪老大看%s，这一轮只聊内容】" % kind,
         "老大是专门在看这个的。你跟着剧情和画面走就行，下面几条是硬规矩：",
@@ -2247,7 +2423,8 @@ def build_watch_focus(mode: str) -> str:
         "不要念字幕原文、不要整句复述台词、不要说「字幕说」「上面写着」「台词里」「旁白说」这种话。"
         "用你自己的话讲发生了什么、你怎么看、你猜接下来会怎样。",
         "3. 画面也别逐条播报。挑一个真有意思的点说，一两句就够；不报进度、不剧透、不总结本集剧情。",
-        "4. 更早记录里带的时间只是给你判断新旧用的，不是话题。",
+        "4. 认得出画面里是哪个角色，就直接叫名字；认不出就说外形（蓝头发、戴帽子那个）。",
+        "5. 更早记录里带的时间只是给你判断新旧用的，不是话题。",
     ])
 
 
@@ -2545,6 +2722,9 @@ class Gateway:
         # 通用视频模式：前台播放器 + 环回有声 + 键鼠低活跃 → 自动判定；不是 B 站就靠它
         self.video = VideoWatcher(cfg, self)
         self.video.start()
+        # 看到不认识的游戏/番剧，自己查一下补进 titles.json（作品小抄）
+        self.title_learner = TitleLearner(cfg, self)
+        self.title_learner.start()
         # 头顶原生气泡（独立 Qt 小工，按需拉起）
         self.bubble = BubbleBridge(cfg)
         self.bubble.start()
@@ -2641,7 +2821,7 @@ class Gateway:
         ]
         # 自己看一眼这条捷径也要守「看片专心」的规矩，不然看番时照样催睡觉
         watching = self.mode.get()
-        if self.cfg.get("watch_focus", True) and watching in WATCH_MODES:
+        if self.cfg.get("watch_focus", True) and watching in FOCUS_MODES:
             messages.append({"role": "system", "content": build_watch_focus(watching)})
         # 「先看清再说话」和作品小抄，这条路也不能少（它不走 prepare）
         if self.cfg.get("see_howto", True):
@@ -2720,12 +2900,17 @@ class Gateway:
         return ok
 
     def _mode_lock_loop(self) -> None:
-        """托盘里手动选的模式只锁 10 分钟，之后回自动（跟原来的自动判定接上）。"""
+        """托盘里手动选的模式只锁 10 分钟，之后回自动（跟原来的自动判定接上）。
+
+        游戏模式例外：打一局往往超过 10 分钟，中途被拨回自动，她就开始念时间了。
+        """
         while True:
             time.sleep(10)
             try:
                 # 「关闭」是用户明确不要看，别 10 分钟后自己把看屏又打开
                 if self.mode.get() == "off":
+                    continue
+                if self.mode.get() == GAME_MODE:
                     continue
                 if (str(self.mode.source).startswith("tray")
                         and not str(self.mode.source).startswith("tray-timeout")
@@ -2753,7 +2938,7 @@ class Gateway:
             pass
         screen_q = any(w in text for w in SCREEN_QUESTION_HINTS)
         want_look = (any(w in text for w in LOOK_HINTS) or screen_q
-                     or self.mode.get() in ("video", "anime", "live", "course"))
+                     or self.mode.get() in FOCUS_MODES)
         context = []
         if title or app:
             context.append("【老大此刻的前台】%s（%s）" % (title or app, app or "?"))
@@ -3058,7 +3243,7 @@ class Gateway:
             m = APP_RE.search(str(user_text or ""))
             if m:
                 app = m.group(1).strip()
-            watching = self.mode.get() in WATCH_MODES
+            watching = self.mode.get() in FOCUS_MODES
             prev = self.ledger.recent_vision_for_app(
                 app,
                 max_minutes=float(self.cfg.get("vision_context_minutes", 30)),
@@ -3084,13 +3269,13 @@ class Gateway:
             if block:
                 messages.insert(0, {"role": "system", "content": block})
                 log.info("注入识屏：近况 %d 条 + 摘要 %d 字", len(rows), len(digest))
-        # 看片/看番/看直播/网课：这一轮只聊内容，不提时间，不念字幕。
+        # 看片/看番/看直播/网课/打游戏：这一轮只聊内容，不提时间，不念字幕（游戏不念界面文字）。
         # 放在最后 insert(0)，所以它是整段对话最前面那条 system（最有分量）。
         if scenario == "vision" and self.cfg.get("watch_focus", True):
             watching = self.mode.get()
-            if watching in WATCH_MODES:
+            if watching in FOCUS_MODES:
                 messages.insert(0, {"role": "system", "content": build_watch_focus(watching)})
-                log.info("看片模式：注入「专心看」规矩（%s）", watching)
+                log.info("专注模式：注入「专心」规矩（%s）", watching)
 
         payload["messages"] = messages
         payload["stream"] = True
@@ -3438,29 +3623,14 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(items, dict) or not items:
             self._send_json({"ok": False, "error": "给我 {作品名: 一句话说明}"}, 400)
             return
+        added = [str(k).strip() for k in items if str(k).strip() and str(k) != "items"]
         try:
-            with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-        except Exception:  # noqa: BLE001
-            data = {}
-        added = []
-        for key, val in items.items():
-            key = str(key).strip()
-            if not key or key == "items":
-                continue
-            data[key] = str(val).strip()
-            added.append(key)
-        tmp = TITLES_PATH + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-            os.replace(tmp, TITLES_PATH)
+            total = save_title_notes(items)
         except OSError as exc:
             self._send_json({"ok": False, "error": "写不进去：%s" % exc}, 500)
             return
-        title_notes(refresh=True)
         log.info("作品小抄加了 %d 条：%s", len(added), "、".join(added[:6]))
-        self._send_json({"ok": True, "added": added, "count": len(data)})
+        self._send_json({"ok": True, "added": added, "count": total})
 
     def _handle_warm(self):
         """重新预热固定句子（DSH 状态、气泡文案）；force=true 时先删缓存重合成。"""

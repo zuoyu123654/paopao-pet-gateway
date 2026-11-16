@@ -60,6 +60,7 @@ WATCH_ITEMS = (
     ("auto", "自动模式"),
     ("video", "B站视频"),
     ("anime", "B站看番"),
+    ("game", "玩游戏"),
     ("generic", "通用视频"),
 )
 VOICE_ITEMS = (

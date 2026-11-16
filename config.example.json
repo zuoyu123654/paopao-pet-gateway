@@ -154,5 +154,11 @@
     "vision_mention_minutes": 30,
     "mute_vision_when_off": false,
     "watch_focus": true,
-    "see_howto": true
+    "see_howto": true,
+    "title_learner": {
+        "enabled": true,
+        "interval_seconds": 60,
+        "min_checks": 2,
+        "cooldown_minutes": 360
+    }
 }

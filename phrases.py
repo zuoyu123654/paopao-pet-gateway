@@ -18,6 +18,7 @@ TRAY_FEEDBACK = {
     "auto": "哦，回自动了",
     "video": "嗯，B站视频模式",
     "anime": "哦，看番模式",
+    "game": "哦，游戏模式",
     "generic": "通用视频，看着呢",
     "voice_off": "语音关掉了",
     "ptt": "按键说话，Ctrl+Alt+V",

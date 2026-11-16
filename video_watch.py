@@ -516,6 +516,11 @@ class VideoWatcher(threading.Thread):
                 if self.state != "idle" or self.active:
                     self._leave("模式关闭")
                 return
+            # 游戏模式：不吃字幕也不吃转写（老大要的「不用字幕」），已经在看就先退出来
+            if self.gateway.mode.get() == "game":
+                if self.state != "idle" or self.active:
+                    self._leave("切到游戏模式")
+                return
         except Exception:  # noqa: BLE001
             pass
         app, title = foreground()
