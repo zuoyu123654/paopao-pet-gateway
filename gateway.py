@@ -3003,7 +3003,9 @@ class Facts:
     这里把「像在纠正/教她」的话单独记一份，聊天、语音、识屏都读同一份，7 天有效。
     """
 
-    # 只收「像在教她」的话，避免把普通聊天都记成事实
+    # 只收「像在教她」的话，避免把普通聊天都记成事实。
+    # 重点：带问号的纠正也要收（「这个角色是谁？她是遐蝶」），
+    # 但不能把纯提问（「她是谁？」）记成事实，所以用「是/叫 + 具体名字」兜底。
     TEACH_RE = re.compile(
         r"(?:那个人|这个人|这个角色|那个角色|这角色|那角色|这姑娘|那姑娘|她|他|它|这货|那货)"
         r"\s*(?:是|叫|名叫|叫做|念作|读作)"
@@ -3011,7 +3013,14 @@ class Facts:
         r"|(?:记住|记一下|记着|记好)[，,:：]?\s*.{2,60}"
         r"|(?:名字|名字叫|叫)\s*[:：]\s*[\u4e00-\u9fffA-Za-z·]{2,12}"
     )
-    BLOCK = ("是不是", "是什么", "是谁", "哪", "怎么", "为什么", "什么", "？", "?")
+    NAME = r"[\u4e00-\u9fffA-Za-z·]{2,12}"
+    ASSERT_RE = re.compile(
+        r"(?:不是[^，,。！？!?]{1,18}[，,]?\s*)?"
+        r"(?:是|叫|名叫|叫做|名字叫|名字是|名字[:：]|应该是|其实是)\s*(" + NAME + r")"
+    )
+    BAD_NAMES = ("谁", "什么", "哪", "怎么", "为什么", "哪个", "哪位", "哪只",
+                 "什么角色", "哪个角色", "谁啊", "什么啊")
+
 
     def __init__(self, cfg: dict):
         conf = cfg.get("facts") or {}
@@ -3066,9 +3075,13 @@ class Facts:
         text = re.sub(r"^(?:记住|记一下|记着|记好)[，,:：]?\s*", "", text).strip(" 　")
         if not (3 <= len(text) <= 120):
             return False
-        if any(w in text for w in self.BLOCK):
-            return False
         if not self.TEACH_RE.search(text):
+            return False
+        m = self.ASSERT_RE.search(text)
+        if not m:
+            return False
+        name = m.group(1).strip()
+        if not name or any(name == bad or name.startswith(bad) for bad in self.BAD_NAMES):
             return False
         now = time.time()
         with self.lock:
@@ -3119,7 +3132,8 @@ class Facts:
                 break
         if not picked:
             return ""
-        return ("【老大教过你的】（他亲口说的，比你猜的准；认出来就直接用，别反驳、别装不知道）\n"
+        return ("【老大亲口纠正过的·认人最高优先】（画面再像也以这几条为准；"
+                "不许用你猜的名字覆盖，认出来就直接用，别反驳、别装不知道）\n"
                 + "\n".join(picked))
 
 
