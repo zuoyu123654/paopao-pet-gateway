@@ -397,8 +397,10 @@ class VideoWatcher(threading.Thread):
         self.app = ""
         self.title = ""
         self.session_since = 0.0
-        self.last_audio_at = 0.0
-        self.last_fore_at = 0.0
+        # 启动时不要拿 0 去算「多久没声音」：网关重启时 mode.json 里可能还存着
+        # live，旧代码会立刻认为「已经几百秒没声音」直接退出（2026-11-17 实测踩到）。
+        self.last_audio_at = time.time()
+        self.last_fore_at = time.time()
         self.asr_bad = 0
         self.ocr_on = False
         self.last_asr_at = 0.0
