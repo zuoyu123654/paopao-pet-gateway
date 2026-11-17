@@ -4625,22 +4625,21 @@ class Gateway:
             elif title or app:
                 # 记一笔，方便以后往 titles.json 里补
                 log.info("识屏：小抄里没有这个作品（%s）", (title or app)[:40])
-            # 「肚子里的资料」：只有画面/问话里出现相关线索才递一两段，用不上就一个字不提。
-            # 游戏模式这是主动识屏，没有用户提问：只给「一句话」，不塞整段手册。
-            if self.mode.get() == GAME_MODE:
+            # 「肚子里的资料」：只要画面/问话里出现相关线索就递一两段，
+            # 游戏模式主动识屏也一样带（预算仍按 lore.budget_chars）。
+            try:
+                lore_block = self.lore.block(app=app, title=title, query=user_text)
+            except Exception as exc:  # noqa: BLE001
+                lore_block = ""
+                log.info("资料库检索没成（不影响识屏）：%s", exc)
+            if lore_block:
+                messages.insert(0, {"role": "system", "content": lore_block})
+                log.info("识屏：带上资料（%s）", (title or app or "?")[:30])
+            elif self.mode.get() == GAME_MODE:
                 headline = self.lore.headline(app=app, title=title)
                 if headline:
                     messages.insert(0, {"role": "system", "content": headline})
                     log.info("识屏：带上资料一句话（%s）", (title or app or "?")[:30])
-            else:
-                try:
-                    lore_block = self.lore.block(app=app, title=title, query=user_text)
-                except Exception as exc:  # noqa: BLE001
-                    lore_block = ""
-                    log.info("资料库检索没成（不影响识屏）：%s", exc)
-                if lore_block:
-                    messages.insert(0, {"role": "system", "content": lore_block})
-                    log.info("识屏：带上资料（%s）", (title or app or "?")[:30])
             # 老大在聊天/语音里教过的事（「那是遐蝶，不是希尔」）→ 识屏也要知道
             facts_block = self._facts_block(app, title)
             if facts_block:
