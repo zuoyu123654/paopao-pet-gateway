@@ -50,7 +50,8 @@
         "sentence_head_pad": 0.03,
         "sentence_tail_pad": 0.08,
         "reading_fixes": {
-            "弹幕": "蛋幕"
+            "弹幕": "蛋幕",
+            "茜特菈莉": "希特菈莉"
         },
         "guard": {
             "enabled": true,
