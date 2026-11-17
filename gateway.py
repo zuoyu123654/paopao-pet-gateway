@@ -101,6 +101,8 @@ DEFAULTS = {
     "speak_chat": True,
     "speak_vision": True,
     "inject_vision_ledger": True,
+    # 文字聊天问「这个角色是谁」时补一张当前屏幕，别拿最近聊过的角色硬套
+    "chat_screen_look": True,
     "mouse_look": {
         "enabled": True,
         "cooldown_seconds": 3,
@@ -3007,7 +3009,7 @@ class Facts:
     # 重点：带问号的纠正也要收（「这个角色是谁？她是遐蝶」），
     # 但不能把纯提问（「她是谁？」）记成事实，所以用「是/叫 + 具体名字」兜底。
     TEACH_RE = re.compile(
-        r"(?:那个人|这个人|这个角色|那个角色|这角色|那角色|这姑娘|那姑娘|她|他|它|这货|那货)"
+        r"(?:这个|那个|这|那|那个人|这个人|这个角色|那个角色|这角色|那角色|这姑娘|那姑娘|她|他|它|这货|那货)"
         r"\s*(?:是|叫|名叫|叫做|念作|读作)"
         r"|不是.{1,18}(?:而是|，|,)\s*是"
         r"|(?:记住|记一下|记着|记好)[，,:：]?\s*.{2,60}"
@@ -3076,6 +3078,8 @@ class Facts:
         name = m.group(1).strip()
         if not name or any(name == bad or name.startswith(bad) for bad in self.BAD_NAMES):
             return ""
+        if name.endswith("的") or "游戏里的" in name:
+            return ""
         return name
 
     def add(self, text: str, app: str = "", title: str = "", source: str = "chat",
@@ -3084,6 +3088,13 @@ class Facts:
             return False
         text = re.sub(r"\s+", " ", str(text or "")).strip(" 　")
         text = re.sub(r"^(?:记住|记一下|记着|记好)[，,:：]?\s*", "", text).strip(" 　")
+        # 桌面聊天可能把上下文一起塞进来：只截「是/叫 + 名字」附近的一段，别整句拒掉
+        if len(text) > 120:
+            m = self.ASSERT_RE.search(text)
+            if not m:
+                return False
+            start = max(0, m.start() - 20)
+            text = text[start:start + 120].strip(" 　")
         if not (3 <= len(text) <= 120):
             return False
         if not self.TEACH_RE.search(text):
@@ -4694,10 +4705,45 @@ class Gateway:
         if self.cfg.get("wipe_owner_word", True):
             replace_owner_word(messages)
         user_text = ""
+        last_user_msg = None
         for msg in reversed(messages):
             if msg.get("role") == "user":
+                last_user_msg = msg
                 user_text = message_text(msg.get("content"))[:1200]
                 break
+        screen_attached = False
+        # 文字聊天问「这个角色是谁」时，桌宠不会自动带图；不带图她只能拿最近聊过的
+        # 角色硬套（所以什么都答奥黛塔）。这里补一张此刻的屏幕。
+        if scenario == "chat" and last_user_msg is not None \
+                and self.cfg.get("chat_screen_look", True):
+            hints = ("角色", "是谁", "谁啊", "谁呀", "这个人", "那个人", "这个人物",
+                     "长什么样", "长得像", "认得出", "认人", "这个是", "这个是什么")
+            if any(w in user_text for w in hints):
+                content = last_user_msg.get("content")
+                has_img = isinstance(content, list) and any(
+                    isinstance(p, dict) and p.get("type") in ("image_url", "input_image")
+                    for p in content)
+                if not has_img:
+                    try:
+                        b64, n = self.frames.grid_jpeg(1, 1)
+                    except Exception:  # noqa: BLE001
+                        b64, n = "", 0
+                    if b64:
+                        if isinstance(content, str):
+                            content = [{"type": "text", "text": content}]
+                        if isinstance(content, list):
+                            content.extend([
+                                {"type": "text", "text": "（这是老大此刻的屏幕，请看当前画面。）"},
+                                {"type": "image_url", "image_url": {
+                                    "url": "data:image/jpeg;base64," + b64}},
+                            ])
+                            last_user_msg["content"] = content
+                            screen_attached = True
+                            messages.insert(0, {"role": "system", "content":
+                                "【看当前屏幕】老大在问画面里的角色。先看这一张此刻的截图："
+                                "发色/发型、服装主色、武器/标志物；看完再给名字。"
+                                "不要拿最近聊过的角色硬套，认不出就说「看不清/不确定」。"})
+                            log.info("聊天：问角色，补一张当前屏幕")
         if scenario == "vision" and self.cfg.get("soften_self_recognition", True):
             for msg in messages:
                 content = msg.get("content")
@@ -4818,7 +4864,8 @@ class Gateway:
                 messages.insert(0, {"role": "system", "content": block})
                 log.info("识屏带上近况 %d 条%s", len(prev), "（看片中，不给钟点）" if watching else "")
 
-        if scenario == "chat" and self.cfg.get("inject_vision_ledger", True):
+        if scenario == "chat" and self.cfg.get("inject_vision_ledger", True) \
+                and not screen_attached:
             rows = self.ledger.recent_vision(
                 int(self.cfg.get("inject_recent_entries", 3)),
                 float(self.cfg.get("inject_recent_minutes", 45)),

@@ -217,8 +217,7 @@ class VoiceMode(threading.Thread):
             self.recording.set()
             self.cancel.clear()
             self.state = "listening"
-        # 冒个「我在听」——纯提示，不出声（声音一句都不发，别盖住老大）
-        self._bubble(BUBBLE_LISTENING, int(self.max_record * 1000))
+        # 不在开录时冒「我在听」：只有真检测到出声才冒，免得电话模式一直占着气泡
         log.info("语音：开始录（%s）", self.mode)
         return True
 
@@ -308,7 +307,6 @@ class VoiceMode(threading.Thread):
             self.recording.clear()
             if self.cancel.is_set() or pcm is None or len(pcm) / SAMPLE_RATE < self.min_record:
                 self._set_state("idle")
-                self._hide_bubble()
                 log.info("语音：这次没录到有效内容（%.2fs）", (len(pcm) if pcm is not None else 0) / SAMPLE_RATE)
                 self._reopen_call()
                 continue
@@ -484,6 +482,7 @@ class VoiceMode(threading.Thread):
                     if rms >= self.threshold:
                         if not heard:
                             self.last_onset_at = time.time()
+                            self._bubble(BUBBLE_LISTENING, 2200)
                         heard = True
                         silence = 0.0
                     elif heard:
