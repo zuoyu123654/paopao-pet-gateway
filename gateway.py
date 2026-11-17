@@ -28,6 +28,7 @@ import audioop
 import base64
 import hashlib
 import socket
+import subprocess
 import collections
 import io
 import ctypes
@@ -54,7 +55,7 @@ from video_watch import VideoWatcher
 from bubble_bridge import BubbleBridge
 from voice_mode import VoiceMode, LOOK_HINTS
 from player_watch import PlayerWatch
-from lore import Lore, LoreKeeper, ProgressKeeper
+from lore import Lore, LoreKeeper, ProgressKeeper, clean_query
 import phrases as fixed_phrases
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +86,13 @@ DEFAULTS = {
         "early_min_chars": 8,
         "first_min_chars": 24,
         "reading_fixes": {},
+        "guard": {
+            "enabled": True,
+            "check_seconds": 15,
+            "wait_seconds": 120,
+            "relaunch_cooldown_seconds": 90,
+            "launch": {"python": "", "script": "", "args": [], "workdir": ""},
+        },
         "pre_cue": ["让我看看……", "唔，我瞅瞅。"],
         "pre_cue_min_interval": 20,
         "cache_pre_cue": True,
@@ -838,6 +846,7 @@ class SpeechPipeline:
                         log.warning("流式请求没连上（第 %d/3 次）：%s", attempt, exc)
                         if attempt == 3:
                             return "failed", 0.0
+                        self._wait_tts(25.0)
                         time.sleep(0.5 * attempt)
 
                 header = b""
@@ -1165,6 +1174,17 @@ class SpeechPipeline:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _wait_tts(self, timeout: float = 25.0) -> bool:
+        """TTS 连不上时，等它起来（网关的 TtsGuard 会顺手把它拉起来）。"""
+        gw = getattr(self, "_gateway", None)
+        guard = getattr(gw, "tts_guard", None)
+        if guard is None:
+            return False
+        try:
+            return bool(guard.ensure(timeout))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _request_audio(self, params: dict, timeout: float, attempts: int = 3) -> bytes:
         """向 GPT-SoVITS 要一段完整音频（非流式）。失败重试 —— 它偶发 400/断连，
         一次失败就丢整句的话，老大听到的就是「说到一半没了」。
@@ -1189,6 +1209,7 @@ class SpeechPipeline:
                     log.warning("TTS 请求失败（%s 第 %d/%d 次）：%s",
                                 base.rsplit(":", 1)[-1], attempt, attempts, exc)
                     if attempt < attempts:
+                        self._wait_tts(25.0)
                         time.sleep(0.4 * attempt)
         raise RuntimeError("TTS 连续 %d 次失败：%s" % (attempts * len(backends), last_exc))
 
@@ -2551,6 +2572,134 @@ APP_RE = re.compile(r"前台应用为\s*([^|\n）)]+)")
 SCREEN_META_RE = re.compile(r"前台应用为\s*([^|\n）)]+)(?:\s*\|\s*([^\n）)]+))?")
 
 
+class Facts:
+    """老大亲口教过的事（「那个人是遐蝶，不是希尔」这种）。
+
+    为什么要单独存：`ledger.jsonl` 的识屏上下文只挑 `scenario=vision` 的行，
+    聊天里教的名字传不到下一次识屏；而「角色认错」正是这么来的。
+    这里把「像在纠正/教她」的话单独记一份，聊天、语音、识屏都读同一份，7 天有效。
+    """
+
+    # 只收「像在教她」的话，避免把普通聊天都记成事实
+    TEACH_RE = re.compile(
+        r"(?:那个人|这个人|这个角色|那个角色|这角色|那角色|这姑娘|那姑娘|她|他|它|这货|那货)"
+        r"\s*(?:是|叫|名叫|叫做|念作|读作)"
+        r"|不是.{1,18}(?:而是|，|,)\s*是"
+        r"|(?:记住|记一下|记着|记好)[，,:：]?\s*.{2,60}"
+        r"|(?:名字|名字叫|叫)\s*[:：]\s*[\u4e00-\u9fffA-Za-z·]{2,12}"
+    )
+    BLOCK = ("是不是", "是什么", "是谁", "哪", "怎么", "为什么", "什么", "？", "?")
+
+    def __init__(self, cfg: dict):
+        conf = cfg.get("facts") or {}
+        self.enabled = bool(conf.get("enabled", True))
+        self.path = os.path.join(APP_DIR, str(conf.get("path") or "facts.jsonl"))
+        self.max_age = float(conf.get("max_age_hours", 168)) * 3600
+        self.max_items = max(20, int(conf.get("max_items", 300)))
+        self.inject_items = max(1, int(conf.get("inject_items", 3)))
+        self.lock = threading.Lock()
+        self.items = self._load()
+
+    def _load(self) -> list[dict]:
+        out: list[dict] = []
+        try:
+            with open(self.path, "r", encoding="utf-8-sig") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and row.get("text"):
+                        out.append(row)
+        except OSError:
+            pass
+        return out[-self.max_items:]
+
+    def _append(self, row: dict) -> None:
+        with self.lock:
+            self.items.append(row)
+            if len(self.items) > self.max_items * 2:
+                self.items = self.items[-self.max_items:]
+                try:
+                    with open(self.path, "w", encoding="utf-8", newline="\n") as f:
+                        for item in self.items:
+                            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
+                return
+            try:
+                with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            except OSError as exc:
+                log.debug("事实没存下（不影响这轮）：%s", exc)
+
+    def add(self, text: str, app: str = "", title: str = "", source: str = "chat") -> bool:
+        if not self.enabled:
+            return False
+        text = re.sub(r"\s+", " ", str(text or "")).strip(" 　")
+        text = re.sub(r"^(?:记住|记一下|记着|记好)[，,:：]?\s*", "", text).strip(" 　")
+        if not (3 <= len(text) <= 120):
+            return False
+        if any(w in text for w in self.BLOCK):
+            return False
+        if not self.TEACH_RE.search(text):
+            return False
+        now = time.time()
+        with self.lock:
+            for row in reversed(self.items[-8:]):
+                if row.get("text") == text and now - float(row.get("ts") or 0) < 3600:
+                    return False
+        row = {"ts": int(now), "text": text, "app": (app or "")[:40],
+               "title": (title or "")[:80], "source": source}
+        self._append(row)
+        log.info("记下老大教的事（%s）：%s", source, text[:40])
+        return True
+
+    def block(self, app: str = "", title: str = "", limit: int | None = None,
+              max_chars: int = 320) -> str:
+        if not self.enabled or not self.items:
+            return ""
+        now = time.time()
+        rows = [r for r in self.items
+                if now - float(r.get("ts") or 0) <= self.max_age and str(r.get("text") or "").strip()]
+        if not rows:
+            return ""
+        low_app, low_title = (app or "").lower(), (title or "").lower()
+
+        def rank(row: dict) -> tuple:
+            score = 0
+            ra = str(row.get("app") or "").lower()
+            rt = str(row.get("title") or "").lower()
+            if low_app and ra and ra == low_app:
+                score += 3
+            if low_title and rt and (low_title in rt or rt in low_title):
+                score += 3
+            if not ra and not rt:
+                score += 1
+            return score, float(row.get("ts") or 0)
+
+        rows.sort(key=rank, reverse=True)
+        picked: list[str] = []
+        used = 0
+        for row in rows:
+            text = re.sub(r"\s+", " ", str(row.get("text") or "")).strip()
+            tag = str(row.get("title") or row.get("app") or "").strip()
+            line = "- %s%s" % (text, ("（%s）" % tag) if tag else "")
+            if used + len(line) > max_chars:
+                break
+            picked.append(line)
+            used += len(line)
+            if len(picked) >= (limit or self.inject_items):
+                break
+        if not picked:
+            return ""
+        return ("【老大教过你的】（他亲口说的，比你猜的准；认出来就直接用，别反驳、别装不知道）\n"
+                + "\n".join(picked))
+
+
 def build_ledger_block(rows: list[dict], digest: str = "") -> str:
     if not rows and not digest:
         return ""
@@ -2919,12 +3068,134 @@ class DshWatcher(threading.Thread):
 
 
 # ------------------------------------------------------------------------- 网关
+class TtsGuard(threading.Thread):
+    """盯着 TTS 端口：没起来就拉起来，起不来就等着。
+
+    2026-11-17 的问题：开机时网关先起、GPT-SoVITS 还在加载（60~90 秒），
+    这期间第一次识屏根本没声音；TTS 中途崩了也没人管。这个线程就是补这个洞：
+      * 每 check_seconds 探一次 9882；
+      * 没在跑就按 config 里的 launch 命令拉起来（顺手写 .gsv-started，免得守护脚本再拉一个）；
+      * 语音请求遇到「连不上」时会调 ensure(timeout)，等它起来再重试，而不是直接丢句。
+    """
+
+    def __init__(self, cfg: dict):
+        super().__init__(name="tts-guard", daemon=True)
+        tts = cfg.get("tts") or {}
+        conf = tts.get("guard") or {}
+        self.cfg = cfg
+        self.enabled = bool(conf.get("enabled", True))
+        self.check = max(5.0, float(conf.get("check_seconds", 15)))
+        self.wait = float(conf.get("wait_seconds", 120))
+        self.cooldown = float(conf.get("relaunch_cooldown_seconds", 90))
+        api = str(tts.get("api") or "http://127.0.0.1:9882")
+        try:
+            parsed = urllib.parse.urlparse(api)
+            self.host = parsed.hostname or "127.0.0.1"
+            self.port = int(parsed.port or 9882)
+        except ValueError:
+            self.host, self.port = "127.0.0.1", 9882
+        launch = conf.get("launch") or {}
+        self.python = str(launch.get("python") or "")
+        self.script = str(launch.get("script") or "")
+        self.args = [str(a) for a in (launch.get("args") or [])]
+        self.workdir = str(launch.get("workdir") or APP_DIR)
+        self.stdout = str(launch.get("stdout") or os.path.join(APP_DIR, "logs", "gsv_stdout.log"))
+        self.stderr = str(launch.get("stderr") or os.path.join(APP_DIR, "logs", "gsv_stderr.log"))
+        self.marker = str(launch.get("marker") or os.path.join(APP_DIR, "logs", ".gsv-started"))
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._last_launch = 0.0
+        self.launches = 0
+        self.last_error = ""
+
+    def port_up(self) -> bool:
+        try:
+            with socket.create_connection((self.host, self.port), timeout=1.0):
+                return True
+        except OSError:
+            return False
+
+    def can_launch(self) -> bool:
+        return bool(self.python and self.script
+                    and os.path.exists(self.python) and os.path.exists(self.script))
+
+    def _launch(self) -> None:
+        with self._lock:
+            now = time.time()
+            if self._proc is not None and self._proc.poll() is None:
+                return
+            if now - self._last_launch < self.cooldown:
+                return
+            self._last_launch = now
+            if not self.can_launch():
+                self.last_error = "没配 launch 命令（tts.guard.launch）"
+                return
+            try:
+                os.makedirs(os.path.dirname(self.stdout) or ".", exist_ok=True)
+                out = open(self.stdout, "ab", buffering=0)
+                err = open(self.stderr, "ab", buffering=0)
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                self._proc = subprocess.Popen(
+                    [self.python, self.script] + self.args,
+                    cwd=self.workdir, stdout=out, stderr=err, creationflags=flags,
+                )
+                try:
+                    with open(self.marker, "w", encoding="utf-8") as f:
+                        f.write(time.strftime("%Y-%m-%dT%H:%M:%S"))
+                except OSError:
+                    pass
+                self.launches += 1
+                log.warning("TTS 没在跑，拉起 GPT-SoVITS（pid %s）", self._proc.pid)
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = str(exc)
+                log.warning("TTS 拉不起来（%s）：%s", self.python, exc)
+
+    def ensure(self, timeout: float = 0.0) -> bool:
+        """确保 TTS 可用：没起来就拉，最多等 timeout 秒。"""
+        if self.port_up():
+            return True
+        if not self.enabled:
+            return False
+        self._launch()
+        if timeout <= 0:
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(1.0)
+            if self.port_up():
+                log.info("TTS 已就绪（等了 %.0f 秒）", timeout - max(0.0, deadline - time.time()))
+                return True
+        self.last_error = "等了 %.0f 秒还没起来" % timeout
+        return False
+
+    def status(self) -> dict:
+        return {"enabled": self.enabled, "up": self.port_up(), "launches": self.launches,
+                "error": self.last_error}
+
+    def run(self) -> None:
+        if not self.enabled:
+            return
+        time.sleep(2.0)
+        while True:
+            try:
+                if not self.port_up():
+                    self._launch()
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = str(exc)
+            time.sleep(self.check)
+
+
 class Gateway:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.speech = SpeechPipeline(cfg)
         self.speech._gateway = self
+        # TTS 守护：开机时 TTS 往往还在加载，没它就绪就不开口（第一次识屏哑掉就是这么来的）
+        self.tts_guard = TtsGuard(cfg)
+        self.tts_guard.start()
         self.ledger = Ledger(cfg)
+        # 老大亲口教的事（「那个人是遐蝶」）：聊天/语音/识屏共用一份，跨通道不认错
+        self.facts = Facts(cfg)
         self.api_key = cfg.get("api_key") or read_credential(cfg.get("api_key_credential_target", ""))
         if not self.api_key:
             log.error("没有拿到 API Key：config.api_key 与 Windows 凭据都为空")
@@ -3195,6 +3466,9 @@ class Gateway:
             lore_block = self.lore.block(app=app, title=title, query=text, allow_queue=True)
             if lore_block:
                 context.append(lore_block)
+            facts_block = self._facts_block(app, title)
+            if facts_block:
+                context.append(facts_block)
         except Exception as exc:  # noqa: BLE001
             log.info("语音资料检索没成（不影响回答）：%s", exc)
         try:
@@ -3270,6 +3544,7 @@ class Gateway:
         # 气泡停留：跟字数和语音差不多长，但别赖着——3.2 秒起步，最多 5 秒
         self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))
         self.ledger.add("chat", text, reply, {"voice": True})
+        self._learn_fact("voice", text, app, title)
         return reply
 
     def _persona(self) -> str:
@@ -3292,8 +3567,17 @@ class Gateway:
         """
         if not self.cfg.get("mode_feedback", True):
             return
+        # 跟桌宠「主动识屏」开关联动的切换，由 _proactive_sync_loop 自己发声
+        # （开 → 那句「主动识屏已开启…」；关 → 气泡+「行，不看了」）。
+        # 这里再念一遍模式提示，就会出现两个声音（老大 2026-11-17 反馈）。
+        if source == "pet-proactive":
+            return
+        # 通用视频跟 B站视频都是 mode=video，靠 source 区分用哪套提示
+        key = mode
+        if mode == "video" and source in ("tray-generic", "auto-video"):
+            key = "video_any"
         # 每个模式备两句，随机挑一句（都预合成好了，零等待）
-        choices = fixed_phrases.MODE_PHRASES.get(mode) or []
+        choices = fixed_phrases.MODE_PHRASES.get(key) or []
         if not choices:
             return
         text = random.choice(list(choices))
@@ -3433,8 +3717,42 @@ class Gateway:
         except Exception as exc:  # noqa: BLE001
             log.warning("短语预热失败：%s", exc)
 
+    def _learn_fact(self, scenario: str, user_text: str, app: str = "", title: str = "") -> None:
+        """从这一轮里挑「老大在纠正/教她」的话，记进共用事实（聊天/语音/识屏都读）。"""
+        if getattr(self, "facts", None) is None:
+            return
+        try:
+            text = str(user_text or "")
+            if not (app or title):
+                m = SCREEN_META_RE.search(text)
+                if m:
+                    app = (m.group(1) or "").strip()
+                    title = (m.group(2) or "").strip()
+            if scenario == "vision":
+                text = clean_query(text)
+            elif not (app or title):
+                try:
+                    from video_watch import foreground
+
+                    app, title = foreground()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.facts.add(text, app, title, source=scenario)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("事实没记成（不影响这轮）：%s", exc)
+
+    def _facts_block(self, app: str = "", title: str = "") -> str:
+        if getattr(self, "facts", None) is None:
+            return ""
+        try:
+            return self.facts.block(app, title)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("事实没取出来：%s", exc)
+            return ""
+
     def finish_turn(self, scenario: str, user_text: str, reply: str, elapsed_ms: int) -> None:
         self.ledger.add(scenario, user_text, reply, {"ms": elapsed_ms})
+        self._learn_fact(scenario, user_text)
         self.stats["requests"] += 1
         if scenario == "vision":
             self.stats["vision"] += 1
@@ -3672,6 +3990,11 @@ class Gateway:
                 if headline:
                     messages.insert(0, {"role": "system", "content": headline})
                     log.info("识屏：带上资料一句话（%s）", (title or app or "?")[:30])
+            # 老大在聊天/语音里教过的事（「那是遐蝶，不是希尔」）→ 识屏也要知道
+            facts_block = self._facts_block(app, title)
+            if facts_block:
+                messages.insert(0, {"role": "system", "content": facts_block})
+                log.info("识屏：带上老大教过的事")
             if self.cfg.get("see_howto", True):
                 messages.insert(0, {"role": "system", "content": build_see_howto()})
 
@@ -3717,6 +4040,17 @@ class Gateway:
                 if lore_block:
                     messages.insert(0, {"role": "system", "content": lore_block})
                     log.info("聊天：带上资料")
+            # 聊天/语音里教过的事，别的通道也读同一份（反过来识屏也读）
+            try:
+                from video_watch import foreground
+
+                fapp, ftitle = foreground()
+            except Exception:  # noqa: BLE001
+                fapp, ftitle = "", ""
+            facts_block = self._facts_block(fapp, ftitle)
+            if facts_block:
+                messages.insert(0, {"role": "system", "content": facts_block})
+                log.info("聊天：带上老大教过的事")
         # 自动/普通模式下的识屏：说清「这是你自己瞥了一眼」，别当成老大在跟她说话
         if scenario == "vision" and self.mode.get() in ("auto", "normal"):
             messages.insert(0, {"role": "system", "content":
@@ -3963,8 +4297,8 @@ class Handler(BaseHTTPRequestHandler):
             # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
             # （关闭 = 识屏关；其它模式 = 识屏开）
             GATEWAY.set_proactive(data["mode"] != "off")
-            if data["mode"] == "off":
-                # 气泡由气泡小工那边弹（「行，不看了」），这里补一句声
+            if data["mode"] == "off" and not GATEWAY.cfg.get("mode_feedback", True):
+                # 模式提示关掉时兜底：这句话不能没有（正常情况由 _announce_mode 说）
                 GATEWAY.speech.say(fixed_phrases.PROACTIVE_OFF, tag="mode")
         if source == "tray-generic":
             # 托盘里手动选了「通用视频」：不等 2 分钟条件，直接进
@@ -4013,6 +4347,8 @@ class Handler(BaseHTTPRequestHandler):
                 "names": [m.get("name") for m in lo.store.entries.values()],
                 "keeper": lo.keeper.status() if lo.keeper is not None else None,
             })(g.lore) if getattr(g, "lore", None) is not None else None,
+            "tts_guard": getattr(g, "tts_guard", None).status() if getattr(g, "tts_guard", None) else None,
+            "facts": len(getattr(g, "facts", None).items) if getattr(g, "facts", None) else 0,
         })
 
     def _handle_doctor(self):
@@ -4035,6 +4371,13 @@ class Handler(BaseHTTPRequestHandler):
                     "流式" if g.speech.tts_backend.streams else "整句合成"),
             },
             "tts_9882": {"ok": port_ok(9882), "detail": "GPT-SoVITS 端口（说出口的流式）"},
+            "tts_guard": (lambda st: {
+                "ok": bool(st.get("enabled")) and bool(st.get("up")),
+                "detail": "TTS 守护：%s（拉起 %d 次%s）" % (
+                    "在线" if st.get("up") else "没在线",
+                    int(st.get("launches") or 0),
+                    "，" + st["error"] if st.get("error") else ""),
+            })(getattr(g, "tts_guard", None).status() if getattr(g, "tts_guard", None) else {}),
             "tts_9883": {
                 "ok": True if not getattr(g.speech, "split_tts", False) else port_ok(9883),
                 "detail": ("整句合成那台（分家了）" if getattr(g.speech, "split_tts", False)

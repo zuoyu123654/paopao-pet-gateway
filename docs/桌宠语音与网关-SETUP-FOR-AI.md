@@ -1506,6 +1506,155 @@ Invoke-RestMethod http://127.0.0.1:9888/lore -Method Post -ContentType applicati
 日志关键字：`资料：给《…》做了本手册`、`资料：… 检索到 N 段`、`识屏：带上资料（…）`、
 `聊天：带上资料`、`资料库：N 本手册 / M 段`。
 
+### 4.2w 三个「声音/认人」问题（2026-11-17）
+
+老大一次报了四个现象：切「关闭」说「行，不看了」有两个声音、通用视频用的是 B站视频的提示、
+一开始识屏没声音、聊天里教她「那个人是遐蝶」下次识屏还叫错。逐条记一下。
+
+#### 4.2w.1 「行，不看了」为什么说两遍
+
+不是预存的锅，是**两条路都在发声**：
+
+1. `Mode.set("off")` → `_announce_mode()` 随机挑 `MODE_PHRASES["off"]` 说一句（日志 `念(mode) 1 句 / 6 字`）；
+2. 紧接着 `_handle_mode()`（托盘关闭）或 `_proactive_sync_loop()`（桌宠开关关掉）
+   又补一句 `PROACTIVE_OFF`（就是「行，不看了」，日志 `念(mode) 1 句 / 5 字`）。
+
+两条都对、但只该留一条。修法：
+
+- `_announce_mode()` 看到 `source == "pet-proactive"` 直接返回：开关联动的提示由
+  `_proactive_sync_loop()` 自己发（开 → 「主动识屏已开启…」；关 → 气泡 +「行，不看了」）；
+- `_handle_mode()` 托盘关闭**不再**补 `speech.say(PROACTIVE_OFF)`；
+  只有 `mode_feedback=false`（模式提示被关掉）时才兜底补这一句。
+
+现在三条路径各自只有一次 `念(mode)`：
+
+| 操作 | 日志 |
+|---|---|
+| 托盘「关闭」 | `模式提示：行，不看了。（off / tray）` + `念(mode) 1 句 / 6 字` |
+| 桌宠开关关 | `桌宠关掉主动识屏 → 关闭` + `念(mode) 1 句 / 5 字` |
+| 桌宠开关开 | `桌宠打开主动识屏 → 自动模式` + `念(mode) 1 句 / 22 字` |
+
+实测 2026-11-17 14:00：三条路径都只出一次声，没有再叠。
+
+#### 4.2w.2 通用视频要自己的两句
+
+`video` 这个 mode 被「B站视频」和「通用视频」共用，以前提示统一是
+「哦，刷B站视频啊。」，老大在看本地播放器/别的网站时听着不对。
+
+改法：`phrases.py` 加一组 `video_any`（两句），`_announce_mode()` 按 `source` 选：
+
+```python
+key = mode
+if mode == "video" and source in ("tray-generic", "auto-video"):
+    key = "video_any"
+```
+
+| 场景 | source | 预存句子（随机二选一） |
+|---|---|---|
+| 托盘「通用视频」/ 自动判定播放器 | `tray-generic` / `auto-video` | 「哦，看视频呢，我陪你一块儿看。」「行，那我跟着你看会儿。」 |
+| 托盘「B站视频」/ 扩展报上来的 B站 | `tray` / `api` | 「哦，刷B站视频啊。」「哦，B站视频啊，我跟你一块儿看。」 |
+
+新句子会被 `warm_fixed_phrases()` 在启动时补合成；不重启也可以 `POST /warm {"force":false}`
+只补缺的。实测托盘「通用视频」日志：`模式提示：行，那我跟着你看会儿。（video / tray-generic）`。
+
+#### 4.2w.3 一开始识屏没声音
+
+**根因有两个，叠在一起**：
+
+1. 开机时网关先起来，GPT-SoVITS 还在加载（60~90 秒），这期间所有 TTS 请求都连不上；
+   `_request_audio()` 原来只重试 3 次、间隔 0.4 秒，等不到它加载完，整句直接丢；
+2. `ensure_running.ps1` 在 Windows PowerShell 5.1 下解析失败——文件是 **UTF-8 无 BOM**，
+   中文注释被当 ANSI 读，某些字节被解释成行尾反引号，把下一行代码吞了，
+   于是 `$logDir`/`$marker` 是空的，守护脚本根本没拉起 TTS。
+   表现就是日志 `Test-Path : Cannot bind argument to parameter 'LiteralPath' because it is an empty string`。
+
+**修法**：
+
+1. 网关目录下所有 `.ps1` 补 UTF-8 BOM（`ensure_running.ps1`、`watchdog.ps1`、`follow_pet.ps1`）；
+2. 新增 `TtsGuard` 线程（`gateway.py`）：
+   - 每 `tts.guard.check_seconds`（默认 15s）探一次 TTS 端口；
+   - 没在跑就按 `tts.guard.launch` 里的 python/script/args/workdir 拉起来，
+     并写 `logs/.gsv-started`（`ensure_running.ps1` 看到它 3 分钟内不会重复拉）；
+   - `GET /status` 有 `tts_guard`，`GET /doctor` 多一项 `tts_guard`；
+3. `SpeechPipeline._wait_tts()`：TTS 连不上时不立刻重试，先让 guard `ensure(timeout=25)`
+   （没起就拉、正在加载就等），再重试；流式和整句合成两条路都加了。
+4. 兜底：`_handle_mode` 的关闭提示只在 `mode_feedback=false` 时补。
+
+实测 2026-11-17 14:00：手动杀掉 9882 → 日志
+`TTS 没在跑，拉起 GPT-SoVITS（pid 11132）` → 17 秒后 `TTS 已就绪（等了 17 秒）`，
+`/status` 的 `tts_guard` = `{"up": true, "launches": 1}`。
+
+配置（`config.json` → `tts.guard`）：
+
+```json
+"guard": {
+    "enabled": true,
+    "check_seconds": 15,
+    "wait_seconds": 120,
+    "relaunch_cooldown_seconds": 90,
+    "launch": {
+        "python": "D:\\...\\runtime\\python.exe",
+        "script": "D:\\...\\api_v2.py",
+        "args": ["-a", "127.0.0.1", "-p", "9882", "-c", "D:\\...\\tts_infer_dafeiyu.yaml"],
+        "workdir": "D:\\..."
+    }
+}
+```
+
+换 TTS 后端/路径时记得改 `launch`；不想让网关碰 TTS 进程就 `guard.enabled=false`，
+只靠 `ensure_running.ps1`。
+
+#### 4.2w.4 聊天/语音/电话/识屏互通：别再把遐蝶叫成希尔
+
+**之前为什么不互通**：
+
+- 聊天（含语音问答）的前情走 `ledger`，但**识屏只取 `scenario=vision` 的行**；
+- 所以老大在聊天里说「那个人是遐蝶」，下一次识屏的提示词里根本没有这句话，
+  模型只能按自己的印象叫，叫错很正常。
+
+**现在**：新增 `Facts`（`facts.jsonl`，网关目录下），只收「像在教她」的话：
+
+```text
+那个人是X / 这个角色叫X / 不是X，是Y / 记住…… / 名字叫X
+```
+
+- 聊天、语音问答（含语音电话）说完就匹配；命中就存一条：原文 + 当时的 `app/title` + 时间；
+- 识屏、聊天、语音回复都注入最近 3 条（`facts.inject_items`），标题是
+  「【老大教过你的】（他亲口说的，比你猜的准）」；
+- 7 天过期（`facts.max_age_hours`），同一个 app/title 的排前面；
+- 识屏 → 聊天的互通还是走原来的 `ledger` 近况；手册（`lore`）本来就是共用的。
+
+所以现在是**双向**的：
+
+| 方向 | 载体 |
+|---|---|
+| 识屏 → 聊天/语音 | `ledger.jsonl` 的 vision 近况（`build_ledger_block` / voice_reply） |
+| 聊天/语音 → 识屏 | `facts.jsonl`（`Facts.block`） |
+| 所有通道 → 所有通道 | `lore/games/*.md` 作品资料 |
+
+实测 2026-11-17 13:59：
+
+```text
+聊天：记住，那个人是遐蝶，不是希尔。
+→ 日志「记下老大教的事（chat）：那个人是遐蝶，不是希尔。」（facts.jsonl 一条）
+→ 下一次识屏（前台 异环）日志「识屏：带上老大教过的事」
+```
+
+`facts` 配置：
+
+```json
+"facts": {
+    "enabled": true,
+    "path": "facts.jsonl",
+    "max_age_hours": 168,
+    "max_items": 300,
+    "inject_items": 3
+}
+```
+
+注意：这跟 4.2v 的资料一样，是**按需注入**，不是常驻人设；别把它扩成「所有聊天都记」，
+不然她会把闲聊当事实抖出来。
+
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
 做过、试过、撤了。经过记在这里，免得后人又走一遍：

@@ -52,7 +52,19 @@
         "tight_sentence_edges": true,
         "sentence_head_pad": 0.03,
         "sentence_tail_pad": 0.08,
-        "reading_fixes": {}
+        "reading_fixes": {},
+        "guard": {
+            "enabled": true,
+            "check_seconds": 15,
+            "wait_seconds": 120,
+            "relaunch_cooldown_seconds": 90,
+            "launch": {
+                "python": "",
+                "script": "",
+                "args": [],
+                "workdir": ""
+            }
+        }
     },
     "speak_chat": true,
     "speak_vision": true,
@@ -209,5 +221,12 @@
             "max_age_days": 7,
             "max_chars": 120
         }
+    },
+    "facts": {
+        "enabled": true,
+        "path": "facts.jsonl",
+        "max_age_hours": 168,
+        "max_items": 300,
+        "inject_items": 3
     }
 }

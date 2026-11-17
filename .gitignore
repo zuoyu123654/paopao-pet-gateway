@@ -18,3 +18,4 @@ __pycache__/
 
 # 运行时资料（每台机器自己学的手册，不进版本库）
 lore/
+facts.jsonl
