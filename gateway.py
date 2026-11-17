@@ -3288,32 +3288,21 @@ class Gateway:
             return json.loads(resp.read().decode("utf-8", "replace"))
 
     def own_look(self, prompt: str = "") -> str:
-        """不看她的脸色，自己看一眼：抓当前屏 + 前几帧拼图 → 调模型 → 我们的 TTS 念。"""
-        import base64 as _b64
+        """我们自己看一眼：**走和她自主识屏完全同一条 prepare/stream_reply 管线**。
 
+        老大 2026-11-17 的要求：「除了气泡，其他和他自己的自主识屏几乎一样」。
+        所以这里不再自己拼 system/抓图/写账本，而是伪造一条和她一样的 vision 请求：
+          * 同样的 `（参考元数据：前台应用为 …）` + 「这是老大当前的屏幕截图」；
+          * `prepare()` 负责挂帧、注入近况/资料/facts/播放器、黑屏替换、看片规矩；
+          * `stream_reply()` 负责流式合成 + 用同一个 `vision` 标签念；
+          * `finish_turn()` 负责账本、统计、记忆信箱、事实学习。
+        唯一的区别：这条路不冒气泡（气泡是桌宠自己的 UI）。
+        """
         # 独占全屏/锁屏时截出来是黑的：这种时候别硬看，省得她开口就是「一片黑」
         if self.vision_is_black():
             log.info("自己看一眼：画面几乎是黑的（%.0f%%），这次不开口", self.vision_dark_ratio() * 100)
             return ""
 
-        frames = []
-        try:
-            grid_b64, n = self.frames.grid_jpeg()
-            snap = self.frames.snapshot(1)
-            cur_b64 = ""
-            if snap:
-                from PIL import Image
-
-                ts, img = snap[-1]
-                buf = io.BytesIO()
-                img.save(buf, "JPEG", quality=82)
-                cur_b64 = _b64.b64encode(buf.getvalue()).decode()
-        except Exception:  # noqa: BLE001
-            grid_b64, n, cur_b64 = "", 0, ""
-
-        parts = []
-        text = prompt or "看看老大现在屏幕上是什么，用你的人设口吻说一两句。"
-        # 这条捷径原来没有窗口信息，认游戏/番剧全靠猜，顺手把前台也带上
         app = title = ""
         try:
             from video_watch import foreground
@@ -3321,104 +3310,65 @@ class Gateway:
             app, title = foreground()
         except Exception:  # noqa: BLE001
             pass
-        if title or app:
-            text = "（老大当前前台应用为 %s | %s）\n%s" % (app or "?", title or "?", text)
-        if n and grid_b64:
-            parts.append({"type": "text", "text": "刚才 %d 帧（每秒一张）拼成的 2×2，左上→右下按时间。" % n})
-            parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + grid_b64}})
-        if cur_b64:
-            parts.append({"type": "text", "text": "这张是此刻的屏幕。"})
-            parts.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + cur_b64}})
-        if not parts:
-            parts = [{"type": "text", "text": text}]
-        else:
-            parts.insert(0, {"type": "text", "text": text})
+        head = ("（参考元数据：老大当前前台应用为 %s | %s）\n" % (app or "?", title or "?")) \
+            if (app or title) else ""
+        body = prompt or "看看老大现在屏幕上是什么，用你的人设口吻说一两句。"
+        if "截图" not in body:
+            body = "这是老大当前的屏幕截图。" + body
+        text = head + "你自己主动看了一眼屏幕（不是老大叫你）。" + body
 
-        messages = [
-            {"role": "system", "content": self._persona()},
-        ]
-        # 自己看一眼这条捷径也要守「看片专心」的规矩，不然看番时照样催睡觉
-        mode = self.mode.get()
-        in_focus = mode in FOCUS_MODES
-        if self.cfg.get("watch_focus", True) and in_focus:
-            messages.append({"role": "system", "content": build_watch_focus(mode)})
-        # 「先看清再说话」和作品小抄，这条路也不能少（它不走 prepare）
-        if self.cfg.get("see_howto", True):
-            messages.append({"role": "system", "content": build_see_howto()})
-        note = title_hint(app, title)
-        if note:
-            messages.append({"role": "system", "content": (
-                "【这个作品你认识】%s\n（这是你自己的印象，顺着聊就行，别背简介、别逐字念。）" % note)})
-
-        # 两套识屏共用同一份上下文（2026-11-17 打通）：
-        #   * 之前看到过什么（账本里她看的 + 我们自己看的）
-        #   * 老大教过的事（facts）
-        #   * 作品资料（lore；只在这条路真带了问题/正在打游戏时给）
-        #   * 播放器进度（B站视频模式）
-        context_blocks: list[str] = []
+        payload = {
+            "model": self.cfg.get("model") or "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": self._persona()},
+                # 用 list 形式，prepare() 才能把帧拼图挂到这条 user 消息上
+                {"role": "user", "content": [{"type": "text", "text": text}]},
+            ],
+            "max_tokens": 400,
+        }
+        # 她自主识屏时带的是「桌宠截的当前图 + 我们的帧拼图」；这条也补一张当前帧，
+        # 两边看到的素材就一致了（prepare 会把帧拼图插在图片前面）。
         try:
-            prev = self.ledger.recent_vision_for_app(
-                app,
-                max_minutes=float(self.cfg.get("vision_context_minutes", 30)),
-                budget_chars=int(self.cfg.get("vision_context_budget_chars", 600)),
-                item_chars=int(self.cfg.get("vision_context_item_chars", 90)),
-                max_items=int(self.cfg.get("vision_context_entries", 6)),
-            )
-            block = build_vision_context(prev, hide_clock=in_focus)
-            if block:
-                context_blocks.append(block)
+            snap = self.frames.snapshot(1)
+            if snap:
+                from PIL import Image
+
+                buf = io.BytesIO()
+                snap[-1][1].save(buf, "JPEG", quality=82)
+                payload["messages"][1]["content"].extend([
+                    {"type": "text", "text": "这张是此刻的屏幕。"},
+                    {"type": "image_url", "image_url": {
+                        "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}},
+                ])
         except Exception as exc:  # noqa: BLE001
-            log.debug("自己看一眼：近况没取出来：%s", exc)
+            log.debug("自己看一眼：当前帧没带上：%s", exc)
+        # 跟 _handle_chat 完全一样的前置：prepare → 黑屏守卫 → 打断上一轮 → 预置「让我看看」
         try:
-            facts_block = self._facts_block(app, title)
-            if facts_block:
-                context_blocks.append(facts_block)
+            payload, scenario, user_text = self.prepare(payload)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("自己看一眼：prepare 失败：%s", exc)
+            return ""
+        if self.vision_is_black():
+            log.info("自己看一眼：这一帧太黑，跳过")
+            return ""
+        self.speech.interrupt()
+        try:
+            self.speech.arm_vision_cue()
         except Exception:  # noqa: BLE001
             pass
+
+        sink: list[str] = []
+        t0 = time.time()
         try:
-            lore_block = ""
-            if prompt:
-                lore_block = self.lore.block(app=app, title=title, query=prompt)
-            if not lore_block and mode == GAME_MODE:
-                lore_block = self.lore.headline(app=app, title=title)
-            if lore_block:
-                context_blocks.append(lore_block)
+            for _ in self.stream_reply(payload, scenario, sink):
+                pass
         except Exception as exc:  # noqa: BLE001
-            log.debug("自己看一眼：资料没取出来：%s", exc)
-        try:
-            if getattr(self, "player", None) is not None:
-                player_block = self.player.context_block()
-                if player_block:
-                    context_blocks.append(player_block)
-        except Exception:  # noqa: BLE001
-            pass
-        for line in context_blocks:
-            messages.append({"role": "system", "content": line})
-        if context_blocks:
-            log.info("自己看一眼：带上 %d 段共享上下文", len(context_blocks))
-        messages.append({"role": "user", "content": parts})
-        payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
-                   "messages": messages, "max_tokens": 400, "stream": False}
-        data = self.post_once(payload)
-        try:
-            reply = (data["choices"][0]["message"].get("content") or "").strip()
-        except (KeyError, IndexError, TypeError):
-            reply = ""
+            log.warning("自己看一眼：生成/合成失败：%s", exc)
+            return ""
+        reply = "".join(sink).strip()
         if reply:
-            self.speech.say(reply, tag="vision")
-            # 记进账本时带上前台：不然她的识屏上下文按 App 匹配时永远对不上这一条
-            label = ("（自己看一眼：前台应用为 %s | %s）" % (app or "?", title or "?")
-                     if (app or title) else "（自己看一眼）")
-            self.ledger.add("vision", label, reply, {"own": True})
-            self.stats["vision"] = self.stats.get("vision", 0) + 1
-            self.last_vision_at = time.time()
-            # 自己看的这一眼也要进中枢：不然 QQ 那边永远不知道我们今晚看到过什么
-            if self.cfg.get("memory_inbox_url"):
-                threading.Thread(
-                    target=self.push_memory,
-                    args=("vision", "老大没叫我，我自己看了一眼屏幕", reply),
-                    daemon=True,
-                ).start()
+            # 和她自主识屏同一本账、同一份统计、同一个记忆信箱
+            self.finish_turn(scenario, user_text, reply, int((time.time() - t0) * 1000))
         return reply
 
     def _proactive_sync_loop(self) -> None:
