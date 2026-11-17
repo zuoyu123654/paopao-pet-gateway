@@ -3369,6 +3369,11 @@ class Gateway:
         if reply:
             # 和她自主识屏同一本账、同一份统计、同一个记忆信箱
             self.finish_turn(scenario, user_text, reply, int((time.time() - t0) * 1000))
+            # 气泡也补上：跟 voice_reply 同一套（3.2s 起步，最多 5s）
+            try:
+                self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))
+            except Exception as exc:  # noqa: BLE001
+                log.info("自己看一眼：气泡没弹出来（%s）", exc)
         return reply
 
     def _proactive_sync_loop(self) -> None:

@@ -1655,7 +1655,7 @@ if mode == "video" and source in ("tray-generic", "auto-video"):
 注意：这跟 4.2v 的资料一样，是**按需注入**，不是常驻人设；别把它扩成「所有聊天都记」，
 不然她会把闲聊当事实抖出来。
 
-#### 4.2w.5 两套识屏：除了气泡，现在完全同一条管线（2026-11-17）
+#### 4.2w.5 两套识屏：现在完全同一条管线（2026-11-17）
 
 网关里有两条识屏路：
 
@@ -1688,7 +1688,12 @@ if mode == "video" and source in ("tray-generic", "auto-video"):
 - 账本 schema：`scenario=vision`，user 是完整的「参考元数据 + 这是老大当前的屏幕截图…」；
 - `stats.vision`、`last_vision_at`、记忆信箱投递。
 
-唯一不同：**这条路不冒气泡**（气泡是桌宠自己的 UI），另外图源是帧缓冲。
+唯一不同：**图源是帧缓冲**（不是桌宠截的那张），触发是 `/lookself` 或兜底。
+
+气泡后来也补上了（2026-11-17 14:17）：`own_look()` 说完调
+`self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))`，
+跟语音问答同一套；气泡小工没跑就静默失败，不影响声音。实测 `/status` 的
+`bubble.shown` 从 0 → 1。
 
 实测 2026-11-17 14:13：
 
