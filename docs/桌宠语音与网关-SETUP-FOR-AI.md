@@ -1149,6 +1149,30 @@ title: 『原神』7.3前瞻日期确定…
 默认配置下这条路走不通，试了只是白折腾（2026-11-17 实测过一次，白关了一次浏览器）。
 实在不想在主浏览器里点，就退一步用 `install-browser-ext.ps1 -DedicatedProfile` 开独立配置的看片窗口。
 
+#### 4.2q.3 扩展被 Edge 清掉、读不到 URL 怎么办（2026-11-17）
+
+**原因**：`browser_ext` 是 unpacked（开发人员模式）扩展。Edge 更新、配置目录重建、
+或它自己把「开发者模式扩展」关掉，都会让扩展失效；默认配置下 `--load-extension` 又被
+Edge 157 忽略。扩展一没，`/player` 就没有 URL/进度，B站字幕和模式细分会退化。
+
+**现在有三层兜底**：
+
+1. **看片窗口（推荐日常用）**：`start-edge-watch.ps1` 现在除了 `--load-extension`，
+   还带 `--remote-debugging-port=9222`。扩展哪天被清掉，URL/currentTime 还能走 CDP；
+   `PlayerWatch.snapshot()` 的优先级是 扩展 → CDP → B站历史。
+   > 看片窗口已经开着的话，先关掉再重跑脚本，`--remote-debugging-port` 才会生效
+   > （同一个配置目录已有 Edge 进程时，新参数会被忽略）。
+2. **主浏览器（不想换窗口）**：没有 URL 时，模式判定仍会按**窗口标题**走
+   （`哔哩哔哩` / `番剧` / `第X集` / `直播` 都能认），所以切模式不会卡死；
+   只是没有精确进度和按时间轴的字幕，B站历史兜底还能补上最近的 bvid/进度。
+3. **永久方案（要管理员一次）**：把 `browser_ext` 打成 CRX，配 Edge 企业策略
+   `ExtensionInstallForcelist`（`<扩展ID>;http://127.0.0.1:9888/ext/update.xml`），
+   由网关提供 `update.xml` + `.crx`。force-install 的扩展不会被 Edge 更新/开发者模式清掉，
+   也不需要用户点「加载解压缩的扩展」。代价是要写一次 HKLM 策略、且扩展更新要走本地源。
+
+**别做的事**：手改 Edge `Preferences`/`Secure Preferences` 里扩展的 `state`——
+Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展设置被清；要持久只能走 CRX + 策略。
+
 
 ### 4.2r 识屏的三件事：说清「现在在干嘛」、别按「第几张」讲、角色别认错（2026-11-17）
 

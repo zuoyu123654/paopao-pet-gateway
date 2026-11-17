@@ -28,6 +28,8 @@ New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
 
 Start-Process -FilePath $edge -ArgumentList @(
     "--user-data-dir=$profileDir",
+    # 扩展会被 Edge 更新/开发者模式策略清掉；调试端口不依赖扩展，URL/进度还能读
+    '--remote-debugging-port=9222',
     "--load-extension=$ext",
     '--no-first-run',
     '--no-default-browser-check',
