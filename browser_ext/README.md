@@ -28,6 +28,21 @@
 下次启动 Edge 就自动带上（本机任务栏那个 Edge 快捷方式已经加好了）。
 缺点是每次启动可能顶一条「正在使用开发者模式扩展」的提示。
 
+## 如果这个扩展老被 Edge 清掉：用 Tampermonkey（免开发者模式）
+
+unpacked 扩展（上面三步装的那个）是「开发人员模式」扩展，Edge 更新/策略/配置重建可能把它清掉。
+不想每次重装，就改用**商店里的脚本管理器**：
+
+1. Edge 加载项商店搜 **Tampermonkey**（或 Violentmonkey / ScriptCat），安装；
+2. 打开 `browser_ext\paopao-player.user.js`，Tampermonkey 会弹出安装页；点「安装」；
+   （也可以 Tampermonkey 面板 → 新建脚本 → 把文件内容粘进去）
+3. 第一次上报时 Tampermonkey 会问是否允许访问 `127.0.0.1:9888`，点允许；
+4. 播个 B站视频，看 `/status` 的 `player.source` 是不是 `ext`。
+
+它和上面的扩展做的是同一件事：每秒把 `url/title/currentTime/duration/paused/fullscreen` 发给
+`http://127.0.0.1:9888/player`，只读进度、不碰页面内容。区别只是宿主是商店扩展，
+不会被「开发者模式扩展」那套清掉；脚本本身存在 Tampermonkey 里，也可以导出备份。
+
 ## 排障
 
 - `/status` 里 `player.connected: false`：说明一秒内没收到任何上报 → 检查扩展是否启用、页面是不是在视频站、
