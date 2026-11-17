@@ -226,7 +226,10 @@ class VoiceMode(threading.Thread):
             self.cancel.clear()
             self._listening_shown = False
             self.state = "listening"
-        # 不在开录时冒「我在听」：只有真检测到出声才冒，免得电话模式一直占着气泡
+        if self.mode != "call":
+            # 按键说话：按下去就冒「我在听」，别等麦克风真检测到声音——
+            # 老大按了热键就是要说话，气泡晚半秒或不冒都像没反应。
+            self._show_listening()
         log.info("语音：开始录（%s）", self.mode)
         return True
 

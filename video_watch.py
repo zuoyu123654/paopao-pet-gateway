@@ -712,6 +712,10 @@ class VideoWatcher(threading.Thread):
         try:
             player = getattr(self.gateway, "player", None)
             snap = player.snapshot() if player is not None else {}
+            # 后台标签页不算「眼前这一页」：它上报的 bangumi/live 地址不能拿来判模式，
+            # 否则前台明明在放普通视频，后台挂着的番剧页会把模式拽去 anime。
+            if snap and snap.get("visible") is False:
+                snap = {}
             url = str((snap or {}).get("url") or "").lower()
             ref = str((snap or {}).get("referrer") or "").lower()
             # B站直播/番剧的播放器在 iframe 里时，location 可能是 player.bilibili.com，
@@ -742,6 +746,8 @@ class VideoWatcher(threading.Thread):
     def _duration_seconds(self) -> float:
         try:
             snap = self.gateway.player.snapshot() if self.gateway.player else {}
+            if snap and snap.get("visible") is False:
+                return 0.0
             return float((snap or {}).get("d") or 0.0)
         except Exception:  # noqa: BLE001
             return 0.0
@@ -753,6 +759,8 @@ class VideoWatcher(threading.Thread):
         except Exception:  # noqa: BLE001
             return False
         if not snap or snap.get("paused"):
+            return False
+        if snap.get("visible") is False:
             return False
         hay = ("%s %s %s" % (snap.get("url") or "", snap.get("referrer") or "",
                              snap.get("title") or "")).lower()

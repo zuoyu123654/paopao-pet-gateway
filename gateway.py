@@ -1180,7 +1180,13 @@ class SpeechPipeline:
                     start_evt.wait(3.0)
                     stream.start()
                     while True:
+                        t_wait = time.time()
                         item = pcm_q.get()
+                        waited = time.time() - t_wait
+                        if waited > 0.25 and item is not None:
+                            # 声卡等数据 = 这一句中间会听出「卡一下」。
+                            # 记下来，方便对着首字节/并发合成的时间看是谁饿着它。
+                            log.info("流式缓冲空了 %.2fs（这一句会卡一下）", waited)
                         if item is None:
                             break
                         with self.lock:
@@ -1772,8 +1778,14 @@ class SpeechPipeline:
                 continue
             # 后面几句等第一句真的开声了再合成：这样第一小句的开口不会被抢，
             # 而那点合成时间正好落在第一小句还在说话的时候。
+            # 注意不能只等 1.5 秒：首句首字节有时要 3～5 秒，等不到就提前开整句
+            # 合成，会把还没出声的流直接饿死——听起来就是第一句「卡住」。
             if idx != self._gen_first_idx(gen):
-                self.first_audio_started.wait(timeout=1.5)
+                deadline = time.time() + 15.0
+                while (not self.first_audio_started.is_set()
+                       and self.stream_done_gen < gen
+                       and time.time() < deadline):
+                    self.first_audio_started.wait(0.5)
             if idx == self._gen_first_idx(gen):
                 # 首句本来就该走整句合成（后端不支持流式）：那就没有流要保护，
                 # 后面几句直接放开并发。
@@ -2197,14 +2209,20 @@ class LookGuard(threading.Thread):
                 mode = self.gateway.mode.get()
                 if mode not in self.MODES:
                     continue
+                # 桌宠关掉「主动识屏」= 不要自己看屏；看片模式照常判定。
+                if not getattr(self.gateway, "pet_proactive_on", True):
+                    continue
                 idle_for = time.time() - getattr(self.gateway, "last_vision_at", 0)
                 if idle_for < self.idle:
                     continue
                 if time.time() - self.last_pressed < self.idle:
                     continue
                 self.last_pressed = time.time()
-                log.info("保底看屏：%s 模式已 %.0f 秒没动静，按一次看看屏幕", mode, idle_for)
-                press_look(self.port)
+                log.info("保底看屏：%s 模式已 %.0f 秒没动静，自己看一眼", mode, idle_for)
+                # 不再按桌宠的「看看屏幕」：那条路会先冒一个「让我看看」的气泡，
+                # 看片时很打扰。网关自己走同一条识屏管线，只是不冒泡。
+                threading.Thread(target=self.gateway.own_look,
+                                 name="look-guard-own", daemon=True).start()
             except Exception as exc:  # noqa: BLE001
                 log.warning("保底看屏出错：%s", exc)
 
@@ -3776,8 +3794,11 @@ class Gateway:
         self.bubble.start()
         # 托盘里手动选的模式锁 10 分钟，超时回自动
         threading.Thread(target=self._mode_lock_loop, name="mode-lock", daemon=True).start()
-        # 桌宠自己的「主动识屏」开关 = 我们的总开关：她开我们就自动，她关我们就关闭
+        # 桌宠自己的「主动识屏」开关只决定网关要不要主动看屏，不再改 mode。
         self._proactive_self: tuple[bool, float] | None = None
+        self.pet_proactive_on = read_pet_proactive()
+        if self.pet_proactive_on is None:
+            self.pet_proactive_on = True
         threading.Thread(target=self._proactive_sync_loop, name="proactive-sync", daemon=True).start()
         # 语音模式：热键开录 → VAD 断句 → 9881 转写 → 模型 → 她开口 + 气泡
         self.voice = VoiceMode(cfg, self)
@@ -3910,10 +3931,13 @@ class Gateway:
         return reply
 
     def _proactive_sync_loop(self) -> None:
-        """跟着桌宠的「主动识屏」开关走：她关 → 我们关闭；她开 → 我们自动。
+        """只跟着桌宠的「主动识屏」开关走，**不再拿它当网关总开关**。
 
-        我们自己写配置（托盘点「B站视频」之类）时会在 `_proactive_self` 里记一笔，
-        这一笔不收，免得刚点的模式被她自己的开关立刻改回「自动」。
+        以前她那边一关，我们就把 mode 设成 off，结果看片看到一半、或者想开着
+        视频模式但不想让她自己冒气泡时，模式会被她关掉。现在拆开：
+          * 她关 → 网关只是不主动看屏（LookGuard 跳过），看视频/番剧照常判定；
+          * 她开 → 网关恢复主动看屏；
+          * 要整个停掉识屏，用托盘的「关闭」。
         """
         last: bool | None = None
         while True:
@@ -3922,35 +3946,15 @@ class Gateway:
                 cur = read_pet_proactive()
                 if cur is None:
                     continue
+                self.pet_proactive_on = cur
                 if last is None:
                     last = cur
-                    # 第一次看到：如果她关着而我们在看，就跟着关掉
-                    if not cur and self.mode.get() != "off":
-                        self.mode.set("off", source="pet-proactive")
-                        log.info("主动识屏是关的 → 模式切换为关闭")
-                    # 反过来：上次是被她关掉留下的 off，这次她开着，就回自动
-                    elif cur and self.mode.get() == "off" \
-                            and str(self.mode.source).startswith("pet-proactive"):
-                        self.mode.set("auto", source="pet-proactive")
-                        log.info("主动识屏是开的 → 模式回自动")
+                    log.info("桌宠主动识屏：%s（不影响看片模式）", "开" if cur else "关")
                     continue
                 if cur == last:
                     continue
                 last = cur
-                stamp = self._proactive_self
-                if stamp and stamp[0] == cur and time.time() - stamp[1] < 6:
-                    continue                     # 我们自己刚写的，不动模式
-                if not cur:
-                    self.mode.set("off", source="pet-proactive")
-                    # 桌宠那边关掉时不冒泡，所以这句由我们冒 + 出声
-                    self.bubble.show(fixed_phrases.PROACTIVE_OFF)
-                    self.speech.say(fixed_phrases.PROACTIVE_OFF, tag="mode")
-                    log.info("桌宠关掉主动识屏 → 关闭")
-                else:
-                    self.mode.set("auto", source="pet-proactive")
-                    # 桌宠那边开的时候自己会冒气泡（"主动识屏已开启~…"），我们只出声
-                    self.speech.say(fixed_phrases.PROACTIVE_ON, tag="mode")
-                    log.info("桌宠打开主动识屏 → 自动模式")
+                log.info("桌宠主动识屏 → %s（看片模式不受影响）", "开" if cur else "关")
             except Exception:  # noqa: BLE001
                 pass
 
@@ -5368,9 +5372,10 @@ class Handler(BaseHTTPRequestHandler):
                 lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
                 GATEWAY.mode_lock_until = time.time() + lock_min * 60
                 log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
-            # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
-            # （关闭 = 识屏关；其它模式 = 识屏开）
-            GATEWAY.set_proactive(data["mode"] != "off")
+            # 托盘的「关闭」顺手把桌宠主动识屏也关掉；其它模式不再替她打开——
+            # 她想开着看片、但不想让桌宠自己冒气泡，这个开关得由她自己说了算。
+            if data["mode"] == "off":
+                GATEWAY.set_proactive(False)
             if data["mode"] == "anime":
                 GATEWAY.schedule_anime_resolve()
             if data["mode"] == "off" and not GATEWAY.cfg.get("mode_feedback", True):
@@ -5778,7 +5783,7 @@ class Handler(BaseHTTPRequestHandler):
         if scenario == "vision":
             GATEWAY.speech.arm_vision_cue()
         # 桌宠只冒泡不出声时，自动模式补一句语音；其他模式不补。
-        if (proactive and self.cfg.get("auto_precue_voice", True)
+        if (proactive and GATEWAY.cfg.get("auto_precue_voice", True)
                 and GATEWAY.mode.get() == "auto"):
             try:
                 if not (getattr(GATEWAY, "voice", None) and GATEWAY.voice.is_speaking()):

@@ -67,7 +67,10 @@ class PlayerWatch(threading.Thread):
         self._history_at = 0.0
         self._history_state: dict = {}
         # 浏览器扩展（方案 A）推上来的状态：{url,title,t,d,paused,fullscreen,visible,at}
-        self._ext_state: dict = {}
+        # 按「可见/隐藏」分开存：一个窗口开着一堆标签页时，每个标签都会每秒上报，
+        # 只留最后一条的话，后台那个没在播的番剧页会把前台视频顶掉（模式来回跳）。
+        self._ext_visible: dict[str, dict] = {}
+        self._ext_hidden: dict[str, dict] = {}
         os.makedirs(self.cache_dir, exist_ok=True)
 
         self.lock = threading.Lock()
@@ -83,9 +86,18 @@ class PlayerWatch(threading.Thread):
         with urllib.request.urlopen(url, timeout=0.8) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
 
-    def _pick(self, targets: list) -> dict | None:
+    def _pick(self, targets: list, want_title: str = "") -> dict | None:
         pages = [t for t in targets if t.get("type") == "page"
                  and str(t.get("url") or "").startswith("http")]
+        # 先按前台窗口标题对一遍：多个标签页都开着 B站时，/json 的顺序不等于
+        # 当前正在看的那个；标题对上才是眼前这一页。
+        want = (want_title or "").strip().lower()
+        if want:
+            for t in pages:
+                title = str(t.get("title") or "").strip().lower()
+                if title and (title in want or want in title):
+                    if any(h in str(t.get("url") or "").lower() for h in VIDEO_URL_HINTS):
+                        return t
         for t in pages:
             u = str(t.get("url") or "").lower()
             if any(h in u for h in VIDEO_URL_HINTS):
@@ -143,14 +155,22 @@ class PlayerWatch(threading.Thread):
             t: v ? v.currentTime : null,
             d: v ? v.duration : null,
             p: v ? v.paused : null,
-            f: !!document.fullscreenElement
+            f: !!document.fullscreenElement,
+            visible: document.visibilityState === 'visible'
         });
     })()
     """
 
     def _poll_once(self) -> None:
         targets = self._targets()
-        t = self._pick(targets)
+        want_title = ""
+        try:
+            from video_watch import foreground
+
+            want_title = foreground()[1]
+        except Exception:  # noqa: BLE001
+            pass
+        t = self._pick(targets, want_title)
         if not t:
             with self.lock:
                 self.state = {}
@@ -175,6 +195,7 @@ class PlayerWatch(threading.Thread):
                 "d": float(data.get("d") or 0),
                 "paused": bool(data.get("p")),
                 "fullscreen": bool(data.get("f")),
+                "visible": bool(data.get("visible", True)),
                 "bvid": bv.group(1) if bv else "",
                 "page": int(page.group(1)) if page else 1,
                 "at": time.time(),
@@ -323,7 +344,7 @@ class PlayerWatch(threading.Thread):
                 return
             bv = BV_RE.search(url)
             page = PAGE_RE.search(url)
-            self._ext_state = {
+            state = {
                 "url": url,
                 "title": str(data.get("title") or "")[:100],
                 "referrer": str(data.get("referrer") or "")[:300],
@@ -337,18 +358,35 @@ class PlayerWatch(threading.Thread):
                 "source": "ext",
                 "at": time.time(),
             }
+            # 同一个地址的旧状态先清掉：标签页切到后台时它会带着 visible=False 再报一次，
+            # 不能被当成「还在前台」继续用。
+            with self.lock:
+                self._ext_hidden.pop(url, None)
+                self._ext_visible.pop(url, None)
+                if state["visible"]:
+                    self._ext_visible[url] = state
+                else:
+                    self._ext_hidden[url] = state
         except Exception as exc:  # noqa: BLE001
             self.last_error = "ext: %s" % exc
 
     def snapshot(self) -> dict:
-        # 优先级：扩展（方案 A，最准、任何站点）→ CDP（方案 B）→ B站历史兜底
-        ext = dict(self._ext_state)
-        if ext and time.time() - ext.get("at", 0) <= self.fresh:
-            return ext
+        # 优先级：前台的扩展上报 → CDP → 后台扩展 → B站历史兜底
+        # 前台的排第一：后台标签页也上报，但它不是「眼前正在看的」。
+        now = time.time()
         with self.lock:
+            for bucket in (self._ext_visible, self._ext_hidden):
+                for key in [k for k, v in bucket.items() if now - v.get("at", 0) > 60]:
+                    bucket.pop(key, None)
+            vis = max(self._ext_visible.values(), key=lambda x: x.get("at", 0), default=None)
+            hid = max(self._ext_hidden.values(), key=lambda x: x.get("at", 0), default=None)
+            if vis and now - vis.get("at", 0) <= self.fresh:
+                return dict(vis)
             st = dict(self.state)
-        if st and time.time() - st.get("at", 0) <= self.fresh:
+        if st and now - st.get("at", 0) <= self.fresh:
             return st
+        if hid and now - hid.get("at", 0) <= self.fresh:
+            return dict(hid)
         hs = dict(self._history_state)
         # 历史进度是定期上报的，容忍到「刷新间隔 + 一个 poll」
         if hs and time.time() - hs.get("at", 0) <= self.history_refresh + 5:
@@ -371,6 +409,8 @@ class PlayerWatch(threading.Thread):
         """识屏时插进 system 的那段：现在在看什么、放到哪、前 N 秒台词。"""
         st = self.snapshot()
         if not st:
+            return ""
+        if st.get("visible") is False:
             return ""
         if not self._foreground_is_browser():
             return ""
