@@ -1239,6 +1239,16 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
    - `/status` 多返回 `mode_lock_forever`、`mode_lock_minutes`、`mode_lock_remaining`；
      托盘底部状态行会显示「锁5分钟 / 锁一直」。
 
+7. **B站直播参考：主播 / 分区 / 标题**
+   - `VideoWatcher` 从直播 URL（`live.bilibili.com/房间号`、`/blanc/房间号`）取 room_id；
+   - 缓存 120 秒，调 B站公开接口：
+     - `room/v1/Room/get_info` → 标题、分区（`parent_area_name` / `area_name`）；
+     - `live_user/v1/UserInfo/get_anchor_in_room` → 主播 `uname`；
+     - 接口失败时用窗口标题「房间标题 - 主播 - 哔哩哔哩直播」兜底；
+   - 只在 `mode=live` 时，往**聊天/识屏**的 system 里注入一段：
+     `【B站直播参考】主播：…｜分区：…｜标题：…`，并写明「只是参考，不要逐字念标题」；
+   - 不注入旧的一次性「第一次开口」提示；`/status.video.live` 能看到缓存值。
+
 
 
 ### 4.2r 识屏的三件事：说清「现在在干嘛」、别按「第几张」讲、角色别认错（2026-11-17）

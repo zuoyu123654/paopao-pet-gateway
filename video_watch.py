@@ -379,6 +379,11 @@ class VideoWatcher(threading.Thread):
         # 5 秒太容易把“游戏里切出来瞄一眼浏览器”误判成看片（老大 2026-11-17 定的）。
         self.game_takeover_seconds = max(
             5.0, float(self.conf.get("game_takeover_seconds", 90)))
+        # B站直播参考信息：主播 / 分区 / 标题。按 room_id 缓存，别每轮都打 API。
+        self._live_meta: dict = {}
+        self._live_meta_at = 0.0
+        self._live_room_id = ""
+        self._live_fetching = False
         self.keep = int(self.conf.get("transcript_keep", 12))
         self.min_cjk = float(self.conf.get("asr_min_cjk_ratio", 0.25))
         # 字幕 OCR 默认关（老大 2026-11-17 说的：很多视频根本没字幕条，OCR 白跑；
@@ -443,6 +448,113 @@ class VideoWatcher(threading.Thread):
         self.asr.active.set()
         log.info("视频类模式：手动进入（%s / %s）", app or "?", (title or "")[:40])
 
+    def _live_room(self) -> str:
+        """从当前播放器 URL / referrer 里拿 B站直播间号。"""
+        try:
+            snap = self.gateway.player.snapshot() if self.gateway.player else {}
+        except Exception:  # noqa: BLE001
+            return ""
+        for key in ("url", "referrer"):
+            m = re.search(r"live\.bilibili\.com/(?:blanc/|h5/)?(\d+)",
+                          str((snap or {}).get(key) or ""))
+            if m:
+                return m.group(1)
+        return ""
+
+    def _refresh_live_meta_async(self) -> None:
+        if self._live_fetching:
+            return
+        room = self._live_room()
+        if not room:
+            return
+        if room == self._live_room_id and time.time() - self._live_meta_at < 120:
+            return
+        self._live_fetching = True
+        threading.Thread(target=self._fetch_live_meta, args=(room,),
+                         name="live-meta", daemon=True).start()
+
+    def _fetch_live_meta(self, room: str) -> None:
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/131.0 Safari/537.36"),
+            "Referer": "https://live.bilibili.com/",
+        }
+        def get_json(url: str) -> dict:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8", "replace"))
+
+        meta = {}
+        try:
+            info = get_json(
+                "https://api.live.bilibili.com/room/v1/Room/get_info?room_id=%s" % room)
+            data = info.get("data") or {}
+            meta.update({
+                "title": str(data.get("title") or "")[:80],
+                "area": str(data.get("area_name") or "")[:30],
+                "parent_area": str(data.get("parent_area_name") or "")[:30],
+                "live_status": data.get("live_status"),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.info("直播信息：房间信息没拿到（%s）", exc)
+
+        try:
+            anchor = get_json(
+                "https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room"
+                "?roomid=%s" % room)
+            info = ((anchor.get("data") or {}).get("info") or {})
+            meta["anchor"] = str(info.get("uname") or "")[:40]
+        except Exception:  # noqa: BLE001
+            pass
+
+        # API 失败时用窗口标题兜底：B站直播标题一般是「房间标题 - 主播 - 哔哩哔哩直播」
+        if not meta.get("anchor") or not meta.get("title"):
+            try:
+                snap = self.gateway.player.snapshot() if self.gateway.player else {}
+                parts = str((snap or {}).get("title") or "").split(" - ")
+                if len(parts) >= 2:
+                    meta.setdefault("title", parts[0][:80])
+                    meta.setdefault("anchor", parts[1][:40])
+            except Exception:  # noqa: BLE001
+                pass
+
+        if meta.get("anchor") or meta.get("title") or meta.get("area"):
+            meta.update({"room_id": room, "at": time.time()})
+            self._live_meta = meta
+            self._live_meta_at = time.time()
+            self._live_room_id = room
+            log.info("直播信息：%s｜%s/%s｜%s",
+                     meta.get("anchor") or "?", meta.get("parent_area") or "?",
+                     meta.get("area") or "?", meta.get("title") or "?")
+        self._live_fetching = False
+
+    def live_context(self) -> str:
+        """给模型看的直播参考：主播、分区、标题。只在直播模式注入。"""
+        try:
+            if self.gateway.mode.get() != "live":
+                return ""
+        except Exception:  # noqa: BLE001
+            return ""
+        meta = dict(self._live_meta)
+        if not meta or time.time() - meta.get("at", 0.0) > 300:
+            return ""
+        bits = []
+        if meta.get("anchor"):
+            bits.append("主播：%s" % meta["anchor"])
+        area = " / ".join(x for x in (meta.get("parent_area"), meta.get("area")) if x)
+        if area:
+            bits.append("分区：%s" % area)
+        if meta.get("title"):
+            bits.append("标题：%s" % meta["title"])
+        if not bits:
+            return ""
+        return (
+            "【B站直播参考】%s\n"
+            "这些只是参考：聊天时自然带上，不要逐字念标题；不知道的别编，"
+            "也别报在线人数/播放进度。" % "｜".join(bits)
+        )
+
     def context_block(self) -> str:
         with self.lock:
             rows = list(self.transcript)
@@ -482,6 +594,7 @@ class VideoWatcher(threading.Thread):
                 "loopback": list(getattr(self.audio, "names", []) or []),
                 "last": (self.transcript[-1][2][:60] if self.transcript else ""),
                 "audio": self.audio.has_signal(self.audio_window, self.audio_threshold),
+                "live": dict(self._live_meta) if self._live_meta else {},
                 "error": self.error or self.audio.error or self.asr.error,
             }
 
@@ -616,6 +729,10 @@ class VideoWatcher(threading.Thread):
 
     def _tick(self) -> None:
         now = time.time()
+        try:
+            self._refresh_live_meta_async()
+        except Exception:  # noqa: BLE001
+            pass
         # 模式选「关闭」= 什么都不看：已经在看就退出来，之后也不进
         try:
             if self.gateway.mode.get() == "off":

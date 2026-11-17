@@ -3566,6 +3566,10 @@ class Gateway:
             facts_block = self._facts_block(app, title)
             if facts_block:
                 context.append(facts_block)
+            if self.mode.get() == "live":
+                live_block = self.video.live_context()
+                if live_block:
+                    context.append(live_block)
         except Exception as exc:  # noqa: BLE001
             log.info("语音资料检索没成（不影响回答）：%s", exc)
         try:
@@ -4159,6 +4163,17 @@ class Gateway:
             if watching in FOCUS_MODES:
                 messages.insert(0, {"role": "system", "content": build_watch_focus(watching)})
                 log.info("专注模式：注入「专心」规矩（%s）", watching)
+
+        # B站直播：把主播/分区/标题作为参考递给她（只在这一轮聊/识屏，别念成稿子）
+        if scenario in ("chat", "vision") and self.mode.get() == "live":
+            try:
+                live_block = self.video.live_context() if getattr(self, "video", None) else ""
+            except Exception as exc:  # noqa: BLE001
+                live_block = ""
+                log.info("直播参考没取到（不影响回答）：%s", exc)
+            if live_block:
+                messages.insert(0, {"role": "system", "content": live_block})
+                log.info("直播参考：带上主播/分区/标题")
 
         # 桌宠那张图是黑的、我们自己截得到 → 换成我们的；两边都黑就交给黑屏守卫整轮跳过
         if scenario == "vision":
