@@ -358,7 +358,8 @@ def title_visual_with_age(app: str = "", title: str = "") -> str:
     if parts:
         head = "【新版本】" + "；".join(parts)
         visual = (head + "｜" + visual) if visual else head
-    visual = visual[:520]
+    # core + 最多三个版本 latest：按当前四款里最长的原神估算约 730 字，留到 800
+    visual = visual[:800]
     if visual and at:
         try:
             age = (time.time() - time.mktime(time.strptime(at, "%Y-%m-%d"))) / 86400
