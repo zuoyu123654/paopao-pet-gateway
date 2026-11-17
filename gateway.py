@@ -4230,6 +4230,22 @@ class Gateway:
                 ref_block = self.video.mode_context()
                 if ref_block:
                     context.append(ref_block)
+                # 语音问「这个视频讲了什么」也要和识屏一样带最近字幕/转写
+                player_block = ""
+                try:
+                    if getattr(self, "player", None):
+                        player_block = self.player.context_block()
+                        if player_block:
+                            context.append(player_block)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    if not player_block or "B站字幕" not in player_block:
+                        block = self.video.context_block()
+                        if block:
+                            context.append(block)
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as exc:  # noqa: BLE001
             log.info("语音资料检索没成（不影响回答）：%s", exc)
         try:
