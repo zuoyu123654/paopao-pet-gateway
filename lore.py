@@ -914,8 +914,8 @@ class Lore:
         self.gateway = gateway
         self.enabled = bool(conf.get("enabled", True))
         self.base = os.path.join(APP_DIR, str(conf.get("dir") or "lore"))
-        self.max_chunks = max(1, int(conf.get("max_chunks", 3)))
-        self.budget = max(160, int(conf.get("budget_chars", 520)))
+        self.max_chunks = max(1, int(conf.get("max_chunks", 2)))
+        self.budget = max(160, int(conf.get("budget_chars", 320)))
         self.stale_days = float(conf.get("stale_days", 60))
         self.refresh_days = float(conf.get("refresh_days", 30))
         self.auto_learn = bool(conf.get("auto_learn", True))
