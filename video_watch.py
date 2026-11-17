@@ -865,8 +865,9 @@ class VideoWatcher(threading.Thread):
         try:
             snap = self.gateway.player.snapshot() if self.gateway.player else {}
             url = str((snap or {}).get("url") or "").lower()
-            if player and url and ("bangumi" in url or "live.bilibili" in url):
-                # 前台就是 B站番剧/直播页：暂停着也算在看这个页面，先把模式落下来；
+            if player and url and ("bilibili.com" in url or "bili" in url
+                                   or "bangumi" in url or "live.bilibili" in url):
+                # 前台就是 B站播放页：暂停着也算在看这个页面，先把模式落下来；
                 # 不然暂停去打个字，模式就一直停在 auto。
                 page_watch = True
             if (not player and url and not snap.get("paused")
