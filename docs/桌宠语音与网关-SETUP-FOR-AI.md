@@ -2758,7 +2758,7 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body $body `
 | 最长 | 30 秒 | 到点强制结束 |
 | 最短 | 0.3 秒 | 更短的当咳嗽丢掉 |
 | 没人说话 | 3 秒收工 | 免得干等 30 秒 |
-| 电话模式听音窗 | 8 秒 | `mode=call` 时她说完自动再开一个窗口 |
+| 电话模式听音窗 | 8 秒 | `mode=call` 切进来就自动开听；没听到、没转出来也会自动重开，直到切走 |
 
 ### 16.3 链路
 
@@ -2782,7 +2782,7 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body $body `
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/voice` | 状态（mode/state/turns/热键） |
-| POST | `/voice` | `{"action":"start"}` 开录 / `{"action":"stop"}` 取消 |
+| POST | `/voice` | `{"action":"start"}` 开录 / `{"action":"stop"}` 取消 / `{"action":"set_mode","mode":"call"}` 切电话并立刻开听 |
 | POST | `/voice/input` | `{"text":"..."}` **键盘兜底**：当成“听清了”直接回答（没麦时也能测） |
 
 ```powershell
@@ -2831,6 +2831,8 @@ Invoke-WebRequest http://127.0.0.1:9888/voice/input -Method POST -Body $b `
   换到扬声器/HDMI，或设 `video_watch.loopback_device` 指一个能录的端点。
 - **直播/番剧/网课模式**：只要播放器还在放（`paused=false`），人在 DSH 里打字不会退；
   以前没声 120 秒 + 前台切走就退，现在不会因为切窗口误退。
+- **电话模式**：切到 `call` 会立刻开一个 8 秒听音窗；没听到人声或转写为空也会继续重开，
+  不需要再按热键；切回 `ptt`/关掉语音才停。
 - 打断（她说着你插话）依赖回声消除，当前只能半双工。
 - 声音全走 16k 单声道给 ASR；设备不吃 16k 时自动按它默认采样率录、再线性降到 16k。
 

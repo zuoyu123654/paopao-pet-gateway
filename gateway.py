@@ -5286,6 +5286,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             voice.mode = mode
             voice.enabled = mode != "off"
+            if mode == "call":
+                # 电话模式进来就要开始听，不能等用户再按一次热键
+                if not voice.recording.is_set():
+                    voice.begin()
+            elif mode == "off":
+                voice.cancel.set()
             log.info("语音模式 → %s", mode)
             self._send_json({"ok": True, "voice": voice.status()})
         else:

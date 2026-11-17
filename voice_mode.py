@@ -275,6 +275,8 @@ class VoiceMode(threading.Thread):
                         self.hotkey_thread.error or "未知原因")
 
         hotkey_was_down = False
+        if self.mode == "call":
+            self.begin()          # 电话模式：进来就先开一个听音窗
         while True:
             time.sleep(0.05)
             # 热键：按一下开，再按一下取消
@@ -308,6 +310,7 @@ class VoiceMode(threading.Thread):
                 self._set_state("idle")
                 self._hide_bubble()
                 log.info("语音：这次没录到有效内容（%.2fs）", (len(pcm) if pcm is not None else 0) / SAMPLE_RATE)
+                self._reopen_call()
                 continue
             self._set_state("thinking")
             self._bubble(BUBBLE_THINKING, 8000)
@@ -320,6 +323,7 @@ class VoiceMode(threading.Thread):
             if not text.strip():
                 self._bubble(HEARD_NOTHING, 3200)
                 self._set_state("idle")
+                self._reopen_call()
                 continue
             self.last_text = text
             self.turns += 1
@@ -332,8 +336,15 @@ class VoiceMode(threading.Thread):
                 self._bubble(STUCK, 3200)
             self._set_state("idle")
             if self.mode == "call":
-                time.sleep(0.3)
-                self.begin()          # 电话模式：她说完自动再开一个听音窗
+                self._reopen_call()
+
+    def _reopen_call(self) -> None:
+        """电话模式：没听到/没转出来也继续听，不要停下来等热键。"""
+        if self.mode != "call" or self.cancel.is_set():
+            return
+        time.sleep(0.25)
+        if self.mode == "call" and not self.recording.is_set():
+            self.begin()
 
     def _hotkey_down(self) -> bool:
         import ctypes
