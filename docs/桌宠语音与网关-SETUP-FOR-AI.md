@@ -164,8 +164,7 @@ dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给�
 - 网关 `_on_mode_change()`：`mode == "auto"` → 桌宠 `proactive_screen.pre_cue=true`；
   其他模式（game/video/anime/live/course/normal/off）→ `false`；
 - 桌宠打开「主动识屏」会进自动模式，所以先兆提示跟着开；关掉主动识屏或切成别的模式就关；
-- 网关 `_handle_chat()` 在自动模式收到主动识屏请求时，**自己补一次**「让我看看……」气泡 +
-  语音（`precue`），不再依赖桌宠 pre_cue 的热重载；20 秒内只补一次；
+- **网关不再补任何先兆气泡/语音**，气泡和语音都由桌宠自己的 `proactive_screen.pre_cue` 发；
 - 启动时也会按当前模式对齐一次 `pre_cue`。
 
 ### 4.3 音量与语速
@@ -1226,8 +1225,8 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
    - 自动直播进 `live`（source `auto-live`），自动番剧进 `anime`；网课由 API/手动设 `course`。
 
 4. **「让我看看」只在自动模式开**
-   - 网关在自动模式收到主动识屏时，直接发一次「让我看看……」气泡 + `precue` 语音；
-   - 桌宠 `proactive_screen.pre_cue` 由网关按模式同步：`auto` = true，其他模式 = false；
+   - 只打开/关闭桌宠 `proactive_screen.pre_cue`：`auto` = true，其他模式 = false；
+   - 网关不补气泡/语音，避免重复；
    - 老缓存 `audio/precue/` 不播，可留可删。
 
 5. **DSH 工作状态：完成不吞，念完手上的再补**
