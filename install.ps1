@@ -1,7 +1,7 @@
 ﻿# 泡泡陪伴网关 · 一键安装（给 AI 用）
 # 用法：powershell -ExecutionPolicy Bypass -File .\install.ps1
 #      可选 -Python "C:\Python311\python.exe"
-#      可选 -EdgeShortcut  → 顺便给 Edge 桌面快捷方式加上「播放进度扩展」（方案 A）
+#      可选 -EdgeShortcut  → 清理桌面 Edge 快捷方式里旧的 --load-extension 参数（旧扩展已退役）
 
 param(
     [string]$Python = "python",
@@ -44,18 +44,14 @@ if (-not (Test-Path "$here\config.json")) {
 }
 New-Item -ItemType Directory -Force -Path "$here\logs", "$here\audio", "$here\lore" | Out-Null
 
-Write-Host "== 5/5 Edge 桌面快捷方式（B站视频模式要读播放进度）" -ForegroundColor Cyan
-if (Test-Path "$here\browser_ext\manifest.json") {
-    if ($EdgeShortcut) {
-        & "$here\make-edge-shortcut.ps1"
-    } else {
-        Write-Host "  没加（默认不动你的快捷方式）。想加就跑："
-        Write-Host "    powershell -ExecutionPolicy Bypass -File .\make-edge-shortcut.ps1"
-        Write-Host "  加完下次从桌面图标启动 Edge 就自动带上扩展；不想动快捷方式也可以在"
-        Write-Host "  edge://extensions 里手动「加载解压缩的扩展」→ 选 browser_ext 文件夹。"
-    }
-} else {
-    Write-Host "  这个包里没有 browser_ext，跳过"
+Write-Host "== 5/5 浏览器播放进度（可选：Tampermonkey 用户脚本）" -ForegroundColor Cyan
+Write-Host "  旧 unpacked 扩展已退役，不再需要开发者模式。"
+Write-Host "  装 Tampermonkey（Edge 加载项商店搜索），然后打开："
+Write-Host "    http://127.0.0.1:9888/ext/paopao-player.user.js"
+Write-Host "  再到 edge://extensions → Tampermonkey「详细信息」→ 打开「允许用户脚本」。"
+if ($EdgeShortcut) {
+    # 兼容旧参数：现在只清理桌面 Edge 快捷方式里旧的 --load-extension
+    & "$here\make-edge-shortcut.ps1"
 }
 
 Write-Host ""

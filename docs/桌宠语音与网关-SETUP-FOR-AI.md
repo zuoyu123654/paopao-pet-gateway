@@ -1086,35 +1086,22 @@ title: 『原神』7.3前瞻日期确定…
 （`%USERPROFILE%\Desktop\Microsoft Edge.lnk`），资源管理器会优先用它，桌面上还是那一个图标，
 点下去就带 `--load-extension`。公共桌面那个原样不动，随时可还原（删用户桌面那个就行）。
 
-**`make-edge-shortcut.ps1`（打包在网关目录里）**：
+**2026-11-17 起：旧的 unpacked 扩展已退役**（`manifest.json` / `content.js` / `background.js` 已删）。
+现在**不再用 `--load-extension`、不再改 Edge 快捷方式**，播放进度走：
 
-- 自己找 Edge 路径（x86 / 非 x86 都试）、自己算 `browser_ext` 的绝对路径（装到哪都行）；
-- **幂等**：参数里已经有 `--load-extension` 就不再动；
-- 会把原来的参数备份到 `logs\edge-shortcuts-backup.json`；
-- 写完打印生效的「目标 + 参数」，方便核对。
+- **主路**：商店扩展 **Tampermonkey** + `browser_ext/paopao-player.user.js`（网关 `/ext/` 直接提供安装地址）；
+- **兜底**：`start-edge-watch.ps1` 开的独立配置「看片窗口」，靠 `--remote-debugging-port=9222` 读 URL/进度；
+- 需要永久免清可再走 Edge 企业策略 force-install（见 4.2q.3）。
 
-**`install-browser-ext.ps1`（两个模式）**：
+相关脚本现在的职责：
 
-| 用法 | 干什么 |
+| 脚本 | 现在干什么 |
 |---|---|
-| `install-browser-ext.ps1` | 先跑 `make-edge-shortcut.ps1`，再把扩展文件夹和 `edge://extensions` 都弹出来，人点三下 |
-| `install-browser-ext.ps1 -RestartEdge` | **全自动**：改快捷方式 → 关掉 Edge（先关窗口，3 秒后强杀）→ 用桌面快捷方式重新启动（自带 `--load-extension`） |
+| `install-browser-ext.ps1` | 打开 Tampermonkey 商店页 + `http://127.0.0.1:9888/ext/paopao-player.user.js`；`-DedicatedProfile` 开 CDP 看片窗口；`-RestartEdge` 已废弃（只提示） |
+| `make-edge-shortcut.ps1` | **只清理**：把桌面 Edge 快捷方式里旧的 `--load-extension=...\browser_ext` 删掉，不再往快捷方式里加东西 |
+| `start-edge-watch.ps1` | 独立配置目录 + 调试端口；**不再加载扩展** |
 
-**AI 能不能全自动装好？** 能，但有个前提和一条边界：
-
-- 前提：**Edge 得是关着的**。`-RestartEdge` 就是替 AI 做「关掉再带参数启动」这件事；
-  注意它会关掉当前窗口，标签页不一定自动恢复，用之前要确认没开着要留的东西。
-- 边界：**不能在不重启浏览器的情况下把未打包扩展塞进去**。Chromium 没有「命令行动态加载扩展」的接口，
-  `edge://extensions` 那三下点击必须有人（或 AI 用 UI 自动化）做。所以：
-  - Edge 已关 / 允许重启 → 脚本全自动，一次到位；
-  - Edge 正在用、不想关 → 只能手动点三下（装一次就跟着 profile 走，以后不用再装）。
-
-**给别人装的时候**：包里已经有 `browser_ext/`、`make-edge-shortcut.ps1`、`install-browser-ext.ps1`，
-`install.ps1` 也加了第 5 步——默认**不动**别人的快捷方式，只打印两条命令；想一步到位就
-`install.ps1 -EdgeShortcut`。给 AI 的说法：
-
-> 装完网关后，跑 `install-browser-ext.ps1 -RestartEdge`（Edge 没开就不用加参数），
-> 然后打开 B站视频，`/status` 里 `player.source` 应该是 `ext`。
+安装步骤、验证和「允许用户脚本」开关见 **4.2q.3**。
 
 
 #### 4.2q.2 实测：Edge 157 在默认配置下**不认** `--load-extension`（2026-11-17 04:0x）
@@ -1126,46 +1113,55 @@ title: 『原神』7.3前瞻日期确定…
 | 默认配置 + `--load-extension=<browser_ext>`（快捷方式里确实带上了这个参数，进程命令行也确认有） | **扩展没加载**：`%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Preferences` 的 `extensions.settings` 里没有它，`/status.player.connected = false` |
 | 独立配置 + `--load-extension`（`--user-data-dir=%TEMP%\paopao-ext-check2`） | **自动加载成功**：`source: ext`、`position: 0:11 / 1:47`、`bvid: BV16cWd6pEBh`，标题也对 |
 
-结论：跟 `--remote-debugging-port` 一样，Chromium 136+ 把「默认用户目录」这个口子堵了；
-`--load-extension` 在**独立配置目录**里还能用。所以现在有三条路，按省事程度排：
+结论：Edge 157 在默认配置下**既忽略 `--load-extension`，也忽略 `--remote-debugging-port`**；
+独立配置目录才两者都能用。旧扩展退役后，现在的路线是：
 
-| 方案 | 要不要点击 | 代价 |
+| 方案 | 要不要点击/管理员 | 代价 |
 |---|---|---|
-| **① 主浏览器里手动装一次**（`edge://extensions` → 开发人员模式 → 加载解压缩的扩展 → 选 `browser_ext`） | 点三下，**只一次**（之后跟着 profile 走，重启还在） | 无（会多一条「开发者模式扩展」提示） |
-| **② `start-edge-watch.ps1`**：独立配置目录的「看片窗口」，扩展预装 | **零点击** | 那是另一个配置目录，没有平时的登录态（B站 720p 能播，1080p 可能要登录；字幕不受影响，走 bili CLI） |
-| ③ 老版本 Edge / Chrome（136 以前） | 零点击 | 版本新了就失效，`--load-extension` 会被忽略 |
+| **① Tampermonkey 用户脚本**（主路） | 装商店扩展 + 点一次「安装」；Edge 157 还要开「允许用户脚本」 | 无 |
+| **② `start-edge-watch.ps1`**：独立配置目录 + 调试端口 | 零点击 | 另一个配置目录，没有平时登录态（字幕仍走 bili CLI） |
+| **③ CRX + Edge 企业策略 force-install** | 一次管理员 | 需要本地 update 源；但永久免清 |
 
-`install-browser-ext.ps1` 现在两个开关：`-DedicatedProfile`（=方案 ②，直接开窗口）、
-`-RestartEdge`（=试着走 ③，默认配置下按实测无效，所以脚本会提示你转手动或方案 ②）。
+`install-browser-ext.ps1` 现在只负责打开 Tampermonkey 商店页和用户脚本安装页；
+`-DedicatedProfile` 开 ②；`-RestartEdge` 已废弃。
 
 **给 AI 的说法（照着说就行）**：
 
-> 这台机器上 Edge 是 157，默认配置下 `--load-extension` 会被忽略（实测过），所以我没法帮你全自动装。
-> 你手动开一下，三下就好：地址栏进 `edge://extensions` → 右上角打开「开发人员模式」→
-> 点「加载解压缩的扩展」→ 选 `D:\app1\paopao_pet_gateway\browser_ext`。
-> 装完播个 B站视频，我这边看 `/status` 就能确认。
+> 旧扩展已经退役了，不用开发者模式。Edge 装 Tampermonkey，然后打开
+> `http://127.0.0.1:9888/ext/paopao-player.user.js` 安装；Edge 157 还要在
+> `edge://extensions` → Tampermonkey「详细信息」里打开「允许用户脚本」。
+> 装完播个 B站视频，我这边看 `/status` 的 `player.source` 是不是 `ext`。
 
-**别做的事**：别反复改快捷方式、别关掉浏览器重试、别手改 `Preferences` 文件——
-默认配置下这条路走不通，试了只是白折腾（2026-11-17 实测过一次，白关了一次浏览器）。
-实在不想在主浏览器里点，就退一步用 `install-browser-ext.ps1 -DedicatedProfile` 开独立配置的看片窗口。
+**别做的事**：别再往 Edge 快捷方式里加 `--load-extension`、别手改 `Preferences` 里的扩展状态；
+旧扩展如果还装在 Edge 里，到 `edge://extensions` 移除，并跑一次 `make-edge-shortcut.ps1`
+把快捷方式里的旧参数清掉。
 
-#### 4.2q.3 扩展被 Edge 清掉、读不到 URL 怎么办（2026-11-17）
+#### 4.2q.3 播放进度上报：旧扩展已退役，现在用 Tampermonkey（2026-11-17）
 
-**原因**：`browser_ext` 是 unpacked（开发人员模式）扩展。Edge 更新、配置目录重建、
+**背景**：旧的 `browser_ext` 是 unpacked（开发人员模式）扩展。Edge 更新、配置目录重建、
 或它自己把「开发者模式扩展」关掉，都会让扩展失效；默认配置下 `--load-extension` 又被
-Edge 157 忽略。扩展一没，`/player` 就没有 URL/进度，B站字幕和模式细分会退化。
+Edge 157 忽略。所以 2026-11-17 起：
 
-**现在有三层兜底**：
+- 删掉旧扩展的 `manifest.json` / `content.js` / `background.js`，**不再用开发者模式**；
+- 主路改成商店扩展 **Tampermonkey** + `browser_ext/paopao-player.user.js`；
+- `make-edge-shortcut.ps1` 只负责把旧快捷方式里的 `--load-extension` 清掉。
 
-1. **看片窗口（推荐日常用）**：`start-edge-watch.ps1` 现在除了 `--load-extension`，
-   还带 `--remote-debugging-port=9222`。扩展哪天被清掉，URL/currentTime 还能走 CDP；
-   `PlayerWatch.snapshot()` 的优先级是 扩展 → CDP → B站历史。
+**现在有三层**：
+
+1. **Tampermonkey 用户脚本（主路，推荐）**：Edge 加载项商店装 **Tampermonkey**
+   （Violentmonkey / ScriptCat 也行），打开
+   `http://127.0.0.1:9888/ext/paopao-player.user.js` 安装；Edge 157 还要在
+   `edge://extensions` → Tampermonkey「详细信息」里打开「允许用户脚本」。商店扩展不会被
+   「开发者模式扩展」那套清掉。
+2. **看片窗口（CDP 兜底）**：`start-edge-watch.ps1` 用独立配置目录 +
+   `--remote-debugging-port=9222`，不依赖任何扩展；扩展/脚本没跑时
+   `PlayerWatch.snapshot()` 从 CDP 读 URL/currentTime，再退到 B站历史。
    > 看片窗口已经开着的话，先关掉再重跑脚本，`--remote-debugging-port` 才会生效
    > （同一个配置目录已有 Edge 进程时，新参数会被忽略）。
-2. **主浏览器（不想换窗口）**：没有 URL 时，模式判定仍会按**窗口标题**走
+3. **主浏览器没有 URL 时**：模式判定仍会按**窗口标题**走
    （`哔哩哔哩` / `番剧` / `第X集` / `直播` 都能认），所以切模式不会卡死；
-   只是没有精确进度和按时间轴的字幕，B站历史兜底还能补上最近的 bvid/进度。
-3. **永久方案（要管理员一次）**：把 `browser_ext` 打成 CRX，配 Edge 企业策略
+   只是没有精确进度和按时间轴的字幕，B站历史兜底还能补最近的 bvid/进度。
+4. **永久方案（要管理员一次）**：把用户脚本/扩展打成 CRX，配 Edge 企业策略
    `ExtensionInstallForcelist`（`<扩展ID>;http://127.0.0.1:9888/ext/update.xml`），
    由网关提供 `update.xml` + `.crx`。force-install 的扩展不会被 Edge 更新/开发者模式清掉，
    也不需要用户点「加载解压缩的扩展」。代价是要写一次 HKLM 策略、且扩展更新要走本地源。
