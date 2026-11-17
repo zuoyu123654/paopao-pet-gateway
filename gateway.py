@@ -189,10 +189,15 @@ DEFAULTS = {
         "min_checks": 2,
         "cooldown_minutes": 360,
     },
-    # 只对写进手册的游戏读本机版本号（注册表），版本变了轮换 latest
+    # 只对写进手册的游戏读版本号；立绘扫描每天 11:00 一次
     "game_versions": {
         "enabled": True,
         "check_minutes": 360,
+    },
+    "bili_previews": {
+        "enabled": True,
+        "hour": 11,
+        "minute": 0,
     },
     "vision_context_entries": 6,
     "vision_context_minutes": 30,
@@ -516,8 +521,8 @@ def add_preview_updates(title: str, texts: list[str]) -> int:
         for text in clean:
             if text in existing or text in visual:
                 continue
-            latest.append({"text": text, "version": "preview",
-                           "priority": 95, "rounds": 0})
+            latest.append({"text": text, "version": str(entry.get("version") or ""),
+                           "priority": 100, "rounds": 0})
             existing.add(text)
             added += 1
         latest.sort(key=lambda x: -int(x.get("priority", 0) or 0))
@@ -2525,13 +2530,43 @@ class GameVersionWatcher(threading.Thread):
                     if title in GAME_VERSION_ALIASES:
                         if rotate_title_version(title, ver):
                             self.gateway.refresh_game_updates(title, ver)
-                try:
-                    self.gateway.refresh_bili_previews("异环")
-                except Exception:  # noqa: BLE001
-                    pass
             except Exception as exc:  # noqa: BLE001
                 log.info("版本检查没成（不影响使用）：%s", exc)
             time.sleep(self.interval)
+
+
+class BiliPreviewWatcher(threading.Thread):
+    """异环立绘动态固定在每天 11:00 左右发，每天 11 点只扫一次，不 6 小时翻。"""
+
+    def __init__(self, cfg: dict, gateway):
+        super().__init__(name="bili-previews", daemon=True)
+        conf = cfg.get("bili_previews") or {}
+        self.cfg = cfg
+        self.gateway = gateway
+        self.enabled = bool(conf.get("enabled", True))
+        self.hour = max(0, min(23, int(conf.get("hour", 11))))
+        self.minute = max(0, min(59, int(conf.get("minute", 0))))
+
+    def _next_at(self) -> float:
+        now = time.time()
+        lt = time.localtime(now)
+        target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                              self.hour, self.minute, 0, 0, 0, -1))
+        if target <= now:
+            target += 86400
+        return target
+
+    def run(self) -> None:
+        if not self.enabled:
+            return
+        while True:
+            delay = self._next_at() - time.time()
+            time.sleep(max(5.0, delay))
+            try:
+                self.gateway.refresh_bili_previews("异环")
+            except Exception as exc:  # noqa: BLE001
+                log.info("11 点立绘扫描没成（不影响使用）：%s", exc)
+            time.sleep(120)
 
 
 class GameWatcher(threading.Thread):
@@ -3560,6 +3595,8 @@ class Gateway:
         self.title_learner.start()
         self.game_versions = GameVersionWatcher(cfg, self)
         self.game_versions.start()
+        self.bili_previews = BiliPreviewWatcher(cfg, self)
+        self.bili_previews.start()
         # 作品的「肚子里的资料」：自己查百科+攻略 → 总结成本地手册；识屏/语音按需检索
         self.lore = Lore(cfg, self)
         self.lore_keeper = LoreKeeper(cfg, self, self.lore)
@@ -3896,7 +3933,7 @@ class Gateway:
         texts = []
         for desc in descs:
             if desc.startswith("角色："):
-                texts.append("预告" + desc)
+                texts.append(desc)
         return add_preview_updates(title, texts)
 
     def _mode_lock_loop(self) -> None:

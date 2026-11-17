@@ -233,5 +233,10 @@
     "game_versions": {
         "enabled": true,
         "check_minutes": 360
+    },
+    "bili_previews": {
+        "enabled": true,
+        "hour": 11,
+        "minute": 0
     }
 }
