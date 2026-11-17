@@ -690,15 +690,6 @@ class VideoWatcher(threading.Thread):
             return False
         return any(name.startswith(p) or p in name for p in self.players)
 
-    def _input_quiet(self) -> bool:
-        idle = input_idle_seconds()
-        now = time.time()
-        if idle < self.poll:
-            self._events.append(now)
-        while self._events and now - self._events[0] > self.events_window:
-            self._events.popleft()
-        return idle >= self.idle_seconds or len(self._events) <= self.events_max
-
     def _video_target(self, app: str, title: str) -> tuple[str, str]:
         """自动判定该进哪个模式：番剧 / 直播 / B站视频 / 通用视频。
 
@@ -832,7 +823,7 @@ class VideoWatcher(threading.Thread):
                     app, title = foreground()
                     playing = self.audio.has_signal(3.0, self.audio_threshold)
                     player = self._is_player(app)
-                    if player and playing:
+                    if player:
                         if not self._game_seen:
                             self._game_seen = now
                         elif now - self._game_seen >= self.game_takeover_seconds:
@@ -858,29 +849,6 @@ class VideoWatcher(threading.Thread):
         app, title = foreground()
         playing = self.audio.has_signal(3.0, self.audio_threshold)
         player = self._is_player(app)
-        # 前台在聊天/DSH、但播放器还在放番剧/直播：也当“在看”，否则打个字就进不了模式。
-        # 只认没暂停的播放器，避免后台挂着的旧标签页把模式拽过去。
-        remote_playing = False
-        page_watch = False
-        try:
-            snap = self.gateway.player.snapshot() if self.gateway.player else {}
-            url = str((snap or {}).get("url") or "").lower()
-            if player and url and ("bilibili.com" in url or "bili" in url
-                                   or "bangumi" in url or "live.bilibili" in url):
-                # 前台就是 B站播放页：暂停着也算在看这个页面，先把模式落下来；
-                # 不然暂停去打个字，模式就一直停在 auto。
-                page_watch = True
-            if (not player and url and not snap.get("paused")
-                    and ("bangumi" in url or "live.bilibili" in url)):
-                player = True
-                playing = True
-                remote_playing = True
-                app = str(snap.get("app") or app or "browser")
-                title = str(snap.get("title") or title or url)
-        except Exception:  # noqa: BLE001
-            pass
-        if page_watch:
-            playing = True
         same = (app and app == self.app and title == self.title)
 
         # 已经在视频类模式里，前台换到番剧/直播/普通视频：跟着换模式（只动 auto-* 来源）。
@@ -941,14 +909,15 @@ class VideoWatcher(threading.Thread):
                 log.info("视频模式：转写恢复了，关掉字幕 OCR")
 
         if self.state in ("idle", "probe"):
-            if player and playing:
+            # 只认「前台是播放器」：不再要求键鼠安静、也不再要求环回有声。
+            # 后台标签页/聊天窗口不该把模式拽进去，避免误进浪费 token。
+            if player:
                 if not same:
                     with self.lock:
                         self.app, self.title = app, title
                         self.session_since = now
                     self.state = "probe"
-                elif now - self.session_since >= self.enter_seconds \
-                        and (remote_playing or page_watch or self._input_quiet()):
+                elif now - self.session_since >= self.enter_seconds:
                     self.last_audio_at = now
                     self._enter()
             else:
