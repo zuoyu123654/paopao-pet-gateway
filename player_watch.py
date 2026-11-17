@@ -312,17 +312,21 @@ class PlayerWatch(threading.Thread):
             url = str(data.get("url") or "")
             t = data.get("t")
             d = data.get("d")
-            # 没视频的页面（B站隐藏 iframe、首页）不要覆盖当前播放状态
-            if "message.bilibili.com" in url:
+            # 通用过滤：只认「真的在播视频」的上报。
+            # 没有 currentTime 的，多半是隐藏 iframe / 登录框 / 首页 / 播放器还没就绪；
+            # 不再只针对 B站 header_sync，其他站点（YouTube/爱奇艺/腾讯/抖音）的隐藏帧同样丢掉。
+            if not url.startswith(("http://", "https://")):
                 return
-            if t is None and d is None:
+            try:
+                tval = float(t)
+            except (TypeError, ValueError):
                 return
             bv = BV_RE.search(url)
             page = PAGE_RE.search(url)
             self._ext_state = {
                 "url": url,
                 "title": str(data.get("title") or "")[:100],
-                "t": float(t) if isinstance(t, (int, float)) else 0.0,
+                "t": tval,
                 "d": float(d) if isinstance(d, (int, float)) else 0.0,
                 "paused": data.get("paused"),
                 "fullscreen": bool(data.get("fullscreen")),

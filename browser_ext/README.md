@@ -48,8 +48,9 @@ unpacked 扩展（上面三步装的那个）是「开发人员模式」扩展�
 
 > **B站隐藏 iframe 的坑（2026-11-17 修）**：B站页面里有一个 `message.bilibili.com/pages/nav/header_sync`
 > 的跨域 iframe，旧脚本会在里面也跑，每秒把「header sync / 0:00」覆盖到真实视频状态上。
-> 现在两边都堵了：用户脚本只在**顶层页面**、且页面里**真的有 `<video>`** 时才上报；
-> 网关 `PlayerWatch.push_ext()` 也直接丢弃 `message.bilibili.com` 和 `t/d 都为空` 的推送。
+> 现在两层都堵了：用户脚本只在**顶层页面**、且页面里**真的有 `<video>`** 时才上报；
+> 网关 `PlayerWatch.push_ext()` 只认带有效 `currentTime` 的上报，没有时间戳的一律丢弃
+> （不限 B站，YouTube/爱奇艺/腾讯/抖音的隐藏帧同样处理）。
 
 ## 排障
 
