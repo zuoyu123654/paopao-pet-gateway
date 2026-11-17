@@ -605,6 +605,27 @@ def write_pet_proactive(on: bool) -> bool:
         return False
 
 
+def write_pet_pre_cue(on: bool) -> bool:
+    """把桌宠「主动识屏」里的先兆提示 pre_cue 拨到 on/off。"""
+    try:
+        with open(PET_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        ps = dict(data.get("proactive_screen") or {})
+        if bool(ps.get("pre_cue")) == bool(on):
+            return True
+        ps["pre_cue"] = bool(on)
+        data["proactive_screen"] = ps
+        tmp = PET_CONFIG_PATH + ".paopao-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PET_CONFIG_PATH)
+        log.info("先兆提示 → %s", "开" if on else "关")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("改先兆提示失败：%s", exc)
+        return False
+
+
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULTS, ensure_ascii=False))
     if os.path.exists(CONFIG_PATH):
@@ -3616,7 +3637,12 @@ class Gateway:
         except Exception:  # noqa: BLE001
             pass
         # 每次模式真的变了，就播一句 + 冒个泡（两种都是预合成好的固定句子）
-        self.mode.on_change = self._announce_mode
+        self.mode.on_change = self._on_mode_change
+        # 启动时也把先兆提示对齐当前模式：自动开，其他关
+        try:
+            write_pet_pre_cue(self.mode.get() == "auto")
+        except Exception:  # noqa: BLE001
+            pass
         self.divination = DivinationWatcher(cfg, self.speech)
         self.last_vision_at = time.time()
         self.frames = FrameBuffer(cfg)
@@ -4205,6 +4231,14 @@ class Gateway:
         except Exception:  # noqa: BLE001
             pass
         return "你是泡泡，一只住在他电脑里的蓝色鲸鱼娘，只叫他老大。"
+
+    def _on_mode_change(self, mode: str, source: str) -> None:
+        """模式变化：只有自动模式开「先兆提示」，其他模式一律关。"""
+        try:
+            write_pet_pre_cue(mode == "auto")
+        except Exception as exc:  # noqa: BLE001
+            log.info("同步先兆提示没成（不影响模式）：%s", exc)
+        self._announce_mode(mode, source)
 
     def _announce_mode(self, mode: str, source: str) -> None:
         """模式一变就出声 + 冒泡（老大 2026-11-17 要的：每次切换都要有提示）。

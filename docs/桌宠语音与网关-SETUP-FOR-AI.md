@@ -1,4 +1,4 @@
-﻿# 桌宠语音与网关 · 施工单（给 AI）
+# 桌宠语音与网关 · 施工单（给 AI）
 
 > ⚠️ **先看称呼：本套默认把用户称为「老大」。**
 > 如果你的人设里用户叫「主人 / 老板 / 先生 / 姐姐……」等别的称呼，请先把本套所有涉及
@@ -140,7 +140,7 @@ dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给�
 |---|---|---|
 | 聊天回复 | 经过网关（provider） | ✅ 流式接、按标点切句 |
 | 框选识屏 / 主动识屏的回答 | 经过网关（vision 请求） | ✅ 直接念答案（**2026-11-17 起不先念「让我看看」**） |
-| 识屏预提示（「让我看看」） | 网关看到 vision 请求就先念一句 | ❌ 已关：`tts.pre_cue` 默认空，桌宠 `proactive_screen.pre_cue=false` |
+| 识屏预提示（先兆提示） | 桌宠 `proactive_screen.pre_cue`（网关按模式同步） | 只在**自动模式**开：气泡 + 语音；其他模式一律关 |
 | DSH 开工 / 收工 / 报错 / 要你拍板 | 盯 `%APPDATA%\dsh-pet-bridge\dsh-*.jsonl` | ✅ |
 | DSH **跑工具**（读了什么文件、跑了什么命令） | 同上 | ❌ 已关（`dsh.speak_tools=false`），太吵 |
 | 点击自言自语、语音报时、节日/待办/抽签 | 本地事件，不经过 provider | ❌ 读不到 |
@@ -159,13 +159,13 @@ dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给�
 
 实测：整段回复 1.6s 收完；首句音频 2–3s 出来；`/say` 连发两句时第二句确实顶掉第一句。
 
-**2026-11-17 起：「让我看看」默认去掉（老大嫌会话/进模式时冒出来）。**
+**2026-11-17 晚：先兆提示只跟自动模式走。**
 
-- 网关 `tts.pre_cue` 默认 `[]`，`arm_vision_cue()` 直接返回，不再念提示音；
-- 桌宠自己的 `proactive_screen.pre_cue` 设成 `false`，不再冒「让我看看」气泡；
-- 启动时 `warm_pre_cues()` 也不会再合成；老缓存文件留在 `audio/precue/` 不播，可不管。
-
-旧设计（2026-11-15）是识屏前先念一句、预缓存；现在已按老大要求关掉。
+- 网关 `_on_mode_change()`：`mode == "auto"` → 桌宠 `proactive_screen.pre_cue=true`；
+  其他模式（game/video/anime/live/course/normal/off）→ `false`；
+- 桌宠打开「主动识屏」会进自动模式，所以先兆提示跟着开；关掉主动识屏或切成别的模式就关；
+- 网关自己的 `tts.pre_cue` 仍默认 `[]`，不再额外念一句，避免和桌宠的先兆提示叠成两声；
+- 启动时也会按当前模式对齐一次 `pre_cue`。
 
 ### 4.3 音量与语速
 
@@ -492,7 +492,7 @@ ValueError: not enough values to unpack (expected 2, got 1)
 | `speed` / `speed_first` | 1.2 / 1.0 | 语速：后面快、第一小句正常 |
 | `max_chars_per_sentence` | 32 | 一句切多长，见上 |
 | `output_device` | 空 | 留空=**跟系统默认输出**（换耳机、换扬声器自动跟着走，平时不用管）。真要钉死再写名字片段，比如 `Realtek` |
-| `pre_cue` | 空（默认不念） | 识屏前那句提示音；**2026-11-17 起默认关掉**（老大嫌会话里冒出「让我看看」）；要看片/看番时安静就别开 |
+| `pre_cue` | 空（默认不念） | 网关自己那句识屏提示音，默认关；先兆提示改由桌宠 `proactive_screen.pre_cue` 在自动模式开关 |
 | `early_sentences` | 3 | 前几段按标点切（默认 3，第 4 段起恢复正常） |
 | `early_min_chars` | 8 | 这几段至少多少字才切（≥8） |
 | `max_internal_pause` | 0 | **0 = 不剪静音，原样播**（老大定的）。0.28 会把句中长静音压到 0.28 秒 |
@@ -1219,9 +1219,9 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
      2026-11-17 起 **live/course 每条都是两句**（不再只念一句），气泡和语音都是对应的；
    - 自动直播进 `live`（source `auto-live`），自动番剧进 `anime`；网课由 API/手动设 `course`。
 
-4. **「让我看看」默认关掉**
-   - 网关 `tts.pre_cue = []`，`arm_vision_cue()` 直接返回；
-   - 桌宠 `proactive_screen.pre_cue = false`，不再冒「让我看看」气泡；
+4. **「让我看看」只在自动模式开**
+   - 网关 `tts.pre_cue = []`，自己不念提示音，避免和桌宠叠两声；
+   - 桌宠 `proactive_screen.pre_cue` 由网关按模式同步：`auto` = true，其他模式 = false；
    - 老缓存 `audio/precue/` 不播，可留可删。
 
 5. **DSH 工作状态：完成不吞，念完手上的再补**
@@ -1711,6 +1711,8 @@ Invoke-RestMethod http://127.0.0.1:9888/lore -Method Post -ContentType applicati
 
 实测 2026-11-17 14:00：三条路径都只出一次声，没有再叠。
 
+模式切换同时会同步 `proactive_screen.pre_cue`：只有 `auto` 为 true，其他模式为 false。
+
 #### 4.2w.2 通用视频要自己的两句
 
 `video` 这个 mode 被「B站视频」和「通用视频」共用，以前提示统一是
@@ -2025,7 +2027,7 @@ Invoke-WebRequest http://127.0.0.1:9888/health -UseBasicParsing
 | min_request_interval_seconds | 60 | 请求最小间隔 |
 | change_threshold | 5 | 画面变化（dHash）阈值，越小越敏感（原 8） |
 | **daily_cap** | **9999** | **每天上限 = 不限量（2026-11-17 改；原来是 60）**。看片/打游戏一坐一两小时，60 次不够用；9999 之后不会再因为「今天看够了」突然不吭声 |
-| pre_cue | false | 2026-11-17 起关掉：不再先冒「让我看看」气泡 |
+| pre_cue | 自动模式 true / 其他 false | 2026-11-17 晚起由网关按模式同步：只有自动模式冒气泡 + 语音先兆，其他模式关 |
 
 > **改法（UI 上限不够时）**：直接改文件 `%APPDATA%\dsh-pet-standalone-webm-chat\config.json`
 > 里的 `proactive_screen.daily_cap`，写成 **9999** 就等于不限制。写完存盘立刻生效（桌宠有
