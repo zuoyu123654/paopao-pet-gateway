@@ -147,7 +147,8 @@
         "loopback_device": "",
         "subtitle_ocr": false,
         "switch_seconds": 20,
-        "game_takeover_seconds": 90
+        "game_takeover_seconds": 90,
+        "min_video_seconds": 120
     },
     "soften_self_recognition": true,
     "self_recognition": {
@@ -243,5 +244,6 @@
         "hour": 11,
         "minute": 30
     },
-    "anime_resolve_seconds": 10
+    "anime_resolve_seconds": 10,
+    "auto_precue_voice": true
 }

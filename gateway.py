@@ -103,6 +103,7 @@ DEFAULTS = {
     "inject_vision_ledger": True,
     # 文字聊天问「这个角色是谁」时补一张当前屏幕，别拿最近聊过的角色硬套
     "chat_screen_look": True,
+    "auto_precue_voice": True,
     "mouse_look": {
         "enabled": True,
         "cooldown_seconds": 3,
@@ -5708,10 +5709,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         log.info("请求 scenario=%s stream=%s user=%r", scenario, client_stream, user_text[:60])
-        # 先兆提示只由桌宠自己的 proactive_screen.pre_cue 负责；网关不再补气泡/语音。
         proactive = (scenario == "vision"
                      and str(user_text).startswith("（参考元数据"))
-        # 电话模式不关主动识屏；如果老大正在说话，只冒泡不念（见 stream_reply）
         # 黑屏守卫：独占全屏游戏 / 锁屏 / DRM 画面截出来一片黑，说出去就是「我什么也看不见」。
         # 连续 2 张都黑就整轮跳过（不叫模型、不说话、不冒泡），也不占账本。
         if scenario == "vision" and GATEWAY.vision_is_black():
@@ -5723,10 +5722,20 @@ class Handler(BaseHTTPRequestHandler):
         # 「让我看看」按最近的实测耗时推迟到首句开口前（见 arm_vision_cue）
         if scenario == "vision":
             GATEWAY.speech.arm_vision_cue()
+        # 桌宠只冒泡不出声时，自动模式补一句语音；其他模式不补。
+        if (proactive and self.cfg.get("auto_precue_voice", True)
+                and GATEWAY.mode.get() == "auto"):
+            try:
+                if not (getattr(GATEWAY, "voice", None) and GATEWAY.voice.is_speaking()):
+                    last = float(getattr(GATEWAY, "last_pre_cue_at", 0.0) or 0.0)
+                    if time.time() - last >= 20:
+                        GATEWAY.last_pre_cue_at = time.time()
+                        GATEWAY.speech.say("让我看看……", tag="precue")
+                        log.info("先兆语音：让我看看（自动模式）")
+            except Exception as exc:  # noqa: BLE001
+                log.info("先兆语音没成：%s", exc)
 
         sink: list[str] = []
-        proactive = (scenario == "vision"
-                     and str(user_text).startswith("（参考元数据"))
         suppress_proactive = bool(
             proactive and getattr(GATEWAY, "voice", None)
             and GATEWAY.voice.mode == "call"

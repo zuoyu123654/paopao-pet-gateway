@@ -375,6 +375,7 @@ class VideoWatcher(threading.Thread):
         self.paused_grace = float(self.conf.get("paused_grace_seconds", 600))
         self.paused_away_grace = float(self.conf.get("paused_away_grace_seconds", 120))
         self.switch_seconds = max(5.0, float(self.conf.get("switch_seconds", 20)))
+        self.min_video_seconds = max(0.0, float(self.conf.get("min_video_seconds", 120)))
         # 游戏里退出来直接看直播/视频：这个方向也按「进入判断」的 90 秒确认，
         # 5 秒太容易把“游戏里切出来瞄一眼浏览器”误判成看片（老大 2026-11-17 定的）。
         self.game_takeover_seconds = max(
@@ -397,6 +398,7 @@ class VideoWatcher(threading.Thread):
         self.app = ""
         self.title = ""
         self.session_since = 0.0
+        self.last_switch = ("", "", 0.0)
         # 启动时不要拿 0 去算「多久没声音」：网关重启时 mode.json 里可能还存着
         # live，旧代码会立刻认为「已经几百秒没声音」直接退出（2026-11-17 实测踩到）。
         self.last_audio_at = time.time()
@@ -567,6 +569,14 @@ class VideoWatcher(threading.Thread):
         s = re.sub(r"\s*-\s*个人\s*-\s*.*$", "", s, flags=re.I)
         return s.strip(" -|")[:100]
 
+    def _switch_note(self) -> str:
+        """标题刚变过：告诉她是换视频/直播间/番剧/集数了，别套上一段。"""
+        old, new, at = self.last_switch
+        if not (self.active and old and new and time.time() - at <= 180):
+            return ""
+        return ("\n【刚换了内容】标题从「%s」变成「%s」——这是换了视频/直播间/番剧或集数，"
+                "不是同一段；别把上一段剧情套到这一段。" % (old[:50], new[:50]))
+
     def mode_context(self) -> str:
         """各模式的参考：视频/网课标题、番剧名、游戏名；通用视频要提醒标题可能不准。"""
         try:
@@ -597,20 +607,21 @@ class VideoWatcher(threading.Thread):
                     "只是参考：认得出角色/玩法就自然聊，不确定的别编。" % name)
         if not title:
             return ""
+        suffix = self._switch_note()
         if mode == "anime":
             return ("【番剧参考】名字/标题：%s\n"
-                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title)
+                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title) + suffix
         if mode == "course":
             return ("【网课参考】标题：%s\n"
-                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title)
+                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title) + suffix
         # mode == video：B站视频 / 通用视频
         generic = ("generic" in source) or (source in ("auto-video", "video-leave"))
         if generic:
             return ("【网页视频参考】网页标题：%s\n"
                     "通用视频的网页标题可能不准，只当线索，不要当成确定事实，"
-                    "更不要逐字念。" % title)
+                    "更不要逐字念。" % title) + suffix
         return ("【视频参考】标题：%s\n"
-                "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title)
+                "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title) + suffix
 
     def context_block(self) -> str:
         with self.lock:
@@ -727,6 +738,13 @@ class VideoWatcher(threading.Thread):
         if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
             return "video", "auto-video-bili"
         return "video", "auto-video"
+
+    def _duration_seconds(self) -> float:
+        try:
+            snap = self.gateway.player.snapshot() if self.gateway.player else {}
+            return float((snap or {}).get("d") or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
 
     def _player_still_playing(self, mode: str) -> bool:
         """播放器还在放这个模式的内容，就算前台切去聊天也别退。"""
@@ -854,6 +872,8 @@ class VideoWatcher(threading.Thread):
         # 已经在视频类模式里，前台换到番剧/直播/普通视频：跟着换模式（只动 auto-* 来源）。
         # 不然从普通 B站视频点进番剧/直播，会一直停在 video，看着像“不会自动进”。
         if player and self.active:
+            if self.title and title and title != self.title:
+                self.last_switch = (self.title, title, now)
             target, source = self._video_target(app, title)
             m = self.gateway.mode
             cur = m.get()
@@ -918,6 +938,13 @@ class VideoWatcher(threading.Thread):
                         self.session_since = now
                     self.state = "probe"
                 elif now - self.session_since >= self.enter_seconds:
+                    target, _src = self._video_target(app, title)
+                    dur = self._duration_seconds()
+                    if target in ("video", "anime") and dur and dur < self.min_video_seconds:
+                        log.info("视频模式：%.0f 秒的短视频，不进入（至少 %.0f 秒）",
+                                 dur, self.min_video_seconds)
+                        self.state = "probe"
+                        return
                     self.last_audio_at = now
                     self._enter()
             else:
@@ -937,8 +964,6 @@ class VideoWatcher(threading.Thread):
         still = playing or self._player_still_playing(self.gateway.mode.get())
         if not still and not player and (now - self.last_audio_at) > self.paused_away_grace:
             self._leave("停了又切走 2 分钟")
-        elif not still and player and (now - self.last_audio_at) > self.paused_grace:
-            self._leave("停在播放器上 10 分钟没动静")
         elif still and not player and (now - self.last_fore_at) > self.away_grace:
             # 直播/番剧/网课只要播放器还在放，就算人在别的窗口打字也别退；
             # 通用视频仍按老规矩，前台离开太久才退。

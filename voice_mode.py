@@ -197,6 +197,7 @@ class VoiceMode(threading.Thread):
         self._last_rms = 0.0
         self._last_voiced = 0.0
         self._last_voiced_at = 0.0
+        self._last_hotkey_at = 0.0
         self._listening_shown = False
         # 这一次「开口」的时间戳（第一个超过阈值的音频块）：语音问答要拿这一刻的屏幕
         self.last_onset_at = 0.0
@@ -292,7 +293,7 @@ class VoiceMode(threading.Thread):
             return
 
         # 系统级热键：游戏（高完整性级别前台窗）里轮询读不到，必须用 RegisterHotKey
-        self.hotkey_thread = HotkeyThread(self.begin)
+        self.hotkey_thread = HotkeyThread(self._on_hotkey)
         self.hotkey_thread.start()
         self.hotkey_thread.ready.wait(2.0)
         self.hotkey_ok = bool(self.hotkey_thread.ok)
@@ -308,9 +309,12 @@ class VoiceMode(threading.Thread):
             # 热键：按一下开，再按一下取消
             try:
                 down = self._hotkey_down()
-                if down and not hotkey_was_down and not getattr(self, "hotkey_ok", False):
-                    # 系统热键已注册就不靠轮询了（否则会一次按键触发两次）
-                    self.begin()
+                if down and not hotkey_was_down:
+                    # 系统热键回调没来（被别的钩子吞了/游戏抢了）时，轮询兜底；
+                    # 回调刚来过就跳过，避免一次按键开两次。
+                    if not self.hotkey_ok or time.time() - self._last_hotkey_at > 1.5:
+                        self._on_hotkey()
+                        log.info("语音热键：系统回调没来，轮询兜底触发")
                 hotkey_was_down = down
             except Exception:  # noqa: BLE001
                 pass
@@ -391,6 +395,14 @@ class VoiceMode(threading.Thread):
         alt = u.GetAsyncKeyState(VK_MENU) & 0x8000
         key = u.GetAsyncKeyState(ord("V")) & 0x8000
         return bool(ctrl and alt and key)
+
+    def _on_hotkey(self) -> None:
+        """系统回调和轮询共用一个入口，1 秒内只认一次。"""
+        now = time.time()
+        if now - self._last_hotkey_at < 1.0:
+            return
+        self._last_hotkey_at = now
+        self.begin()
 
     def _probe_device(self, sd, idx: int) -> int:
         """开 0.35 秒看看这个设备到底出不出数据；返回收到的采样数。"""
