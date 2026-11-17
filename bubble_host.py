@@ -57,7 +57,7 @@ _SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
 # 观看：单选；语音：单选。键是模式名，值是菜单上那行字。
 WATCH_ITEMS = (
     ("off", "关闭"),
-    ("auto", "通用模式"),
+    ("auto", "自动模式"),
     ("video", "B站视频"),
     ("anime", "B站看番"),
     ("game", "玩游戏"),

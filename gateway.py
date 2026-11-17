@@ -4410,9 +4410,14 @@ class Handler(BaseHTTPRequestHandler):
             # API/插件切模式：不吃托盘残留的锁
             GATEWAY.mode_lock_until = 0.0
         if source.startswith("tray"):
-            # 托盘所有模式（包括「通用模式」，内部值仍是 auto）都按手动锁走：
-            # 默认锁 N 分钟；「一直」就锁到手动换掉为止。
-            if getattr(GATEWAY.mode, "lock_forever", False):
+            # 「自动模式」是通用/自动判定的入口：
+            # - 5 分钟档不锁它，自动判定要能马上切（锁 5 分钟会卡太久）
+            # - 「一直保持」档才把它也锁住，停在自动/通用状态不切换
+            if data["mode"] == "auto" and not getattr(GATEWAY.mode, "lock_forever", False):
+                GATEWAY.mode.release("自动模式5分钟档不锁")
+                GATEWAY.mode_lock_until = 0.0
+                log.info("自动模式（5分钟档）不锁：自动判定立即接管")
+            elif getattr(GATEWAY.mode, "lock_forever", False):
                 GATEWAY.mode_lock_until = float("inf")
                 log.info("模式锁：%s 一直保持（手动锁=一直）", data["mode"])
             else:
@@ -4445,7 +4450,12 @@ class Handler(BaseHTTPRequestHandler):
         g.mode.set_lock_forever(forever)
         cur = g.mode.get()
         src = str(g.mode.source)
-        if src.startswith("tray"):
+        if cur == "auto" and not forever:
+            # 5 分钟档对自动模式不锁：选了自动就让自动判定马上接管
+            if src.startswith("tray"):
+                g.mode.release("自动模式5分钟档不锁")
+            g.mode_lock_until = 0.0
+        elif src.startswith("tray"):
             new_src = "tray-generic" if src.startswith("tray-generic") else "tray"
             if src != new_src:
                 # 从 released 拉回锁住状态（模式不变，不播提示）
