@@ -2536,7 +2536,11 @@ class GameVersionWatcher(threading.Thread):
 
 
 class BiliPreviewWatcher(threading.Thread):
-    """异环立绘动态固定在每天 11:00 左右发，每天 11 点只扫一次，不 6 小时翻。"""
+    """异环立绘动态固定在每天 11:00 左右发，每天 11:30 只扫一次，不 6 小时翻。
+
+    11:30 不在线也没关系：下次启动时如果今天还没扫过、且已经过 11:30，
+    会在启动约 20 秒后补扫一次。
+    """
 
     def __init__(self, cfg: dict, gateway):
         super().__init__(name="bili-previews", daemon=True)
@@ -2546,6 +2550,32 @@ class BiliPreviewWatcher(threading.Thread):
         self.enabled = bool(conf.get("enabled", True))
         self.hour = max(0, min(23, int(conf.get("hour", 11))))
         self.minute = max(0, min(59, int(conf.get("minute", 30))))
+        self.state_path = os.path.join(APP_DIR, "logs", "bili_previews_state.json")
+
+    def _today(self) -> str:
+        return time.strftime("%Y-%m-%d")
+
+    def _last_scan(self) -> str:
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                return str((json.load(f) or {}).get("date") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _mark_scanned(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump({"date": self._today(), "at": time.time()}, f)
+        except OSError:
+            pass
+
+    def _scan(self) -> None:
+        try:
+            self.gateway.refresh_bili_previews("异环")
+        except Exception as exc:  # noqa: BLE001
+            log.info("立绘扫描没成（不影响使用）：%s", exc)
+        self._mark_scanned()
 
     def _next_at(self) -> float:
         now = time.time()
@@ -2559,13 +2589,17 @@ class BiliPreviewWatcher(threading.Thread):
     def run(self) -> None:
         if not self.enabled:
             return
+        # 启动补扫：今天已经过了 11:30，但今天还没扫过
+        time.sleep(20)
+        lt = time.localtime()
+        due_minutes = self.hour * 60 + self.minute
+        now_minutes = lt.tm_hour * 60 + lt.tm_min
+        if now_minutes >= due_minutes and self._last_scan() != self._today():
+            self._scan()
         while True:
             delay = self._next_at() - time.time()
             time.sleep(max(5.0, delay))
-            try:
-                self.gateway.refresh_bili_previews("异环")
-            except Exception as exc:  # noqa: BLE001
-                log.info("11 点立绘扫描没成（不影响使用）：%s", exc)
+            self._scan()
             time.sleep(120)
 
 
