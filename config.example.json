@@ -238,5 +238,6 @@
         "enabled": true,
         "hour": 11,
         "minute": 30
-    }
+    },
+    "anime_resolve_seconds": 10
 }

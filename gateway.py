@@ -142,6 +142,7 @@ DEFAULTS = {
     "fix_black_request_image": True,
     # 托盘选的模式锁几分钟：锁住期间自动判定不许动，到点只放开不退出
     "mode_lock_minutes": 5,
+    "anime_resolve_seconds": 10,
     # 前台是游戏稳着待够 enter_seconds 就自动进游戏模式（不看键鼠活跃度）
     "game_watch": {
         "enabled": True,
@@ -3657,6 +3658,12 @@ class Gateway:
         # 通用视频模式：前台播放器 + 环回有声 + 键鼠低活跃 → 自动判定；不是 B 站就靠它
         self.video = VideoWatcher(cfg, self)
         self.video.start()
+        # 网关重启时如果模式还停在直播/番剧/网课，把视频会话也接回来（否则 ASR 不启动）
+        try:
+            if self.mode.get() in ("video", "anime", "live", "course"):
+                self.video.force()
+        except Exception:  # noqa: BLE001
+            pass
         # 看到不认识的游戏/番剧，自己查一下补进 titles.json（作品小抄）
         self.title_learner = TitleLearner(cfg, self)
         self.title_learner.start()
@@ -4231,6 +4238,37 @@ class Gateway:
         except Exception:  # noqa: BLE001
             pass
         return "你是泡泡，一只住在他电脑里的蓝色鲸鱼娘，只叫他老大。"
+
+    def schedule_anime_resolve(self, delay: float | None = None) -> None:
+        """点「B站看番」后等 10 秒，看页面到底是番剧/直播/网课再落模式。"""
+        if delay is None:
+            delay = float(self.cfg.get("anime_resolve_seconds", 10))
+        timer = threading.Timer(max(1.0, delay), self._resolve_tray_anime)
+        timer.daemon = True
+        timer.start()
+
+    def _resolve_tray_anime(self) -> None:
+        try:
+            mode = self.mode
+            if mode.get() != "anime" or not str(mode.source).startswith("tray"):
+                return
+            from video_watch import foreground
+            try:
+                app, title = foreground()
+            except Exception:  # noqa: BLE001
+                app, title = "", ""
+            target, _src = self.video._video_target(app, title)
+            if target in ("anime", "live", "course") and target != mode.get():
+                old = mode.get()
+                mode.set(target, source="tray-anime-resolved")
+                try:
+                    self.video.force()
+                except Exception:  # noqa: BLE001
+                    pass
+                log.info("看番 10 秒判定：%s → %s（%s｜%s）",
+                         old, target, app or "?", (title or "?")[:40])
+        except Exception as exc:  # noqa: BLE001
+            log.info("看番 10 秒判定没成（不影响模式）：%s", exc)
 
     def _on_mode_change(self, mode: str, source: str) -> None:
         """模式变化：只有自动模式开「先兆提示」，其他模式一律关。"""
@@ -5032,6 +5070,8 @@ class Handler(BaseHTTPRequestHandler):
             # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
             # （关闭 = 识屏关；其它模式 = 识屏开）
             GATEWAY.set_proactive(data["mode"] != "off")
+            if data["mode"] == "anime":
+                GATEWAY.schedule_anime_resolve()
             if data["mode"] == "off" and not GATEWAY.cfg.get("mode_feedback", True):
                 # 模式提示关掉时兜底：这句话不能没有（正常情况由 _announce_mode 说）
                 GATEWAY.speech.say(fixed_phrases.PROACTIVE_OFF, tag="mode")

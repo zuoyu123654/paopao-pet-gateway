@@ -289,6 +289,20 @@ class VoiceMode(threading.Thread):
             if not self.recording.is_set():
                 continue
             pcm = self._record_once(sd, np)
+            if pcm is None and not self.device and getattr(self, "_last_blocks", 0) == 0:
+                # 启动时选的设备可能已经拔掉/序号变了：这一句 0 块就换系统默认输入重录
+                try:
+                    default_idx = sd.default.device[0]
+                    if default_idx is not None and int(default_idx) >= 0 \
+                            and int(default_idx) != self._device_index:
+                        old_idx = self._device_index
+                        self._device_index = int(default_idx)
+                        self._device_name = str(sd.query_devices(self._device_index)["name"])
+                        log.info("语音：设备 #%s 没数据，换默认输入 #%s %s 重录",
+                                 old_idx, self._device_index, self._device_name)
+                        pcm = self._record_once(sd, np)
+                except Exception as exc:  # noqa: BLE001
+                    log.info("语音：换默认输入失败：%s", exc)
             self.recording.clear()
             if self.cancel.is_set() or pcm is None or len(pcm) / SAMPLE_RATE < self.min_record:
                 self._set_state("idle")
@@ -371,6 +385,19 @@ class VoiceMode(threading.Thread):
             for i, d in inputs:
                 if text in str(d["name"]).lower():
                     return i, d["name"]
+        # 优先跟系统默认输入：换耳机/拔插后设备序号会变，死守启动时的序号会录到 0 块
+        try:
+            default_idx = sd.default.device[0]
+            if default_idx is not None and int(default_idx) >= 0:
+                for i, d in inputs:
+                    if i == int(default_idx):
+                        got = self._probe_device(sd, i)
+                        log.info("  试默认输入 #%d %s → %d 采样", i, d["name"], got)
+                        if got > 0:
+                            return i, d["name"]
+                        break
+        except Exception:  # noqa: BLE001
+            pass
         bad = ("立体声混音", "stereo mix", "line input", "线路输入", "what u hear")
         good = ("麦克风", "microphone", "mic", "耳机", "headset", "airpods")
 
@@ -398,6 +425,7 @@ class VoiceMode(threading.Thread):
     def _record_once(self, sd, np):
         """录到「静音够久 / 到上限 / 被取消」为止，返回 float32 单声道。"""
         blocks: "queue.Queue" = queue.Queue()
+        self._last_blocks = 0
 
         def cb(indata, frames, time_info, status):  # noqa: ANN001
             if self.cancel.is_set():
@@ -437,6 +465,7 @@ class VoiceMode(threading.Thread):
                         if not heard and time.time() - started > (
                                 self.call_window if self.mode == "call" else self.no_speech_timeout):
                             log.info("语音：没听到人声（收到 %d 块），收工", len(frames))
+                            self._last_blocks = len(frames)
                             return None
                         continue
                     rms = float(np.sqrt((block ** 2).mean()))
@@ -457,6 +486,7 @@ class VoiceMode(threading.Thread):
                     if not heard and time.time() - started > (
                             self.call_window if self.mode == "call" else self.no_speech_timeout):
                         log.info("语音：没听到人声，收工")
+                        self._last_blocks = len(frames)
                         return None
             finally:
                 try:
@@ -469,7 +499,9 @@ class VoiceMode(threading.Thread):
             log.warning("录音失败：%s", exc)
             return None
         if not frames:
+            self._last_blocks = 0
             return None
+        self._last_blocks = len(frames)
         pcm = np.concatenate(frames)
         if rate != SAMPLE_RATE and len(pcm) > 1:
             # 设备默认采样率不是 16k：线性插值降到 16k（够 ASR 用，不引额外依赖）

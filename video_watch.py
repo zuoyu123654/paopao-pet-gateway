@@ -722,6 +722,12 @@ class VideoWatcher(threading.Thread):
         # 老大 2026-11-17 确认：B站番剧的链接里就是 bangumi（/bangumi/play/...），
         # 优先按 URL 认；标题只留「番剧/新番」这种明确字样，别拿「第X话/第X集」
         # 乱套——普通 B站视频也经常有「第3集」，会误进看番。
+        # 网课优先：直播课的标题里也带「直播」，别被直播分支抢走
+        course_hints = ("网课", "课程", "课堂", "慕课", "mooc", "学习通", "雨课堂",
+                        "腾讯会议", "钉钉", "classin", "zoom", "teams", "腾讯课堂",
+                        "超星", "智慧树", "学堂在线", "中国大学", "course", "lesson")
+        if any(w in hay for w in course_hints) or "第" in hay and "讲" in hay:
+            return "course", "auto-course"
         if "bangumi" in url or "番剧" in hay or "新番" in hay:
             return "anime", "auto-anime"
         if "live.bilibili" in url or ("直播" in hay and not any(
@@ -730,6 +736,24 @@ class VideoWatcher(threading.Thread):
         if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
             return "video", "auto-video-bili"
         return "video", "auto-video"
+
+    def _player_still_playing(self, mode: str) -> bool:
+        """播放器还在放这个模式的内容，就算前台切去聊天也别退。"""
+        try:
+            snap = self.gateway.player.snapshot() if self.gateway.player else {}
+        except Exception:  # noqa: BLE001
+            return False
+        if not snap or snap.get("paused"):
+            return False
+        hay = ("%s %s %s" % (snap.get("url") or "", snap.get("referrer") or "",
+                             snap.get("title") or "")).lower()
+        if mode == "live":
+            return "live.bilibili" in hay
+        if mode == "anime":
+            return "bangumi" in hay
+        if mode == "course":
+            return bool(hay.strip())
+        return False
 
     def _video_source(self, app: str, title: str) -> str:
         return self._video_target(app, title)[1]
@@ -870,7 +894,8 @@ class VideoWatcher(threading.Thread):
             m = self.gateway.mode
             if m.get() in ("anime", "live", "course") and not self._mode_locked():
                 silent_for = now - max(m.since, self.last_audio_at or 0)
-                if not playing and silent_for > self.paused_away_grace:
+                if (not playing and not self._player_still_playing(m.get())
+                        and silent_for > self.paused_away_grace):
                     log.info("%s 模式：已经 %.0f 秒没声音，回自动", m.get(), silent_for)
                     m.set("auto", source="video-leave")
                     return
@@ -916,9 +941,13 @@ class VideoWatcher(threading.Thread):
 
         self.state = "active" if (player or not playing) else "away"
 
-        if not playing and not player and (now - self.last_audio_at) > self.paused_away_grace:
+        still = playing or self._player_still_playing(self.gateway.mode.get())
+        if not still and not player and (now - self.last_audio_at) > self.paused_away_grace:
             self._leave("停了又切走 2 分钟")
-        elif not playing and player and (now - self.last_audio_at) > self.paused_grace:
+        elif not still and player and (now - self.last_audio_at) > self.paused_grace:
             self._leave("停在播放器上 10 分钟没动静")
-        elif playing and not player and (now - self.last_fore_at) > self.away_grace:
-            self._leave("前台离开太久（片子还在放但人不在）")
+        elif still and not player and (now - self.last_fore_at) > self.away_grace:
+            # 直播/番剧/网课只要播放器还在放，就算人在别的窗口打字也别退；
+            # 通用视频仍按老规矩，前台离开太久才退。
+            if self.gateway.mode.get() not in ("live", "course", "anime"):
+                self._leave("前台离开太久（片子还在放但人不在）")
