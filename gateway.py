@@ -5708,6 +5708,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         log.info("请求 scenario=%s stream=%s user=%r", scenario, client_stream, user_text[:60])
+        proactive = (scenario == "vision"
+                     and str(user_text).startswith("（参考元数据"))
+        # 自动模式的前兆提示：桌宠那块 pre_cue 有时不热重载/不发声，这里网关自己补一次
+        if proactive and GATEWAY.mode.get() == "auto":
+            try:
+                if not (getattr(GATEWAY, "voice", None) and GATEWAY.voice.is_speaking()):
+                    last = float(getattr(GATEWAY, "last_pre_cue_at", 0.0) or 0.0)
+                    if time.time() - last >= 20:
+                        GATEWAY.last_pre_cue_at = time.time()
+                        GATEWAY.bubble.show("让我看看……", 1800)
+                        GATEWAY.speech.say("让我看看……", tag="precue")
+                        log.info("先兆提示：让我看看（自动模式）")
+            except Exception as exc:  # noqa: BLE001
+                log.info("先兆提示没成：%s", exc)
         # 电话模式不关主动识屏；如果老大正在说话，只冒泡不念（见 stream_reply）
         # 黑屏守卫：独占全屏游戏 / 锁屏 / DRM 画面截出来一片黑，说出去就是「我什么也看不见」。
         # 连续 2 张都黑就整轮跳过（不叫模型、不说话、不冒泡），也不占账本。

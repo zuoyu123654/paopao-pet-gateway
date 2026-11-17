@@ -164,7 +164,8 @@ dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给�
 - 网关 `_on_mode_change()`：`mode == "auto"` → 桌宠 `proactive_screen.pre_cue=true`；
   其他模式（game/video/anime/live/course/normal/off）→ `false`；
 - 桌宠打开「主动识屏」会进自动模式，所以先兆提示跟着开；关掉主动识屏或切成别的模式就关；
-- 网关自己的 `tts.pre_cue` 仍默认 `[]`，不再额外念一句，避免和桌宠的先兆提示叠成两声；
+- 网关 `_handle_chat()` 在自动模式收到主动识屏请求时，**自己补一次**「让我看看……」气泡 +
+  语音（`precue`），不再依赖桌宠 pre_cue 的热重载；20 秒内只补一次；
 - 启动时也会按当前模式对齐一次 `pre_cue`。
 
 ### 4.3 音量与语速
@@ -1223,7 +1224,7 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
    - 自动直播进 `live`（source `auto-live`），自动番剧进 `anime`；网课由 API/手动设 `course`。
 
 4. **「让我看看」只在自动模式开**
-   - 网关 `tts.pre_cue = []`，自己不念提示音，避免和桌宠叠两声；
+   - 网关在自动模式收到主动识屏时，直接发一次「让我看看……」气泡 + `precue` 语音；
    - 桌宠 `proactive_screen.pre_cue` 由网关按模式同步：`auto` = true，其他模式 = false；
    - 老缓存 `audio/precue/` 不播，可留可删。
 
@@ -2927,6 +2928,8 @@ Invoke-WebRequest http://127.0.0.1:9888/voice/input -Method POST -Body $b `
 - 选 **通用视频** 会顺手调 `VideoWatcher.force()`，不用等 90 秒的自动判定，立刻进；
 - **直播/番剧/网课不再因为“前台切去聊天”就退**：只要播放器还在放（URL 还是直播/番剧、
   `paused=false`），人在 DSH 里打字也不会掉模式；只有播放器真停了/关掉才按宽限退；
+  2026-11-18 补：前台就是 B站番剧/直播页时，哪怕暂停着也先把 `anime/live` 落下来；
+  前台在 DSH、但播放器没暂停，也按“在看”进入模式，且不受键鼠活跃度阻挡；
 - 勾选状态每秒从 `/status` 拉一次同步（`blockSignals` 挡住，不会自己触发自己的点击），
   所以从别处改的模式，托盘勾也会跟上；
 - 当前这一格是哪项，看 `(mode, mode_source)`：`off` → 关闭，`video` + `auto-video/tray-generic`
