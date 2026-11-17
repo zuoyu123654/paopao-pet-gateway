@@ -365,7 +365,7 @@ class VideoWatcher(threading.Thread):
         self.poll = max(0.5, float(self.conf.get("poll_seconds", 2.0)))
         self.players = [str(x).lower().replace(".exe", "")
                         for x in (self.conf.get("players") or DEFAULT_PLAYERS)]
-        self.enter_seconds = float(self.conf.get("enter_min_seconds", 120))
+        self.enter_seconds = float(self.conf.get("enter_min_seconds", 90))
         self.audio_threshold = float(self.conf.get("audio_threshold", 0.004))
         self.audio_window = float(self.conf.get("audio_active_seconds", 30))
         self.idle_seconds = float(self.conf.get("input_idle_seconds", 60))
@@ -399,6 +399,8 @@ class VideoWatcher(threading.Thread):
         self._prev_idle = 99.0
         self._events: "collections.deque" = collections.deque()
         self._game_seen = 0.0
+        self._target_title = ""
+        self._target_since = 0.0
         self.audio = AudioLoop(self.conf)
         self.asr = AsrWorker(self.conf, self.audio, self._on_text)
         self.ocr = OcrWorker(self.conf, self._on_text)
@@ -550,12 +552,13 @@ class VideoWatcher(threading.Thread):
             url = str((snap or {}).get("url") or "").lower()
         except Exception:  # noqa: BLE001
             pass
-        if "bangumi" in url or "番剧" in hay or ("动画" in hay and "第" in hay and "集" in hay):
+        if ("bangumi" in url or "番剧" in hay or "新番" in hay
+                or ("动画" in hay and ("第" in hay or "集" in hay))
+                or ("第" in hay and ("话" in hay or "集" in hay))):
             return "anime", "auto-anime"
         if "live.bilibili" in url or ("直播" in hay and not any(
                 w in hay for w in ("回放", "录播", "切片", "解说"))):
-            # 老大定的：直播/网课不单独占托盘项，统合到「B站看番」
-            return "anime", "auto-anime"
+            return "live", "auto-live"
         if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
             return "video", "auto-video-bili"
         return "video", "auto-video"
@@ -655,6 +658,34 @@ class VideoWatcher(threading.Thread):
         playing = self.audio.has_signal(3.0, self.audio_threshold)
         player = self._is_player(app)
         same = (app and app == self.app and title == self.title)
+
+        # 已经在视频类模式里，前台换到番剧/直播/普通视频：跟着换模式（只动 auto-* 来源）。
+        # 不然从普通 B站视频点进番剧/直播，会一直停在 video，看着像“不会自动进”。
+        if player and self.active:
+            target, source = self._video_target(app, title)
+            m = self.gateway.mode
+            cur = m.get()
+            auto_src = str(m.source) in (
+                "auto-video", "auto-video-bili", "auto-anime", "auto-live")
+            if auto_src and cur in ("video", "anime", "live") and target != cur \
+                    and not self._mode_locked():
+                if self._target_title != title:
+                    self._target_title = title
+                    self._target_since = now
+                elif now - self._target_since >= self.switch_seconds:
+                    self._target_since = 0.0
+                    with self.lock:
+                        self.app, self.title = app, title
+                        self.session_since = now
+                    m.set(target, source=source)
+                    log.info("视频类模式：%s → %s（前台换内容）", cur, target)
+            else:
+                self._target_title = title
+                self._target_since = 0.0
+        if player and not same:
+            with self.lock:
+                self.app, self.title = app, title
+                self.session_since = now
 
         # 番剧/直播/网课：退出判断跟视频一样——没声音在响就算没在看。
         # 托盘锁住的那几分钟不判；锁一放开（source=tray-released，since 重置）开始计时。

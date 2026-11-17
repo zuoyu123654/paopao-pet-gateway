@@ -24,10 +24,7 @@
         "timeout": 180,
         "volume": 1.0,
         "synth_workers": 3,
-        "pre_cue": [
-            "让我看看……",
-            "唔，我瞅瞅。"
-        ],
+        "pre_cue": [],
         "pre_cue_min_interval": 20,
         "retention_days": 3,
         "speed": 1.2,
@@ -125,7 +122,7 @@
     "video_watch": {
         "enabled": true,
         "poll_seconds": 2.0,
-        "enter_min_seconds": 120,
+        "enter_min_seconds": 90,
         "audio_threshold": 0.004,
         "audio_active_seconds": 30,
         "input_idle_seconds": 60,
@@ -181,7 +178,7 @@
     "game_watch": {
         "enabled": true,
         "poll_seconds": 5,
-        "enter_seconds": 120,
+        "enter_seconds": 90,
         "away_grace_seconds": 180,
         "game_apps": [],
         "switch_seconds": 20

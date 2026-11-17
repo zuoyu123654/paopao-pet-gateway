@@ -93,7 +93,7 @@ DEFAULTS = {
             "relaunch_cooldown_seconds": 90,
             "launch": {"python": "", "script": "", "args": [], "workdir": ""},
         },
-        "pre_cue": ["让我看看……", "唔，我瞅瞅。"],
+        "pre_cue": [],
         "pre_cue_min_interval": 20,
         "cache_pre_cue": True,
     },
@@ -145,7 +145,7 @@ DEFAULTS = {
     "game_watch": {
         "enabled": True,
         "poll_seconds": 5,
-        "enter_seconds": 120,
+        "enter_seconds": 90,
         "switch_seconds": 20,
         "away_grace_seconds": 180,
         "game_apps": [],
@@ -635,6 +635,10 @@ class SpeechPipeline:
         self.synth_gate = threading.Condition()
         self.synth_busy = 0     # 正在合成几条（也是「句间空档」监测用的）
         self.play_end_at = 0.0  # 上一句声音什么时候结束（量句间空档用）
+        # 低优先级（DSH 状态）排队：等手上这段念完再补，别打断也别丢
+        self.deferred: list[tuple[str, str]] = []
+        self.turn_active = False   # 模型这一轮还在吐字/合成
+        self._playing = False      # 声卡正在响
         # 句子两头留多少静音：GPT-SoVITS 每句后面拖 0.35~0.56 秒，留原样的话
         # 每接一句就多出半秒空白，听着像「一句一句往外蹦」。只掐两头，句中不动。
         self.tts_tight_edges = bool(cfg["tts"].get("tight_sentence_edges", True))
@@ -699,7 +703,8 @@ class SpeechPipeline:
         threading.Thread(target=self._janitor_loop, name="audio-janitor", daemon=True).start()
 
     # ---------------------------------------------------------------- 对外
-    PRIORITY = {"chat": 10, "vision": 10, "say": 10, "divination": 9, "precue": 6, "dsh": 2}
+    PRIORITY = {"chat": 10, "vision": 10, "say": 10, "mode": 10,
+                "divination": 9, "precue": 6, "dsh": 2}
 
     def say(self, text: str, tag: str = "chat") -> int:
         """整段文本按标点切句后入队；高优先级会打断低的，低的不打断高的。"""
@@ -710,16 +715,44 @@ class SpeechPipeline:
             return 0
         priority = self.PRIORITY.get(tag, 5)
         now = time.time()
-        # 后台播报（DSH 状态）不许打断正在说的正事
-        if priority < self.active_priority and now - self.last_feed_at < 25:
-            return 0
         self.last_text, self.last_at = cleaned, now
         max_chars = int(self.cfg["tts"].get("max_chars_per_sentence", 60))
         sentences = split_sentences(cleaned, max_chars)[: int(self.cfg["tts"].get("max_sentences", 40))]
+        # 低优先级（DSH 状态）不许打断正事，也不许被吞：先记着，
+        # 等手上这段（当前回合 + 已经排队的句子 + 正在响的音频）念完再补。
+        if priority < self.active_priority and self._low_busy():
+            # 同一类低优先级只留最新一条：DSH 的 working/thinking 不该在完成之后
+            # 还排队补念，真正要补的是「完成工作」。
+            if tag == "dsh":
+                self.deferred = [(t, g) for t, g in self.deferred if g != "dsh"]
+            self.deferred.append((text, tag))
+            if len(self.deferred) > 6:
+                self.deferred.pop(0)
+            log.info("低优先级先排队（%s）：%s", tag, cleaned[:30])
+            return 0
         self.active_priority, self.last_feed_at = priority, now
         self.interrupt()
         log.info("念(%s) %d 句 / %d 字", tag, len(sentences), len(cleaned))
         return self.feed_sentences(sentences, tag)
+
+    def _low_busy(self) -> bool:
+        """手上还有没有高优先级的话（当前回合、排队、合成、正在响）。"""
+        return bool(self.turn_active or self._playing or self.pending_count() > 0
+                    or bool(self.ready) or self.synth_busy > 0)
+
+    def _drain_deferred(self) -> bool:
+        """手上空了，补念低优先级状态（DSH 完成这类）。"""
+        if not self.deferred or self._low_busy():
+            return False
+        text, tag = self.deferred.pop(0)
+        cleaned = clean_for_speech(text)
+        if not cleaned:
+            return True
+        max_chars = int(self.cfg["tts"].get("max_chars_per_sentence", 60))
+        sentences = split_sentences(cleaned, max_chars)[: int(self.cfg["tts"].get("max_sentences", 40))]
+        log.info("补念排队（%s）：%s", tag, cleaned[:30])
+        self.feed_sentences(sentences, tag)
+        return True
 
     def feed_sentences(self, sentences: list[str], tag: str = "chat",
                        force_stream: bool = False) -> int:
@@ -1651,6 +1684,8 @@ class SpeechPipeline:
         import winsound
 
         while True:
+            if self._drain_deferred():
+                continue
             with self.cond:
                 while True:
                     for stale_idx in [k for k in self.ready if k < self.play_next]:
@@ -1678,9 +1713,13 @@ class SpeechPipeline:
                     and (self.pending.qsize() > 0 or self.synth_busy > 0)):
                 log.info("句间空档 %.2fs（后面那句还没合成好）", lead)
             if stream_text:
-                status, played = self._play_stream(
-                    stream_text, gen, first=(idx == self._gen_first_idx(gen)), idx=idx
-                )
+                self._playing = True
+                try:
+                    status, played = self._play_stream(
+                        stream_text, gen, first=(idx == self._gen_first_idx(gen)), idx=idx
+                    )
+                finally:
+                    self._playing = False
                 self.play_end_at = time.time()
                 if status in ("ok", "cancelled"):
                     continue
@@ -1696,7 +1735,11 @@ class SpeechPipeline:
                 try:
                     with self.synth_lock:
                         path = self._synthesize(stream_text)
-                    winsound.PlaySound(path, winsound.SND_FILENAME)
+                    self._playing = True
+                    try:
+                        winsound.PlaySound(path, winsound.SND_FILENAME)
+                    finally:
+                        self._playing = False
                     os.remove(path)
                 except Exception as exc2:  # noqa: BLE001
                     log.warning("流式失败后退回普通合成也没成: %s", exc2)
@@ -1729,7 +1772,11 @@ class SpeechPipeline:
                 except Exception:  # noqa: BLE001
                     pass
                 log.info("念第%d句：%.2fs 音频（跟上一句隔着 %.2fs）", idx, dur, lead)
-                winsound.PlaySound(path, winsound.SND_FILENAME)  # 阻塞；被打断时会被 PlaySound(None) 截断
+                self._playing = True
+                try:
+                    winsound.PlaySound(path, winsound.SND_FILENAME)  # 阻塞；被打断时会被 PlaySound(None) 截断
+                finally:
+                    self._playing = False
                 self.play_end_at = time.time()
                 with self.lock:
                     if gen == self.generation:
@@ -2239,7 +2286,7 @@ class GameWatcher(threading.Thread):
         self.gateway = gateway
         self.enabled = bool(conf.get("enabled", True))
         self.poll = max(3.0, float(conf.get("poll_seconds", 5)))
-        self.enter_seconds = max(10.0, float(conf.get("enter_seconds", 120)))
+        self.enter_seconds = max(10.0, float(conf.get("enter_seconds", 90)))
         self.switch_seconds = max(5.0, float(conf.get("switch_seconds", 20)))
         self.away_grace = max(30.0, float(conf.get("away_grace_seconds", 180)))
         self.extra_apps = [str(x).strip().lower().replace(".exe", "")
@@ -2287,7 +2334,7 @@ class GameWatcher(threading.Thread):
                         log.info("游戏模式：自动进入（%s｜%s）", app, title[:40])
                 elif (cur in ("video", "anime", "live", "course")
                       and str(self.gateway.mode.source) in (
-                          "auto-video", "auto-video-bili", "auto-anime", "video-leave")):
+                          "auto-video", "auto-video-bili", "auto-anime", "auto-live", "video-leave")):
                     # 刚才自动进了视频模式，现在前台换成游戏：不用等视频那边 5 分钟才走，
                     # 短暂确认后就接管（老大 2026-11-17 说「一堆问题」里的一个）。
                     if now - self.first_seen >= self.switch_seconds:
@@ -3639,6 +3686,7 @@ class Gateway:
         logged_first = False
         logged_feed = False
         resp = self.open_stream(payload)
+        self.turn_active = True
         try:
             for raw in resp:
                 line = raw.decode("utf-8", "replace").strip()
@@ -3706,6 +3754,7 @@ class Gateway:
             if tail and speak_this:
                 self.speech.feed_sentences(split_sentences(tail, max_chars), scenario)
         finally:
+            self.turn_active = False
             resp.close()
 
     def _all_fixed_phrases(self) -> list[str]:
@@ -4448,7 +4497,11 @@ class Handler(BaseHTTPRequestHandler):
                     st.get("state"), "（%d 条对白）" % st.get("lines", 0)
                     if st.get("lines") else "（环回%s）" % ("有声" if st.get("audio") else "没声")),
             })(getattr(g, "video", None).status() if getattr(g, "video", None) else {}),
-            "precue": {"ok": bool(getattr(g.speech, "cue_paths", [])), "detail": "提示音缓存"},
+            "precue": (lambda cues: {
+                "ok": (not cues) or bool(getattr(g.speech, "cue_paths", [])),
+                "detail": ("已关闭（tts.pre_cue 为空）" if not cues
+                           else "提示音缓存 %d 条" % len(getattr(g.speech, "cue_paths", []) or [])),
+            })(g.cfg["tts"].get("pre_cue") or []),
             "bubble": (lambda st: {
                 "ok": bool(st.get("enabled")),
                 "detail": "气泡小工 %s（已弹 %d 次）" % (
