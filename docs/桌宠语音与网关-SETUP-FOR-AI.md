@@ -2841,6 +2841,7 @@ Invoke-WebRequest http://127.0.0.1:9888/voice/input -Method POST -Body $b `
 | `vad_silence` | 1.2 | 静音断句（秒） |
 | `max_record` / `min_record` | 30 / 0.3 | 秒 |
 | `energy_threshold` | 0.012 | 多大算“有人在说”；安静环境可降到 0.008 |
+| `max_tokens` | 800 | 语音回答预算；deepseek-flash 空回复时会自动抬到 1200 重试一次 |
 | `no_speech_timeout` | 3.0 | 没人说话多久收工 |
 | `call_window` | 8 | 电话模式的听音窗 |
 | `device` | "" | 空=自动；可填序号或名字片段 |

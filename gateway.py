@@ -4293,12 +4293,23 @@ class Gateway:
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
                    "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": content}],
-                   "max_tokens": 300, "stream": False}
+                   "max_tokens": int((self.cfg.get("voice") or {}).get("max_tokens", 800)),
+                   "stream": False}
         data = self.post_once(payload)
         try:
             reply = (data["choices"][0]["message"].get("content") or "").strip()
         except (KeyError, IndexError, TypeError):
             reply = ""
+        if not reply:
+            # deepseek-flash 偶尔把预算全花在思考上，content 为空：抬预算再要一次
+            payload["max_tokens"] = max(1200, int(payload["max_tokens"]))
+            log.info("语音回答：空内容，抬到 %d tokens 重试", payload["max_tokens"])
+            try:
+                data = self.post_once(payload)
+                reply = (data["choices"][0]["message"].get("content") or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("语音回答重试失败：%s", exc)
+                reply = ""
         if not reply:
             log.warning("语音回答：模型回了空内容（%s）", str(data)[:160])
             return ""

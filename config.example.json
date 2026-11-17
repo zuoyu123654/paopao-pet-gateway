@@ -121,7 +121,8 @@
         "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions",
         "screenshot": "always",
         "call_min_voiced": 0.5,
-        "onset_voiced": 0.35
+        "onset_voiced": 0.35,
+        "max_tokens": 800
     },
     "video_watch": {
         "enabled": true,
