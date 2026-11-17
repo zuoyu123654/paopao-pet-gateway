@@ -192,6 +192,7 @@ class VoiceMode(threading.Thread):
         self.last_error = ""
         self.turns = 0
         self._last_rms = 0.0
+        self._listening_shown = False
         # 这一次「开口」的时间戳（第一个超过阈值的音频块）：语音问答要拿这一刻的屏幕
         self.last_onset_at = 0.0
 
@@ -212,10 +213,12 @@ class VoiceMode(threading.Thread):
         with self.lock:
             if self.recording.is_set():
                 self.cancel.set()
+                self._hide_listening()
                 self._hide_bubble()
                 return False
             self.recording.set()
             self.cancel.clear()
+            self._listening_shown = False
             self.state = "listening"
         # 不在开录时冒「我在听」：只有真检测到出声才冒，免得电话模式一直占着气泡
         log.info("语音：开始录（%s）", self.mode)
@@ -242,6 +245,19 @@ class VoiceMode(threading.Thread):
                 bridge.hide()
         except Exception:  # noqa: BLE001
             pass
+
+    def _show_listening(self) -> None:
+        """真的检测到出声才冒「我在听」，一直留到这一句说完。"""
+        if self._listening_shown:
+            return
+        self._listening_shown = True
+        self._bubble(BUBBLE_LISTENING, int(self.max_record * 1000))
+
+    def _hide_listening(self) -> None:
+        if not self._listening_shown:
+            return
+        self._listening_shown = False
+        self._hide_bubble()
 
     def _set_state(self, state: str) -> None:
         with self.lock:
@@ -482,7 +498,7 @@ class VoiceMode(threading.Thread):
                     if rms >= self.threshold:
                         if not heard:
                             self.last_onset_at = time.time()
-                            self._bubble(BUBBLE_LISTENING, 2200)
+                            self._show_listening()
                         heard = True
                         silence = 0.0
                     elif heard:
@@ -499,6 +515,7 @@ class VoiceMode(threading.Thread):
                         self._last_blocks = len(frames)
                         return None
             finally:
+                self._hide_listening()
                 try:
                     stream.stop()
                     stream.close()
