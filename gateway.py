@@ -3122,6 +3122,17 @@ class Facts:
         with self.lock:
             for row in reversed(self.items[-8:]):
                 if row.get("text") == text and now - float(row.get("ts") or 0) < 3600:
+                    # 之前只记了名字，这次拿到外观就补上，别再加一条
+                    if visual and not str(row.get("visual") or "").strip():
+                        row["visual"] = str(visual).strip()[:120]
+                        try:
+                            with open(self.path, "w", encoding="utf-8", newline="\n") as f:
+                                for item in self.items:
+                                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                        except OSError:
+                            pass
+                        log.info("补上角色外观：%s｜%s", text[:30], row["visual"][:30])
+                        return True
                     return False
         row = {"ts": int(now), "text": text, "app": (app or "")[:40],
                "title": (title or "")[:80], "source": source}
@@ -3133,12 +3144,14 @@ class Facts:
         return True
 
     def block(self, app: str = "", title: str = "", limit: int | None = None,
-              max_chars: int = 320) -> str:
+              max_chars: int = 320, require_visual: bool = False) -> str:
         if not self.enabled or not self.items:
             return ""
         now = time.time()
         rows = [r for r in self.items
-                if now - float(r.get("ts") or 0) <= self.max_age and str(r.get("text") or "").strip()]
+                if now - float(r.get("ts") or 0) <= self.max_age
+                and str(r.get("text") or "").strip()
+                and (not require_visual or str(r.get("visual") or "").strip())]
         if not rows:
             return ""
         low_app, low_title = (app or "").lower(), (title or "").lower()
@@ -3242,6 +3255,10 @@ FOCUS_MODES = WATCH_MODES + (GAME_MODE,)
 SCREEN_QUESTION_HINTS = (
     "游戏", "番", "视频", "画面", "屏幕", "直播", "在玩", "在看", "玩什么", "看什么",
     "这部", "那部", "这个是", "那个是", "我在干", "我这样",
+)
+CHARACTER_QUESTION_HINTS = (
+    "角色", "是谁", "谁啊", "谁呀", "这个人", "那个人", "这个人物", "那个角色",
+    "这角色", "那角色", "长什么样", "长得像", "认得出", "认人", "谁来的",
 )
 _MODE_WORD = {"video": "视频", "anime": "番剧", "live": "直播", "course": "网课", "game": "游戏"}
 
@@ -4180,6 +4197,7 @@ class Gateway:
         except Exception:  # noqa: BLE001
             pass
         screen_q = any(w in text for w in SCREEN_QUESTION_HINTS)
+        char_q = any(w in text for w in CHARACTER_QUESTION_HINTS)
         want_look = (any(w in text for w in LOOK_HINTS) or screen_q
                      or self.mode.get() in FOCUS_MODES)
         context = []
@@ -4196,7 +4214,7 @@ class Gateway:
             lore_block = self.lore.block(app=app, title=title, query=text, allow_queue=True)
             if lore_block:
                 context.append(lore_block)
-            facts_block = self._facts_block(app, title)
+            facts_block = self._facts_block(app, title, require_visual=char_q)
             if facts_block:
                 context.append(facts_block)
             if self.mode.get() in FOCUS_MODES and getattr(self, "video", None):
@@ -4206,12 +4224,14 @@ class Gateway:
         except Exception as exc:  # noqa: BLE001
             log.info("语音资料检索没成（不影响回答）：%s", exc)
         try:
-            rows = self.ledger.recent_vision(1, 15)
-            if rows:
-                last = rows[-1]
-                said = (last.get("assistant") or "").strip().replace("\n", " ")[:80]
-                if said:
-                    context.append("【你刚才看到过】%s，你说过：%s" % (Ledger.app_of(last) or "某处", said))
+            if not char_q:
+                rows = self.ledger.recent_vision(1, 15)
+                if rows:
+                    last = rows[-1]
+                    said = (last.get("assistant") or "").strip().replace("\n", " ")[:80]
+                    if said:
+                        context.append("【你刚才看到过】%s，你说过：%s"
+                                       % (Ledger.app_of(last) or "某处", said))
         except Exception:  # noqa: BLE001
             pass
         parts = [{"type": "text", "text": text}]
@@ -4262,6 +4282,13 @@ class Gateway:
             "照【老大此刻的前台】和【你刚才看到过】回答：标题里写着的名字直接说；"
             "认得出来就报名字，再顺手说一句你知道的；真判断不出来就说「看不太出来，像是什么什么」，别编。"
         )
+        if char_q:
+            system += (
+                "\n【认角色规则】只按这张当前截图里的可见特征判断：先看发色/发型、"
+                "服装主色和款式、武器或标志物，再和候选外观比对。候选名字只是参考，"
+                "不许因为刚才聊过/记忆里出现过就直接回答那个名字；特征对不上就说"
+                "「看不清/不确定」，别硬套上一个角色。"
+            )
         content = parts if len(parts) > 1 else text
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
                    "messages": [{"role": "system", "content": system},
@@ -4525,40 +4552,79 @@ class Gateway:
                 except Exception:  # noqa: BLE001
                     pass
             name = self.facts.extract_name(text)
-            visual = self._screen_character_visual(name) if name else ""
+            visual = self._character_visual(app, title, name) if name else ""
             self.facts.add(text, app, title, source=scenario, visual=visual)
         except Exception as exc:  # noqa: BLE001
             log.debug("事实没记成（不影响这轮）：%s", exc)
 
-    def _screen_character_visual(self, name: str) -> str:
-        """老大纠正名字时顺手截当前画面，让视觉模型只描述这个角色的外观。"""
+    def _character_visual(self, app: str, title: str, name: str) -> str:
+        """纠正名字时取外观：先截当前画面；看不清再查 BWiki/异环官方立绘。"""
         if not name:
             return ""
+        # 1) 当前屏幕（她纠正时画面里通常就是那个角色）
         try:
             snap = self.frames.snapshot(3)
         except Exception:  # noqa: BLE001
-            return ""
-        if not snap:
-            return ""
+            snap = []
+        if snap:
+            try:
+                _ts, im = snap[-1]
+                desc = self._describe_character_image(
+                    im, name, "这是老大电脑的屏幕截图。他刚指着画面里的角色说「她叫%s」。" % name,
+                    "画面里没有明确角色，只回「看不清」，不要猜名字、不要描述界面。")
+                if desc:
+                    return desc
+            except Exception as exc:  # noqa: BLE001
+                log.info("纠正时截角色外观没成（试试查立绘）：%s", exc)
+        # 2) BWiki 官方立绘（原神/星铁/绝区零）
         try:
-            import io as _io
-            from PIL import Image
+            from wiki_visual import WIKI, download_image, find_portrait
 
-            _ts, im = snap[-1]
+            if title in WIKI:
+                url = find_portrait(title, name)
+                if url:
+                    from PIL import Image
+                    desc = self._describe_character_image(
+                        Image.open(io.BytesIO(download_image(url))),
+                        name, "这是《%s》角色「%s」的官方立绘。" % (title, name),
+                        "只描述这个角色的外观，不要写名字/剧情/评价。")
+                    if desc:
+                        log.info("纠正外观：用 BWiki 立绘补 %s", name)
+                        return desc
+        except Exception as exc:  # noqa: BLE001
+            log.info("纠正外观：BWiki 立绘没取到（%s）", exc)
+        # 3) 异环官方 B站动态立绘
+        try:
+            if title == "异环":
+                from bili_visual import BILI_UID, download_image, find_character_pics
+
+                pics = find_character_pics(BILI_UID["异环"], [name], max_pages=6)
+                url = pics.get(name)
+                if url:
+                    from PIL import Image
+                    desc = self._describe_character_image(
+                        Image.open(io.BytesIO(download_image(url))), name,
+                        "这是《异环》角色「%s」的官方立绘。" % name,
+                        "只描述这个角色的外观，不要写名字/剧情/评价。")
+                    if desc:
+                        log.info("纠正外观：用 B站动态立绘补 %s", name)
+                        return desc
+        except Exception as exc:  # noqa: BLE001
+            log.info("纠正外观：B站立绘没取到（%s）", exc)
+        return ""
+
+    def _describe_character_image(self, im, name: str, intro: str, fallback: str) -> str:
+        try:
             im = im.convert("RGB")
             im.thumbnail((1024, 1024))
-            raw = _io.BytesIO()
+            raw = io.BytesIO()
             im.save(raw, "JPEG", quality=85)
             b64 = base64.b64encode(raw.getvalue()).decode()
-            prompt = (
-                "这是老大电脑的屏幕截图。他刚指着画面里的角色说「她叫%s」。"
-                "只描述画面里那个最显眼的角色：发色/发型、服装主色和款式、最显眼的标志物；"
-                "20~40 字。如果画面里没有明确角色，只回「看不清」，不要猜名字、不要描述界面。"
-                % name
-            )
+            prompt = (intro + "只描述这个角色的外观：发色/发型、服装主色和款式、"
+                      "最显眼的标志物；20~40 字。" + fallback)
             payload = {
                 "model": self.cfg.get("model") or "deepseek-v4-flash",
-                "max_tokens": 100, "temperature": 0.2, "stream": False,
+                "max_tokens": 120, "temperature": 0.2, "stream": False,
                 "messages": [
                     {"role": "system", "content": "你只描述角色外观，不写别的。"},
                     {"role": "user", "content": [
@@ -4575,14 +4641,14 @@ class Gateway:
                 return ""
             return desc[:120]
         except Exception as exc:  # noqa: BLE001
-            log.info("纠正时截角色外观没成（只记名字）：%s", exc)
+            log.info("角色外观描述没成：%s", exc)
             return ""
 
-    def _facts_block(self, app: str = "", title: str = "") -> str:
+    def _facts_block(self, app: str = "", title: str = "", require_visual: bool = False) -> str:
         if getattr(self, "facts", None) is None:
             return ""
         try:
-            return self.facts.block(app, title)
+            return self.facts.block(app, title, require_visual=require_visual)
         except Exception as exc:  # noqa: BLE001
             log.debug("事实没取出来：%s", exc)
             return ""
@@ -4739,14 +4805,13 @@ class Gateway:
                 last_user_msg = msg
                 user_text = message_text(msg.get("content"))[:1200]
                 break
+        char_q = any(w in user_text for w in CHARACTER_QUESTION_HINTS)
         screen_attached = False
         # 文字聊天问「这个角色是谁」时，桌宠不会自动带图；不带图她只能拿最近聊过的
         # 角色硬套（所以什么都答奥黛塔）。这里补一张此刻的屏幕。
         if scenario == "chat" and last_user_msg is not None \
                 and self.cfg.get("chat_screen_look", True):
-            hints = ("角色", "是谁", "谁啊", "谁呀", "这个人", "那个人", "这个人物",
-                     "长什么样", "长得像", "认得出", "认人", "这个是", "这个是什么")
-            if any(w in user_text for w in hints):
+            if char_q:
                 content = last_user_msg.get("content")
                 has_img = isinstance(content, list) and any(
                     isinstance(p, dict) and p.get("type") in ("image_url", "input_image")
@@ -4767,11 +4832,18 @@ class Gateway:
                             ])
                             last_user_msg["content"] = content
                             screen_attached = True
-                            messages.insert(0, {"role": "system", "content":
-                                "【看当前屏幕】老大在问画面里的角色。先看这一张此刻的截图："
-                                "发色/发型、服装主色、武器/标志物；看完再给名字。"
-                                "不要拿最近聊过的角色硬套，认不出就说「看不清/不确定」。"})
                             log.info("聊天：问角色，补一张当前屏幕")
+        if screen_attached or (scenario == "vision" and char_q):
+            # 认角色只看当前这张图：把历史对话里的上一轮名字/回答删掉，避免她照着念
+            system_msgs = [m for m in messages if m.get("role") == "system"]
+            if last_user_msg is not None:
+                messages = system_msgs + [last_user_msg]
+                payload["messages"] = messages
+            messages.insert(0, {"role": "system", "content":
+                "【认角色规则】只按当前截图里的可见特征判断：先看发色/发型、服装主色和款式、"
+                "武器或标志物，再和候选外观比对。候选名字只是参考，**不许因为历史对话/"
+                "最近聊过/记忆里出现过就回答那个名字**；特征对不上就说「看不清/不确定」。"})
+            log.info("认角色：剥离历史对话，只按当前画面特征")
         if scenario == "vision" and self.cfg.get("soften_self_recognition", True):
             for msg in messages:
                 content = msg.get("content")
@@ -4866,14 +4938,15 @@ class Gateway:
                     messages.insert(0, {"role": "system", "content": headline})
                     log.info("识屏：带上资料一句话（%s）", (title or app or "?")[:30])
             # 老大在聊天/语音里教过的事（「那是遐蝶，不是希尔」）→ 识屏也要知道
-            facts_block = self._facts_block(app, title)
+            facts_block = self._facts_block(app, title, require_visual=char_q)
             if facts_block:
                 messages.insert(0, {"role": "system", "content": facts_block})
                 log.info("识屏：带上老大教过的事")
             if self.cfg.get("see_howto", True):
                 messages.insert(0, {"role": "system", "content": build_see_howto()})
 
-        if scenario == "vision" and self.cfg.get("inject_vision_context", True):
+        if scenario == "vision" and self.cfg.get("inject_vision_context", True) \
+                and not char_q:
             # 识屏也要有前后文：把刚才几次「她看到过什么」带上，她才接得上
             app = ""
             m = APP_RE.search(str(user_text or ""))
@@ -4923,7 +4996,7 @@ class Gateway:
                 fapp, ftitle = foreground()
             except Exception:  # noqa: BLE001
                 fapp, ftitle = "", ""
-            facts_block = self._facts_block(fapp, ftitle)
+            facts_block = self._facts_block(fapp, ftitle, require_visual=char_q)
             if facts_block:
                 messages.insert(0, {"role": "system", "content": facts_block})
                 log.info("聊天：带上老大教过的事")
