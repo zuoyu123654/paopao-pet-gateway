@@ -243,6 +243,12 @@ GAME_VERSION_ALIASES = {
     "绝区零": ("绝区零", "zenlesszonezero"),
     "异环": ("异环", "htgame"),
 }
+# 当前版本 latest 里需要补立绘的角色（异环走 B站动态，不在这里）
+WIKI_LATEST_NAMES = {
+    "原神": ["奥黛塔", "米提亚", "瓦列里", "阿罗夏"],
+    "崩坏：星穹铁道": ["爻光", "绯英"],
+    "绝区零": ["克拉蕾", "洛克茜", "希希芙"],
+}
 _TITLE_NOTES: dict[str, str] = {}
 _TITLE_KINDS: dict[str, str] = {}
 _TITLE_VISUALS: dict[str, str] = {}
@@ -3890,6 +3896,10 @@ class Gateway:
             texts.extend(self.enrich_bili_visuals(title, names))
         except Exception as exc:  # noqa: BLE001
             log.info("B站立绘补外观没成（不影响身份条目）：%s", exc)
+        try:
+            texts.extend(self.enrich_wiki_visuals(title, names))
+        except Exception as exc:  # noqa: BLE001
+            log.info("BWiki立绘补外观没成（不影响身份条目）：%s", exc)
         return add_latest_updates(title, version, texts)
 
     def enrich_bili_visuals(self, title: str, names: list[str]) -> list[str]:
@@ -3969,6 +3979,73 @@ class Gateway:
             if desc.startswith("角色："):
                 texts.append(desc)
         return add_preview_updates(title, texts)
+
+    def enrich_wiki_visuals(self, title: str, names: list[str]) -> list[str]:
+        """从 BWiki 角色页取官方立绘，让视觉模型只描述外观。"""
+        from wiki_visual import WIKI, download_image, find_portrait
+
+        if title not in WIKI or not names:
+            return []
+        out = []
+        for name in names[:4]:
+            try:
+                url = find_portrait(title, name)
+                if not url:
+                    continue
+                raw = download_image(url)
+                try:
+                    from PIL import Image
+                    im = Image.open(io.BytesIO(raw)).convert("RGB")
+                    im.thumbnail((1024, 1024))
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=85)
+                    raw = buf.getvalue()
+                except Exception:  # noqa: BLE001
+                    pass
+                b64 = base64.b64encode(raw).decode()
+                prompt = (
+                    "这是《%s》角色「%s」的官方立绘。只写能一眼认出她的外观："
+                    "发色/发型、服装主色和款式、最显眼的标志物；20~40 字。"
+                    "不要写名字、剧情、评价、S级/限定；只回一行中文。" % (title, name)
+                )
+                payload = {
+                    "model": self.cfg.get("model") or "deepseek-v4-flash",
+                    "max_tokens": 120, "temperature": 0.2, "stream": False,
+                    "messages": [
+                        {"role": "system", "content": "你只描述角色外观，不写别的。"},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": "data:image/jpeg;base64," + b64}},
+                        ]},
+                    ],
+                }
+                data = self.post_once(payload)
+                desc = (data["choices"][0]["message"].get("content") or "").strip()
+                desc = desc.replace("\n", " ").strip("「」\"' ")[:80]
+                if 4 <= len(desc):
+                    out.append("角色：%s=%s" % (name, desc))
+            except Exception as exc:  # noqa: BLE001
+                log.info("BWiki 立绘「%s」外观描述没成：%s", name, exc)
+        return out
+
+    def refresh_wiki_visuals(self, title: str, names: list[str] | None = None) -> int:
+        names = list(names or WIKI_LATEST_NAMES.get(title) or [])
+        if not names:
+            return 0
+        try:
+            with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            entry = data.get(title) if isinstance(data.get(title), dict) else {}
+            known = str(entry.get("visual") or "") + " " + " ".join(
+                str(x.get("text") or "") for x in (entry.get("latest") or [])
+                if isinstance(x, dict))
+        except Exception:  # noqa: BLE001
+            known = ""
+        todo = [n for n in names if ("角色：%s=" % n) not in known][:4]
+        if not todo:
+            return 0
+        return add_preview_updates(title, self.enrich_wiki_visuals(title, todo))
 
     def _mode_lock_loop(self) -> None:
         """托盘里手动选的模式锁几分钟（默认 5 分钟），**锁到期不退出**。
@@ -4766,6 +4843,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_player()
         elif path.endswith("/divination"):
             self._handle_divination()
+        elif path.endswith("/visuals/refresh"):
+            self._handle_visuals_refresh()
         elif path.endswith("/mode-lock"):
             self._handle_mode_lock()
         elif path.endswith("/mode"):
@@ -4928,6 +5007,26 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 log.warning("手动进视频类模式失败：%s", exc)
         self._send_json({"ok": True, **data})
+
+    def _handle_visuals_refresh(self):
+        """手动补立绘外观：POST /visuals/refresh {"title":"原神"}"""
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"error": "bad json"}, 400)
+            return
+        title = str(req.get("title") or "原神")
+        names = req.get("names")
+        try:
+            if title == "异环":
+                n = GATEWAY.refresh_bili_previews(title)
+            else:
+                n = GATEWAY.refresh_wiki_visuals(
+                    title, [str(x) for x in names] if isinstance(names, list) else None)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"ok": False, "error": str(exc)}, 500)
+            return
+        self._send_json({"ok": True, "title": title, "added": n})
 
     def _handle_mode_lock(self):
         """托盘「手动锁」：5 分钟（默认）/ 一直保持。"""
