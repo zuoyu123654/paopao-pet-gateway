@@ -49,7 +49,9 @@
         "tight_sentence_edges": true,
         "sentence_head_pad": 0.03,
         "sentence_tail_pad": 0.08,
-        "reading_fixes": {},
+        "reading_fixes": {
+            "弹幕": "蛋幕"
+        },
         "guard": {
             "enabled": true,
             "check_seconds": 15,

@@ -228,12 +228,13 @@ log = logging.getLogger("petgw")
 TITLES_PATH = os.path.join(APP_DIR, "titles.json")
 _TITLE_NOTES: dict[str, str] = {}
 _TITLE_KINDS: dict[str, str] = {}
+_TITLE_VISUALS: dict[str, str] = {}
 _TITLE_MTIME = 0.0
 
 
 def title_notes(refresh: bool = False) -> dict[str, str]:
     """读 titles.json（改了不用重启，按修改时间自动重载）。"""
-    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_MTIME
+    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_MTIME
     try:
         mtime = os.path.getmtime(TITLES_PATH)
     except OSError:
@@ -244,6 +245,7 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                 data = json.load(f)
             notes: dict[str, str] = {}
             kinds: dict[str, str] = {}
+            visuals: dict[str, str] = {}
             for k, v in (data or {}).items():
                 key = str(k).strip().lower()
                 if not key:
@@ -251,12 +253,15 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                 if isinstance(v, dict):
                     note = str(v.get("note") or "").strip()
                     kind = str(v.get("kind") or "").strip().lower()
+                    visual = str(v.get("visual") or "").strip()
                 else:
-                    note, kind = str(v).strip(), ""
+                    note, kind, visual = str(v).strip(), "", ""
                 if note:
                     notes[key] = note
                     kinds[key] = kind
-            _TITLE_NOTES, _TITLE_KINDS = notes, kinds
+                    if visual:
+                        visuals[key] = visual
+            _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS = notes, kinds, visuals
             _TITLE_MTIME = mtime
         except Exception as exc:  # noqa: BLE001
             log.warning("titles.json 读不了（先不注入小抄）：%s", exc)
@@ -287,6 +292,12 @@ def title_kind(app: str = "", title: str = "") -> str:
     return _TITLE_KINDS.get(key, "") if key else ""
 
 
+def title_visual(app: str = "", title: str = "") -> str:
+    """识屏用的外观线索：角色/地区/作品一眼能认的特征。"""
+    key = _title_key(app, title)
+    return _TITLE_VISUALS.get(key, "") if key else ""
+
+
 def save_title_notes(updates: dict) -> int:
     """把几条写进 titles.json（原子替换），返回写入后的总条数。
 
@@ -306,8 +317,14 @@ def save_title_notes(updates: dict) -> int:
         if isinstance(val, dict):
             note = str(val.get("note") or "").strip()
             kind = str(val.get("kind") or "").strip().lower()
+            visual = str(val.get("visual") or "").strip()
             if note:
-                data[key] = {"kind": kind, "note": note} if kind else note
+                entry = {"kind": kind, "note": note}
+                if visual:
+                    entry["visual"] = visual
+                data[key] = entry if kind else note
+                if not kind and visual:
+                    data[key] = {"note": note, "visual": visual}
         else:
             data[key] = str(val).strip()
     tmp = TITLES_PATH + ".tmp"
@@ -2192,8 +2209,8 @@ class TitleLearner(threading.Thread):
                 app, title = foreground()
                 if not self._interesting(app, title):
                     continue
-                if title_hint(app, title):
-                    continue                       # 小抄里已经有了
+                if title_hint(app, title) and title_visual(app, title):
+                    continue                       # 小抄和外观线索都有了
                 key = (app, title)
                 rec = seen.setdefault(key, [0, 0.0])
                 rec[0] += 1
@@ -2225,14 +2242,16 @@ class TitleLearner(threading.Thread):
             "如果这明显是一款游戏、一部番剧/动画、或者正在播的影视，只回一个 JSON：\n"
             '{"kind":"game|anime|video|other","name":"作品的中文常用名","note":"2~3 句：'
             '游戏写怎么玩/核心机制/大致流程；番剧和影视写大体剧情 + 主要人物名字。'
-            '不要写公司、平台、发售时间、评分这类常识。"}\n'
+            '不要写公司、平台、发售时间、评分这类常识。",'
+            '"visual":"给识屏用的外观线索，150~250 字：游戏写 6~10 个常见角色/地区的一眼特征'
+            '（名字 + 发色/服装/地标），番剧写主要角色的外观特征和场景；只写能认人的点，不要剧情长文。"}\n'
             "其他情况（网页、文档、代码、聊天、工具）就回 {\"kind\":\"other\"}。只回 JSON，不要解释。"
             % (title, app)
         )
         parts.insert(0, {"type": "text", "text": ask})
         payload = {
             "model": self.cfg.get("model") or "deepseek-v4-flash",
-            "max_tokens": 400, "stream": False,
+            "max_tokens": 600, "stream": False,
             "messages": [
                 {"role": "system", "content": "你在给桌面宠物维护一张作品小抄，只回 JSON。"},
                 {"role": "user", "content": parts},
@@ -2257,10 +2276,13 @@ class TitleLearner(threading.Thread):
             return
         name = str(obj.get("name") or "").strip()
         note = str(obj.get("note") or "").strip()
+        visual = str(obj.get("visual") or "").strip()
         kind = str(obj.get("kind") or "").strip().lower()
         if not name or not note:
             return
         entry = {"kind": kind, "note": note}
+        if visual:
+            entry["visual"] = visual
         updates = {name: entry}
         low_app = (app or "").lower().replace(".exe", "")
         if low_app and low_app not in self.BROWSER_LIKE:
@@ -3558,6 +3580,9 @@ class Gateway:
         note = title_hint(app, title)
         if note:
             context.append("【这个作品你认识】%s" % note)
+        visual = title_visual(app, title)
+        if visual:
+            context.append("【认人/认地方用】%s" % visual)
         # 问到的作品不熟时顺手排一课（后台查，不挡这句话）；有资料就递一两段最相关的。
         try:
             lore_block = self.lore.block(app=app, title=title, query=text, allow_queue=True)
@@ -4067,10 +4092,17 @@ class Gateway:
             app = (m.group(1) or "").strip() if m else ""
             title = (m.group(2) or "").strip() if m else ""
             note = title_hint(app, title)
-            if note:
-                messages.insert(0, {"role": "system", "content": (
-                    "【这个作品你认识】%s\n（这是你自己的印象，顺着聊就行，别背简介、别逐字念。）" % note)})
-                log.info("识屏：带上作品小抄（%s）", (title or app)[:30])
+            visual = title_visual(app, title)
+            if note or visual:
+                parts = []
+                if note:
+                    parts.append("【这个作品你认识】%s" % note)
+                if visual:
+                    parts.append("【认人/认地方用】%s" % visual)
+                parts.append("（这是你自己的印象，顺着聊就行，别背简介、别逐字念。）")
+                messages.insert(0, {"role": "system", "content": "\n".join(parts)})
+                log.info("识屏：带上作品小抄%s（%s）",
+                         "+外观线索" if visual else "", (title or app)[:30])
             elif title or app:
                 # 记一笔，方便以后往 titles.json 里补
                 log.info("识屏：小抄里没有这个作品（%s）", (title or app)[:40])
@@ -4150,6 +4182,12 @@ class Gateway:
             if facts_block:
                 messages.insert(0, {"role": "system", "content": facts_block})
                 log.info("聊天：带上老大教过的事")
+            if self.mode.get() in (GAME_MODE, "anime"):
+                visual = title_visual(fapp, ftitle)
+                if visual:
+                    messages.insert(0, {"role": "system", "content":
+                                        "【认人/认地方用】%s" % visual})
+                    log.info("聊天：带上作品外观线索（%s）", (ftitle or fapp or "?")[:30])
         # 自动/普通模式下的识屏：说清「这是你自己瞥了一眼」，别当成老大在跟她说话
         if scenario == "vision" and self.mode.get() in ("auto", "normal"):
             messages.insert(0, {"role": "system", "content":
