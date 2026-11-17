@@ -840,6 +840,8 @@ A: 唔，这游戏说简单也简单，就是抽角色、组一队人，然后�
 - 判定是不是游戏：`titles.json` 里 `kind=game` 的作品命中，或者 `game_watch.game_apps` 里点名的进程；
 - **进**：前台是游戏、连着稳 `enter_seconds`（默认 90 秒）→ `mode=game`（source `auto-game`）；
 - **退**：切走/关掉超过 `away_grace_seconds`（默认 180 秒）→ 回 auto；
+  2026-11-17 晚补：托盘手动选的 `game`（source `tray` / 锁到期后的 `tray-released`）
+  也会在游戏关掉后退出，不再一直卡在游戏模式；
 - **不看键鼠活跃度**（老大专门说了不要这个条件），也不管有没有声音；
 - 托盘锁住的期间，这两个动作都不做。
 

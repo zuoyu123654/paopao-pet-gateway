@@ -2720,14 +2720,22 @@ class GameWatcher(threading.Thread):
                         self.gateway.mode.set(GAME_MODE, source="auto-game")
                         log.info("游戏模式：从视频接管（%s｜%s）", app, title[:40])
             return
-        # 不是游戏了：只负责「自己自动进来的」那一次退出
+        # 不是游戏了：自动进来的、托盘手动选的（锁到期后）都要能退出；
+        # 不然手动选过游戏，游戏关了会一直卡在 game。
         self.app = ""
         self.first_seen = 0.0
-        if (cur == GAME_MODE and self.gateway.mode.source == "auto-game"
-                and not self._locked() and self.last_seen
-                and now - self.last_seen > self.away_grace):
-            self.gateway.mode.set("auto", source="auto-game")
-            log.info("游戏模式：自动退出（切走 %.0f 秒）", now - self.last_seen)
+        try:
+            m = self.gateway.mode
+            src = str(m.source)
+            last = self.last_seen or float(getattr(m, "since", 0.0) or 0.0)
+            if (cur == GAME_MODE and src in ("auto-game", "tray", "tray-released")
+                    and not self._locked() and last
+                    and now - last > self.away_grace):
+                m.set("auto", source="auto-game")
+                log.info("游戏模式：自动退出（%s，切走 %.0f 秒）",
+                         src, now - last)
+        except Exception as exc:  # noqa: BLE001
+            log.info("游戏模式退出判断没成：%s", exc)
 
 
 
