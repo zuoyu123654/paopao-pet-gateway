@@ -869,6 +869,7 @@ class SpeechPipeline:
         self.last_at = 0.0
         self.last_pre_cue_at = 0.0
         self.active_priority = 0
+        self.active_tag = ""
         self.last_feed_at = 0.0
         self.spoken_sentences = 0
         self.cue_paths: list[str] = []
@@ -955,9 +956,9 @@ class SpeechPipeline:
 
     # ---------------------------------------------------------------- 对外
     PRIORITY = {"chat": 10, "vision": 10, "say": 10, "mode": 10,
-                "divination": 9, "precue": 6, "dsh": 2}
+                "divination": 9, "precue": 6, "proactive": 3, "dsh": 2}
 
-    def say(self, text: str, tag: str = "chat") -> int:
+    def say(self, text: str, tag: str = "chat", queue_if_busy: bool = False) -> int:
         """整段文本按标点切句后入队；高优先级会打断低的，低的不打断高的。"""
         if not self.cfg["tts"].get("enabled"):
             return 0
@@ -969,6 +970,13 @@ class SpeechPipeline:
         self.last_text, self.last_at = cleaned, now
         max_chars = int(self.cfg["tts"].get("max_chars_per_sentence", 60))
         sentences = split_sentences(cleaned, max_chars)[: int(self.cfg["tts"].get("max_sentences", 40))]
+        # 电话模式里主动识屏先开口时，语音回话也排队，别把它掐掉
+        if queue_if_busy and self._low_busy():
+            self.deferred.append((text, tag))
+            if len(self.deferred) > 6:
+                self.deferred.pop(0)
+            log.info("电话回话排队（先让主动识屏念完）：%s", cleaned[:30])
+            return 0
         # 低优先级（DSH 状态）不许打断正事，也不许被吞：先记着，
         # 等手上这段（当前回合 + 已经排队的句子 + 正在响的音频）念完再补。
         if priority < self.active_priority and self._low_busy():
@@ -1011,6 +1019,7 @@ class SpeechPipeline:
         with self.lock:
             gen = self.generation
         self.active_priority = max(self.active_priority, self.PRIORITY.get(tag, 5))
+        self.active_tag = tag
         self.last_feed_at = time.time()
         first_of_gen = None
         for s in sentences:
@@ -4267,7 +4276,11 @@ class Gateway:
             log.warning("语音回答：模型回了空内容（%s）", str(data)[:160])
             return ""
         log.info("语音回答：%d 字（%s）", len(reply), text[:20])
-        self.speech.say(reply, tag="voice")
+        queue_voice = bool(
+            getattr(self, "voice", None) and self.voice.mode == "call"
+            and self.speech.busy()
+            and str(getattr(self.speech, "active_tag", "")) == "proactive")
+        self.speech.say(reply, tag="voice", queue_if_busy=queue_voice)
         # 气泡停留：跟字数和语音差不多长，但别赖着——3.2 秒起步，最多 5 秒
         self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))
         self.ledger.add("chat", text, reply, {"voice": True})
@@ -4367,6 +4380,7 @@ class Gateway:
         # 之前一按「关闭」，她照常识屏却一句不出声，看着就像语音坏了。
         # 真要静音（夜间/开会）就打开 mute_vision_when_off。
         speak_this = True
+        speech_tag = "proactive" if proactive else scenario
         if proactive and suppress_proactive:
             # 老大正在说话：主动识屏只冒泡，别插嘴念
             speak_this = False
@@ -4442,12 +4456,12 @@ class Gateway:
                             logged_feed = True
                             log.info("首句入队 %.2fs（%d 字：%s）", time.time() - t0,
                                      len(cleaned), cleaned[:40])
-                        self.speech.feed_sentences(split_sentences(cleaned, max_chars), scenario)
+                        self.speech.feed_sentences(split_sentences(cleaned, max_chars), speech_tag)
                         fed_count += 1
                 yield piece
             tail = clean_for_speech(buf)
             if tail and speak_this:
-                self.speech.feed_sentences(split_sentences(tail, max_chars), scenario)
+                self.speech.feed_sentences(split_sentences(tail, max_chars), speech_tag)
         finally:
             self.turn_active = False
             resp.close()

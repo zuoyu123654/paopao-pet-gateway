@@ -372,7 +372,8 @@ class VoiceMode(threading.Thread):
         speech = getattr(self.gateway, "speech", None)
         deadline = time.time() + 90
         while (self.mode == "call" and not self.cancel.is_set()
-               and speech is not None and speech.busy()):
+               and speech is not None
+               and (speech.busy() or bool(getattr(speech, "deferred", [])))):
             if time.time() > deadline:
                 break
             time.sleep(0.2)
