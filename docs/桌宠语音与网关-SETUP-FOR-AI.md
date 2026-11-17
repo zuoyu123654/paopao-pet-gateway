@@ -1192,7 +1192,8 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
 1. **进模式门槛 120 → 90 秒**
    - `video_watch.enter_min_seconds = 90`
    - `game_watch.enter_seconds = 90`
-   - 20 秒的 `switch_seconds` 不动（视频↔游戏接管、视频内部换内容用）。
+   - 20 秒的 `switch_seconds` 用于视频内部换内容 / 视频→游戏；
+   - **游戏→视频/直播只等 `game_takeover_seconds`（默认 5 秒）**：退游戏直接看直播不用干等 20 秒。
 
 2. **B站直播/番剧自动进**
    - 老大确认：B站番剧的链接里就是 **`bangumi`**（`/bangumi/play/...`），所以
@@ -2497,6 +2498,7 @@ B 站那两条（video / anime）靠字幕和页面信息，**别的视频拿不
 | `poll_seconds` | 2.0 | 判定间隔 |
 | `enter_min_seconds` | 90 | 同一窗口连续多久才进 |
 | `switch_seconds` | 20 | 已经在视频类模式里换内容（普通视频↔番剧↔直播）的确认时间 |
+| `game_takeover_seconds` | 5 | 从游戏模式退出来、前台换成播放器有声后，确认几秒就接管成视频/直播 |
 | `audio_threshold` | 0.004 | 环回 RMS 门限，太吵就试 0.008 |
 | `input_idle_seconds` | 60 | 键鼠空闲多久算「低活跃」 |
 | `input_events_window` / `input_events_max` | 180 / 15 | 窗口内输入次数上限（空闲不够时的备选判据） |

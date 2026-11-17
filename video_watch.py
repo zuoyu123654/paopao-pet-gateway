@@ -375,6 +375,9 @@ class VideoWatcher(threading.Thread):
         self.paused_grace = float(self.conf.get("paused_grace_seconds", 600))
         self.paused_away_grace = float(self.conf.get("paused_away_grace_seconds", 120))
         self.switch_seconds = max(5.0, float(self.conf.get("switch_seconds", 20)))
+        # 游戏里退出来直接看直播/视频：这个方向只确认几秒，别让人干等 20 秒
+        self.game_takeover_seconds = max(
+            3.0, float(self.conf.get("game_takeover_seconds", 5)))
         self.keep = int(self.conf.get("transcript_keep", 12))
         self.min_cjk = float(self.conf.get("asr_min_cjk_ratio", 0.25))
         self.speak_hint = bool(self.conf.get("speak_hint", True))
@@ -641,7 +644,7 @@ class VideoWatcher(threading.Thread):
                     if player and playing:
                         if not self._game_seen:
                             self._game_seen = now
-                        elif now - self._game_seen >= self.switch_seconds:
+                        elif now - self._game_seen >= self.game_takeover_seconds:
                             self._game_seen = 0.0
                             with self.lock:
                                 self.app, self.title = app, title

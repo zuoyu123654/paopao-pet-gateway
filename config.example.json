@@ -141,7 +141,8 @@
         "speak_hint": true,
         "loopback_device": "",
         "subtitle_ocr": false,
-        "switch_seconds": 20
+        "switch_seconds": 20,
+        "game_takeover_seconds": 5
     },
     "soften_self_recognition": true,
     "self_recognition": {
