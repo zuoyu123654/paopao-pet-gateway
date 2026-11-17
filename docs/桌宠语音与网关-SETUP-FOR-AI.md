@@ -819,12 +819,14 @@ A: 唔，这游戏说简单也简单，就是抽角色、组一队人，然后�
 以前是「托盘选的模式满 10 分钟自动回 auto」，等于把选好的模式悄悄取消。现在的语义：
 
 - 托盘选模式 → 记一个 `mode_lock_until = now + mode_lock_minutes`（**默认 5 分钟**）；
+- **手动锁子菜单**还可以切「一直保持」：`Mode.lock_forever=true`，锁不到期，
+  一直保持托盘勾的模式，直到勾别的模式（或「自动模式」）或改回 5 分钟；
 - 锁住期间：VideoWatcher / GameWatcher 一律不许改动它（`_locked()` 检查 source 和 `mode_lock_until`）；
 - 到点：只调 `Mode.release()` 把 source 从 `tray` 改成 `tray-released`，**模式本身不变**；
   之后按各自的退出判断来——游戏模式看窗口切走/游戏关掉，视频模式看播放停没停，
   番剧/直播/网课这种没有自动判定的就一直保持，直到手动换掉。
 
-日志：`模式锁：anime 锁 5 分钟（到点只放开，不退出）` → `模式锁到期（满 5 分钟），「anime」交回自动判定`。
+日志：`模式锁：anime 锁 5 分钟（到点只放开，不退出）` → `模式锁到期（锁到期），「anime」交回自动判定`。
 
 **3）游戏模式自动进出（`GameWatcher`）**
 
@@ -1193,15 +1195,17 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
    - 20 秒的 `switch_seconds` 不动（视频↔游戏接管、视频内部换内容用）。
 
 2. **B站直播/番剧自动进**
-   - `VideoWatcher._video_target()` 重新区分：`bangumi/番剧/第X集` → `anime`，
-     `live.bilibili/直播` → `live`，普通 B站 → `video`；
+   - 老大确认：B站番剧的链接里就是 **`bangumi`**（`/bangumi/play/...`），所以
+     `_video_target()` 优先按 URL 的 `bangumi` 认番剧；标题只认「番剧/新番」，
+     **不再用「第X话/第X集」乱套**（普通 B站视频也常有「第3集」）；
+   - `live.bilibili/直播` → `live`，普通 B站 → `video`；
    - 已经在视频类模式里换内容（普通视频点进番剧/直播），`switch_seconds=20` 后跟着改
      `mode`，不会一直停在 `video`；只动 `auto-*` 来源，手动锁不受影响。
 
-3. **托盘勾看番，但模式提示仍分 live/course**
+3. **托盘勾看番，但模式提示仍分 live/course，各两句**
    - `watch_key` 仍把 `live/course` 显示成托盘「B站看番」；
-   - 但模式本身是 `live` / `course`，`_announce_mode()` 用各自的 `MODE_PHRASES`（两句轮换），
-     气泡和语音都是对应的，不会念成看番；
+   - 但模式本身是 `live` / `course`，`_announce_mode()` 用各自的 `MODE_PHRASES`；
+     2026-11-17 起 **live/course 每条都是两句**（不再只念一句），气泡和语音都是对应的；
    - 自动直播进 `live`（source `auto-live`），自动番剧进 `anime`；网课由 API/手动设 `course`。
 
 4. **「让我看看」默认关掉**
@@ -1216,6 +1220,18 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
    - 播放线程在 `turn_active` 结束、队列/合成/正在响都清空后，`_drain_deferred()` 补念；
    - 日志：`低优先级先排队（dsh）：…` → `补念排队（dsh）：…` → `念第 N 句`。
    - 注意：模式提示（`tag=mode`）是 10，跟聊天同级，不会排到 DSH 后面，切模式时该立刻说就说。
+
+6. **托盘「手动锁」：5 分钟 / 一直保持**
+   - 托盘菜单新增子菜单 **手动锁**：
+     - `5 分钟（默认）`：跟现在一样，手动选模式只锁 5 分钟，到点只放开、不退出；
+     - `一直保持`：手动选模式一直不放开，除非在托盘里勾别的模式（或选「自动模式」），
+       或者把手动锁改回 5 分钟；
+   - 网关 `Mode.lock_forever` 持久化在 `mode.json`，新接口 `POST /mode-lock {"forever": true|false}`；
+   - 切到「一直」时，如果当前是托盘手动模式（包括已经 released 的），会把 source 拉回
+     `tray`/`tray-generic` 并锁住；切回 5 分钟时从当前时刻重新算 5 分钟；
+   - 选「自动模式」永远不锁，自动判定立即接管（手动锁设置保留，下次手动选模式再按它锁）；
+   - `/status` 多返回 `mode_lock_forever`、`mode_lock_minutes`、`mode_lock_remaining`；
+     托盘底部状态行会显示「锁5分钟 / 锁一直」。
 
 
 

@@ -2070,6 +2070,7 @@ class Mode:
         self.value = "auto"
         self.source = "default"
         self.since = time.time()
+        self.lock_forever = False
         self.on_change = None       # 切换成功后的回调（网关挂上去，播提示音 + 气泡）
         try:
             with open(self.path, "r", encoding="utf-8") as f:
@@ -2078,7 +2079,17 @@ class Mode:
                 self.value = str(data["mode"])
                 self.source = str(data.get("source") or "file")
                 self.since = float(data.get("since") or time.time())
+                self.lock_forever = bool(data.get("lock_forever", False))
         except (OSError, ValueError):
+            pass
+
+    def _write(self) -> None:
+        data = {"mode": self.value, "source": self.source, "since": self.since,
+                "lock_forever": bool(self.lock_forever)}
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except OSError:
             pass
 
     def get(self) -> str:
@@ -2100,12 +2111,7 @@ class Mode:
             else:
                 self.source = "tray-released"
             self.since = time.time()
-            data = {"mode": self.value, "source": self.source, "since": self.since}
-            try:
-                with open(self.path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-            except OSError:
-                pass
+            self._write()
         log.info("模式锁到期（%s），「%s」交回自动判定", why, self.value)
 
     def set(self, mode: str, source: str = "api") -> dict:
@@ -2118,19 +2124,21 @@ class Mode:
             self.value = mode
             self.source = source
             self.since = time.time()
-            data = {"mode": self.value, "source": self.source, "since": self.since}
-            try:
-                with open(self.path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-            except OSError:
-                pass
+            self._write()
         # 回调放在锁外面：它要播语音、弹气泡，里面还会再读 mode
         if changed and callable(getattr(self, "on_change", None)):
             try:
                 self.on_change(mode, source)
             except Exception as exc:  # noqa: BLE001
                 log.info("模式切换提示出错（不影响切换）：%s", exc)
-        return data
+        return {"mode": self.value, "source": self.source, "since": self.since,
+                "lock_forever": bool(self.lock_forever)}
+
+    def set_lock_forever(self, on: bool) -> None:
+        """托盘「手动锁」：False=5 分钟（默认），True=一直保持。"""
+        with self.lock:
+            self.lock_forever = bool(on)
+            self._write()
 
 
 class TitleLearner(threading.Thread):
@@ -3269,6 +3277,13 @@ class Gateway:
         self.digester.start()
         self.mode = Mode(cfg)
         self.mode_lock_until = 0.0
+        try:
+            _src = str(self.mode.source)
+            if (getattr(self.mode, "lock_forever", False)
+                    and _src.startswith("tray") and not _src.endswith("released")):
+                self.mode_lock_until = float("inf")
+        except Exception:  # noqa: BLE001
+            pass
         # 每次模式真的变了，就播一句 + 冒个泡（两种都是预合成好的固定句子）
         self.mode.on_change = self._announce_mode
         self.divination = DivinationWatcher(cfg, self.speech)
@@ -3505,11 +3520,17 @@ class Gateway:
             try:
                 if self.mode.get() == "off":
                     continue
+                if getattr(self.mode, "lock_forever", False):
+                    continue
                 src = str(self.mode.source)
-                if (src.startswith("tray") and not src.endswith("released")
-                        and time.time() - self.mode.since > lock_minutes * 60):
-                    self.mode.release("满 %.0f 分钟" % lock_minutes)
-                    self.mode_lock_until = 0.0
+                if src.startswith("tray") and not src.endswith("released"):
+                    until = float(getattr(self, "mode_lock_until", 0.0) or 0.0)
+                    if until <= 0:
+                        # 兼容重启前就锁着、但没记 until 的旧状态
+                        until = self.mode.since + lock_minutes * 60
+                    if time.time() >= until:
+                        self.mode.release("锁到期")
+                        self.mode_lock_until = 0.0
             except Exception:  # noqa: BLE001
                 pass
 
@@ -4254,6 +4275,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_player()
         elif path.endswith("/divination"):
             self._handle_divination()
+        elif path.endswith("/mode-lock"):
+            self._handle_mode_lock()
         elif path.endswith("/mode"):
             self._handle_mode()
         elif path.endswith("/say"):
@@ -4391,10 +4414,14 @@ class Handler(BaseHTTPRequestHandler):
                 GATEWAY.mode_lock_until = 0.0
                 log.info("自动模式不加锁：自动判定立即接管")
             else:
-                # 托盘选的模式先锁住 N 分钟（期间自动判定都不许动它）
-                lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
-                GATEWAY.mode_lock_until = time.time() + lock_min * 60
-                log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
+                # 托盘选的模式：默认锁 N 分钟；手动锁设成「一直」就锁到手动换掉为止
+                if getattr(GATEWAY.mode, "lock_forever", False):
+                    GATEWAY.mode_lock_until = float("inf")
+                    log.info("模式锁：%s 一直保持（手动锁=一直）", data["mode"])
+                else:
+                    lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
+                    GATEWAY.mode_lock_until = time.time() + lock_min * 60
+                    log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
             # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
             # （关闭 = 识屏关；其它模式 = 识屏开）
             GATEWAY.set_proactive(data["mode"] != "off")
@@ -4408,6 +4435,38 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 log.warning("手动进视频类模式失败：%s", exc)
         self._send_json({"ok": True, **data})
+
+    def _handle_mode_lock(self):
+        """托盘「手动锁」：5 分钟（默认）/ 一直保持。"""
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"error": "bad json"}, 400)
+            return
+        forever = bool(req.get("forever"))
+        g = GATEWAY
+        g.mode.set_lock_forever(forever)
+        cur = g.mode.get()
+        src = str(g.mode.source)
+        if cur != "auto" and src.startswith("tray"):
+            new_src = "tray-generic" if src.startswith("tray-generic") else "tray"
+            if src != new_src:
+                # 从 released 拉回锁住状态（模式不变，不播提示）
+                g.mode.set(cur, source=new_src)
+            if forever:
+                g.mode_lock_until = float("inf")
+            else:
+                lock_min = max(1.0, float(g.cfg.get("mode_lock_minutes", 5)))
+                g.mode_lock_until = time.time() + lock_min * 60
+        else:
+            g.mode_lock_until = 0.0
+        log.info("手动锁 → %s（当前 %s / %s）",
+                 "一直保持" if forever else "5 分钟", cur, g.mode.source)
+        self._send_json({"ok": True, "mode": cur, "source": g.mode.source,
+                         "forever": forever,
+                         "lock_forever": bool(g.mode.lock_forever),
+                         "mode_lock_until": 0 if not (g.mode_lock_until < float("inf"))
+                         else g.mode_lock_until})
 
     def _handle_status(self):
         g = GATEWAY
@@ -4424,11 +4483,18 @@ class Handler(BaseHTTPRequestHandler):
                           "note": title_hint(app, title), "hit": bool(title_hint(app, title))})
         except Exception:  # noqa: BLE001
             pass
+        lock_until = float(getattr(g, "mode_lock_until", 0.0) or 0.0)
+        lock_remaining = (0 if lock_until <= 0 else
+                          (None if lock_until == float("inf")
+                           else max(0, int(lock_until - time.time()))))
         self._send_json({
             "ok": True,
             "mode": g.mode.get(),
             "mode_since": g.mode.since,
             "mode_source": g.mode.source,
+            "mode_lock_forever": bool(getattr(g.mode, "lock_forever", False)),
+            "mode_lock_minutes": float(g.cfg.get("mode_lock_minutes", 5)),
+            "mode_lock_remaining": lock_remaining,
             "front": front,
             "titles": len(title_notes()),
             "frames": frames,

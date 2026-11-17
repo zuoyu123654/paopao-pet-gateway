@@ -68,6 +68,10 @@ VOICE_ITEMS = (
     ("ptt", "按键说话"),
     ("call", "语音电话"),
 )
+LOCK_ITEMS = (
+    ("5m", "5 分钟（默认）"),
+    ("forever", "一直保持"),
+)
 # 反馈文案在 phrases.py 里统一管理（网关预合成时用的是同一份）
 FEEDBACK = TRAY_FEEDBACK
 
@@ -153,6 +157,20 @@ class TrayMenu(QObject):
             self.watch_actions[key] = act
 
         self.menu.addSeparator()
+        self.lock_menu = self.menu.addMenu("手动锁")
+        self.lock_group = QActionGroup(self)
+        self.lock_group.setExclusive(True)
+        self.lock_actions: dict[str, QAction] = {}
+        for key, label in LOCK_ITEMS:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setData(("lock", key))
+            self.lock_group.addAction(act)
+            self.lock_menu.addAction(act)
+            act.triggered.connect(self._on_pick)
+            self.lock_actions[key] = act
+
+        self.menu.addSeparator()
         self.voice_group = QActionGroup(self)
         self.voice_group.setExclusive(True)
         self.voice_actions: dict[str, QAction] = {}
@@ -172,6 +190,7 @@ class TrayMenu(QObject):
         self.tray.show()
 
         self.watch_actions["auto"].setChecked(True)
+        self.lock_actions["5m"].setChecked(True)
         self.voice_actions["ptt"].setChecked(True)
 
         self.timer = QTimer(self)
@@ -196,6 +215,11 @@ class TrayMenu(QObject):
                 payload["source"] = "tray"
             self._post("/mode", payload)
             # 气泡交给网关：它要随机挑那句提示，跟语音保持一致（这里再冒一个就会打架）
+            return
+        if kind == "lock":
+            forever = key == "forever"
+            self._post("/mode-lock", {"forever": forever})
+            self._feedback("lock_forever" if forever else "lock_5m")
             return
         self._post("/voice", {"action": "set_mode", "mode": key})
         self._feedback("voice_off" if key == "off" else key)
@@ -243,12 +267,19 @@ class TrayMenu(QObject):
             self._last_watch = watch
             log("托盘同步：%s / %s → %s" % (mode, source, watch))
         voice = str(((data.get("voice") or {}).get("mode")) or "ptt")
+        lock_forever = bool(data.get("mode_lock_forever"))
         labels = dict(WATCH_ITEMS)
-        self.status_act.setText("当前：%s · %s" % (labels.get(watch, watch),
-                                                  dict(VOICE_ITEMS).get(voice, voice)))
+        self.status_act.setText("当前：%s · %s · %s" % (
+            labels.get(watch, watch),
+            dict(VOICE_ITEMS).get(voice, voice),
+            "锁一直" if lock_forever else "锁5分钟"))
         for key, act in self.watch_actions.items():
             act.blockSignals(True)
             act.setChecked(key == watch)
+            act.blockSignals(False)
+        for key, act in self.lock_actions.items():
+            act.blockSignals(True)
+            act.setChecked(key == ("forever" if lock_forever else "5m"))
             act.blockSignals(False)
         for key, act in self.voice_actions.items():
             act.blockSignals(True)

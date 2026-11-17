@@ -552,9 +552,10 @@ class VideoWatcher(threading.Thread):
             url = str((snap or {}).get("url") or "").lower()
         except Exception:  # noqa: BLE001
             pass
-        if ("bangumi" in url or "番剧" in hay or "新番" in hay
-                or ("动画" in hay and ("第" in hay or "集" in hay))
-                or ("第" in hay and ("话" in hay or "集" in hay))):
+        # 老大 2026-11-17 确认：B站番剧的链接里就是 bangumi（/bangumi/play/...），
+        # 优先按 URL 认；标题只留「番剧/新番」这种明确字样，别拿「第X话/第X集」
+        # 乱套——普通 B站视频也经常有「第3集」，会误进看番。
+        if "bangumi" in url or "番剧" in hay or "新番" in hay:
             return "anime", "auto-anime"
         if "live.bilibili" in url or ("直播" in hay and not any(
                 w in hay for w in ("回放", "录播", "切片", "解说"))):
