@@ -1170,10 +1170,12 @@ Edge 157 忽略。扩展一没，`/player` 就没有 URL/进度，B站字幕和�
    由网关提供 `update.xml` + `.crx`。force-install 的扩展不会被 Edge 更新/开发者模式清掉，
    也不需要用户点「加载解压缩的扩展」。代价是要写一次 HKLM 策略、且扩展更新要走本地源。
 4. **免开发者模式（不需要管理员，推荐先试）**：装商店里的 **Tampermonkey**（或 Violentmonkey /
-   ScriptCat），把 `browser_ext/paopao-player.user.js` 装进去。它和 `content.js` 做同一件事
-   （每秒 POST `url/title/t/d/paused/fullscreen` 到 `/player`），宿主是商店扩展，不会被
-   「开发者模式扩展」清掉；脚本本身存在 Tampermonkey 里，可导出备份。第一次会问是否允许访问
-   `127.0.0.1:9888`，点允许。
+   ScriptCat），把 `browser_ext/paopao-player.user.js` 装进去。最省事是 Edge 打开
+   `http://127.0.0.1:9888/ext/paopao-player.user.js`（网关直接吐脚本，Tampermonkey 弹安装页）。
+   **Edge 157 / Chromium 138+ 还要在 `edge://extensions` → Tampermonkey「详细信息」里打开
+   「允许用户脚本 / Allow user scripts」**，不开脚本不执行；第一次会问是否允许访问
+   `127.0.0.1:9888`，点允许。宿主是商店扩展，不会被「开发者模式扩展」清掉；脚本本身存在
+   Tampermonkey 里，可导出备份。
 
 **别做的事**：手改 Edge `Preferences`/`Secure Preferences` 里扩展的 `state`——
 Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展设置被清；要持久只能走 CRX + 策略。

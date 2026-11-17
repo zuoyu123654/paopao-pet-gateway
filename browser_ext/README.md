@@ -34,10 +34,13 @@ unpacked 扩展（上面三步装的那个）是「开发人员模式」扩展�
 不想每次重装，就改用**商店里的脚本管理器**：
 
 1. Edge 加载项商店搜 **Tampermonkey**（或 Violentmonkey / ScriptCat），安装；
-2. 打开 `browser_ext\paopao-player.user.js`，Tampermonkey 会弹出安装页；点「安装」；
+2. 最省事：Edge 地址栏打开 **`http://127.0.0.1:9888/ext/paopao-player.user.js`**，
+   Tampermonkey 会弹安装页，点「安装」；
    （也可以 Tampermonkey 面板 → 新建脚本 → 把文件内容粘进去）
-3. 第一次上报时 Tampermonkey 会问是否允许访问 `127.0.0.1:9888`，点允许；
-4. 播个 B站视频，看 `/status` 的 `player.source` 是不是 `ext`。
+3. **Edge 157 / Chromium 138+ 还要开一个开关**：`edge://extensions` → Tampermonkey
+   「详细信息」→ 打开「允许用户脚本 / Allow user scripts」。不开这个开关，脚本不会执行；
+4. 第一次上报时 Tampermonkey 会问是否允许访问 `127.0.0.1:9888`，点允许；
+5. 播个 B站视频，看 `/status` 的 `player.source` 是不是 `ext`。
 
 它和上面的扩展做的是同一件事：每秒把 `url/title/currentTime/duration/paused/fullscreen` 发给
 `http://127.0.0.1:9888/player`，只读进度、不碰页面内容。区别只是宿主是商店扩展，

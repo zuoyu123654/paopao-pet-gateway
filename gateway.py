@@ -4160,6 +4160,22 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/lore"):
             self._handle_lore()
             return
+        if urllib.parse.urlparse(self.path).path == "/ext/paopao-player.user.js":
+            # 让 Tampermonkey 能直接从这个地址装脚本（不用去文件夹里拖）
+            path = os.path.join(APP_DIR, "browser_ext", "paopao-player.user.js")
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                self._send_json({"ok": False, "error": "用户脚本文件不在"}, 404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path.startswith("/doctor"):
             self._handle_doctor()
             return
