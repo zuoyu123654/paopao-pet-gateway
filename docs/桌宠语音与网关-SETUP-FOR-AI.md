@@ -1180,6 +1180,12 @@ Edge 157 忽略。扩展一没，`/player` 就没有 URL/进度，B站字幕和�
 **别做的事**：手改 Edge `Preferences`/`Secure Preferences` 里扩展的 `state`——
 Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展设置被清；要持久只能走 CRX + 策略。
 
+> **B站隐藏 iframe 会把真实进度覆盖掉（2026-11-17 实测）**：B站页面里有一个
+> `message.bilibili.com/pages/nav/header_sync` 的跨域 iframe，旧用户脚本/扩展会在里面也跑，
+> 每秒把 `header sync / 0:00` 写进 `/player`，导致 `player.url` 变成 header sync、模式看着像失灵。
+> 修法两层：用户脚本只跑**顶层页面**且必须有 `<video>`；网关 `PlayerWatch.push_ext()` 直接丢弃
+> `message.bilibili.com` 和无 `t/d` 的推送。
+
 
 ### 4.2r 识屏的三件事：说清「现在在干嘛」、别按「第几张」讲、角色别认错（2026-11-17）
 

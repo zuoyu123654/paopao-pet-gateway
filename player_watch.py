@@ -310,10 +310,15 @@ class PlayerWatch(threading.Thread):
         """浏览器扩展（方案 A）推上来的一条状态。"""
         try:
             url = str(data.get("url") or "")
-            bv = BV_RE.search(url)
-            page = PAGE_RE.search(url)
             t = data.get("t")
             d = data.get("d")
+            # 没视频的页面（B站隐藏 iframe、首页）不要覆盖当前播放状态
+            if "message.bilibili.com" in url:
+                return
+            if t is None and d is None:
+                return
+            bv = BV_RE.search(url)
+            page = PAGE_RE.search(url)
             self._ext_state = {
                 "url": url,
                 "title": str(data.get("title") or "")[:100],

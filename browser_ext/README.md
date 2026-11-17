@@ -46,6 +46,11 @@ unpacked 扩展（上面三步装的那个）是「开发人员模式」扩展�
 `http://127.0.0.1:9888/player`，只读进度、不碰页面内容。区别只是宿主是商店扩展，
 不会被「开发者模式扩展」那套清掉；脚本本身存在 Tampermonkey 里，也可以导出备份。
 
+> **B站隐藏 iframe 的坑（2026-11-17 修）**：B站页面里有一个 `message.bilibili.com/pages/nav/header_sync`
+> 的跨域 iframe，旧脚本会在里面也跑，每秒把「header sync / 0:00」覆盖到真实视频状态上。
+> 现在两边都堵了：用户脚本只在**顶层页面**、且页面里**真的有 `<video>`** 时才上报；
+> 网关 `PlayerWatch.push_ext()` 也直接丢弃 `message.bilibili.com` 和 `t/d 都为空` 的推送。
+
 ## 排障
 
 - `/status` 里 `player.connected: false`：说明一秒内没收到任何上报 → 检查扩展是否启用、页面是不是在视频站、
