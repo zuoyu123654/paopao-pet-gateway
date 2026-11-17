@@ -767,6 +767,7 @@ Exception code: 0xc0000005
 |---|---|
 | `build_see_howto()`（`see_howto` 默认开） | 识屏注入「先看清再说话」：按顺序扫（标题栏 → 主体人物/场景 → 角落 UI）；心里描述清楚，**说出口也要让人听得出在哪、在干什么**（但别逐条罗列、别报数字）；**窗口标题里的作品名可以直接说出来**，明确覆盖掉「标题只是参考」那句；标题和画面对不上先信画面；认出来就聊你知道的类型/玩法/梗，不熟只说名字别装懂 |
 | `titles.json`（网关目录下） | **作品小抄**：键是标题/进程名里能匹配的名字，值是一句话说明；按 mtime **热重载**，加条目不用重启。命中就注入「【这个作品你认识】…」，没命中打一行 `识屏：小抄里没有这个作品（…）` 方便以后补 |
+| `lore/`（目录，网关目录下） | **作品手册**：每部游戏/番剧一份自动查资料 + 自动总结的笔记（玩法/术语/界面/角色/时效），识屏、语音、聊天**只在相关时**检索一两段，不常驻注入；详见 **4.2v** |
 | `voice_reply()` | 语音问答现在带三样：`【老大此刻的前台】标题（进程）`、小抄、`【你刚才看到过】`（15 分钟内最近一条识屏）；问到「游戏/番/视频/画面/在玩/在看/玩什么…」时再附一张当前截图；system 里明说「问屏幕上的事就照这些答，名字直接说」 |
 
 **实测（2026-11-17 01:47，前台是 崩坏：星穹铁道）**：
@@ -1303,6 +1304,199 @@ title: 『原神』7.3前瞻日期确定…
 
 配置：`config.json` → `voice.screenshot`（`always` / `auto` / `off`）。
 
+### 4.2v 让她真的「认识」一款游戏：自己查资料、自己总结、按需查（2026-11-17）
+
+老大的要求：**「怎么让她可以彻底认识一款游戏（或者尽量）」**，而且
+**玩家手册不要他写，得她自己搜、自己总结**。
+
+4.2r 那套「作品小抄」只够她说一句「哦，这是绝区零」，再往下问玩法、术语、界面、角色就露馅；
+而把大段百科常驻塞进提示词，她会逮着刚学到的名词乱抖（角色对照就是这么翻车的）。
+所以这次做的是两层：**本地手册 + 按需检索**，平时一个字的资料都不注入。
+
+#### 4.2v.1 目录与格式
+
+```
+lore/
+  games/<slug>.md      手册正文：<!-- paopao-lore {...} --> 元数据 + # 作品名 + 固定小节
+  progress/<slug>.md   老大在这款游戏里的进度/偏好（从识屏账本提炼）
+  raw/<slug>/*.txt     抓到的原料（留档，最多 6 份）
+lore.py                模块：抓取 / 总结 / 分块 / 检索 / 后台补课 / 命令行
+```
+
+游戏小节：`一句话` / `怎么玩` / `操作与战斗` / `界面长什么样` / `术语黑话` / `角色` /
+`版本沿革`（不带日期的版本改动）/ `时效`（只放带日期、能过期的）；
+番剧小节：`一句话` / `讲的是什么` / `主要人物` / `梗和术语` / `时效`。
+元数据里带 `name`、`kind`、`aliases`（进程名、英文名、带不带冒号都记上）、`updated`、`sources`。
+**改了文件不用重启**：`Store` 按 mtime 自动重载。
+
+#### 4.2v.2 资料从哪来（都是她自己去抓的）
+
+| 来源 | 怎么拿 | 备注 |
+|---|---|---|
+| 萌娘百科 | `action=query&prop=extracts&explaintext=1&redirects=1` | 只用这条。`list=search`、`parse&prop=links`、`categorymembers` 在本站**要么被拒（Unauthorized API call）要么返回空**，别浪费时间 |
+| B站攻略 | `bili --compact search video "<名字> 新手 攻略"` + `"<名字> 玩法 机制"`，再 `bili --compact video watch <bv> --max-chars 2400 --comments 0 --peaks 0 --frames 0 --no-danmaku` | 拿 AI 摘要 + 章节 + 字幕摘录；番剧不抓 B站（容易剧透） |
+| 原料留档 | `lore/raw/<slug>/时间-来源.txt` | 以后想重总结不用重新抓 |
+
+选片规则（不这么筛就会搜到 EP、英语单词教学、二创、直播切片）：
+
+1. 标题里必须出现作品名；
+2. 命中正向词：攻略/新手/萌新/入坑/教程/指南/机制/玩法/介绍/开荒/教学/怎么玩；
+3. 排除负向词：英语、单词、音乐、ep、主题曲、翻唱、钢琴、mmd、手书、二创、同人、剪辑、混剪、
+   直播回放、切片、电台、asmr、声优、cosplay、整活、鬼畜、角色演示、pv、预告、版本前瞻；
+4. 时长 90 秒～50 分钟（太短没内容，太长多半是整活/直播）；
+5. 两路关键词合并去重，先按「正向词命中数」再按播放量排，取前 `bili.videos`（默认 2）。
+
+#### 4.2v.3 总结：用 chat 模型，不要用推理模型
+
+`Lore.summarize()` 调 `gateway.post_once()`，模型是 `lore.model`，**默认 `deepseek-chat`**。
+
+为什么不用 `deepseek-v4-flash`：它是推理模型，思考 token 也算在 `max_tokens` 里。实测同一份
+10k 字原料，`max_tokens=1600` 时 **1290 个 token 花在思考上，正文只有 410 字就被截断**；
+再加到 3000 也只出 824 字。换成 `deepseek-chat` + `summarize_max_tokens=2400` 后完整出 1000+ 字。
+
+**日期防编造**：提示词里只要出现一个示例日期，模型就会把它抄进「时效」的所有行（第一版 9 条
+全是当天日期）。所以有 `sanitize_dates()`：把原料里**真实出现过**的日期收成一个集合
+（支持 `2026-03-12`、`2026/3/12`、`2026年3月12日`），手册「时效」里对不上的日期直接抹掉；
+宁可这条没日期，也不留假日期。
+
+带日期的时效条目超过 `stale_days`（默认 60 天）就在分块时丢弃；没日期的版本改动放在
+`版本沿革` 里（历史事实，不会过期），`时效` 只放带日期、会过期的。
+
+#### 4.2v.4 检索：为什么不会每轮「报菜名」
+
+- **BM25 + 中文 bigram**，不装分词库；英文/数字按整词。
+- **停用词**：什么、怎么、这个、意思、今天……这些问句万能词不参与算分。
+- **小节优先**：问句命中 `角色/人物/界面/术语/黑话/玩法/操作/战斗/版本/时效/卡池/剧情` 时，
+  把同名小节直接提到结果最前面（`HEADING_WORDS`）。不然「角色」两个字在别的段落出现两次，
+  就能把真正的「角色」小节挤下去。
+- **作品名不进正文索引**：否则「只有标题、没有问话」时每一段都能命中，她每轮随机抖三条资料。
+- **实词门槛**：`block()` 要求问话里至少 2 个非停用词，只有标题就返回空。
+- 当前正在玩的作品加权 1.35。
+
+#### 4.2v.5 什么时候注入（这一节是「不乱说话」的关键）
+
+| 场景 | 给什么 |
+|---|---|
+| 识屏 + 有问话/相关线索 | 最多 3 段（预算 520 字），带「用不上就一个字都别提，别背、别报菜名」 |
+| 识屏 + 游戏模式 + 没问话 | 只给 `headline()`：那一句「这是什么游戏」，不给大段 |
+| 识屏 + 自动模式 + 没问话 | **什么都不给**（避免她闲着也报菜名） |
+| 语音问答 | 最多 3 段；问到没学过的作品会顺手排队补课，并提示「这款你还不太熟，别装懂」 |
+| 聊天里提到学过的作品 | 2～3 段（没提到就一个字不加） |
+| 不认识的作品（前台有标题） | 只提示「还不熟，别编」，不会硬编 |
+
+注入文案固定带三句：这是你自己攒的笔记、只挑有关的一两条、用不上别提。
+
+#### 4.2v.6 后台自己补课
+
+- `LoreKeeper`（线程 `lore-keeper` + `lore-worker`，一次只跑一门课）：
+  - 启动时 `prebuild`：把 `titles.json` 里 `kind=game/anime` 的条目排上队（第一次启动会一本一本补，
+    每本十几秒到一分钟，**不是没反应**）；
+  - 前台出现已知作品但没手册 / 手册超过 `refresh_days`（30 天）→ 排队重学；
+  - 失败后同一本 12 小时（`cooldown_minutes`）内不再试，免得刷接口；
+  - 同一部作品的多个叫法会合并：`星穹铁道` / `崩坏：星穹铁道` / `starrail` 只学一门课。
+- `TitleLearner` 新认出一部作品、写进 `titles.json` 之后，顺手 `lore.ensure()` 排课。
+- `ProgressKeeper`：每 30 分钟（`progress.minutes`）从识屏账本里挑该 App 最近 40 分钟的观察，
+  让模型提炼最多 3 条「老大在打哪关/玩谁/想抽谁」；7 天过期。**只在游戏模式或前台是游戏时跑**。
+
+#### 4.2v.7 接口与命令行
+
+```powershell
+# 看资料库/后台队列
+Invoke-WebRequest http://127.0.0.1:9888/lore -UseBasicParsing
+
+# 现在就去学一本（同步，等它跑完）
+Invoke-RestMethod http://127.0.0.1:9888/lore -Method Post -ContentType application/json `
+  -Body '{"action":"learn","name":"黑神话：悟空","kind":"game"}'
+
+# 按一句话检索（调试「她到底会拿到哪几段」）
+Invoke-RestMethod http://127.0.0.1:9888/lore -Method Post -ContentType application/json `
+  -Body '{"action":"retrieve","query":"这个界面是干嘛的","game":"绝区零"}'
+```
+
+```powershell
+$py = "C:\Users\zuo'yu\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+& $py D:\app1\paopao_pet_gateway\lore.py list
+& $py D:\app1\paopao_pet_gateway\lore.py show 绝区零
+& $py D:\app1\paopao_pet_gateway\lore.py learn 绝区零 --kind game
+& $py D:\app1\paopao_pet_gateway\lore.py search "邦布是什么" --game 绝区零
+& $py D:\app1\paopao_pet_gateway\lore.py eval 绝区零      # 6 个常见问题看检索覆盖
+& $py D:\app1\paopao_pet_gateway\lore.py status
+```
+
+`GET /status` 里多了 `lore`（手册数/名字/队列），`GET /doctor` 里多了 `lore` 一项。
+
+#### 4.2v.8 配置（`config.json` → `lore`）
+
+```json
+"lore": {
+    "enabled": true,
+    "dir": "lore",
+    "auto_learn": true,
+    "prebuild": true,
+    "poll_seconds": 45,
+    "cooldown_minutes": 720,
+    "refresh_days": 30,
+    "stale_days": 60,
+    "max_chunks": 3,
+    "budget_chars": 520,
+    "chunk_chars": 380,
+    "model": "deepseek-chat",
+    "summarize_max_tokens": 2400,
+    "moegirl": {"enabled": true, "max_chars": 12000},
+    "bili": {"enabled": true, "videos": 2, "max_chars": 2400, "timeout": 150},
+    "progress": {"enabled": true, "minutes": 30, "min_rows": 2,
+                 "window_minutes": 40, "max_age_days": 7, "max_chars": 120}
+}
+```
+
+#### 4.2v.9 实测（2026-11-17 13:45–13:48）
+
+| 作品 | 字数 | 来源 | 耗时 |
+|---|---|---|---|
+| 绝区零 | 1093 | 萌娘百科 + 2 个 B站攻略 | 12.6 秒 |
+| 崩坏：星穹铁道 | 1173 | 同上 | 13.4 秒 |
+| 原神 | 1119 | 同上 | 13.1 秒 |
+| 甘城光辉游乐园（番剧） | 610 | 萌娘百科 | 4.3 秒 |
+
+检索样例（`lore.py search`）：
+
+- `这个界面是干嘛的` → `界面长什么样` 7.97，只出这一节；
+- `这个角色是谁` → `角色` 被提到第一（2.48），后面才是 `操作与战斗` 3.65；
+- `树脂是干嘛的`（原神）→ `术语黑话` 4.41 + `怎么玩` 4.06；
+- `击破是什么意思`（星铁）→ `操作与战斗` 6.91；
+- 只有标题、没有问话的识屏 query → `block()` 返回空字符串。
+
+#### 4.2v.10 踩过的坑（别再踩）
+
+1. **`LoreKeeper._bootstrap` 把 `threading.Thread._bootstrap` 覆盖了**：`start()` 会永远等
+   `_started`，整个网关卡死在 `self.lore_keeper.start()`（faulthandler 里能看到
+   `threading.py:999 in start`）。内部方法千万别叫 `_bootstrap`，现在叫 `_prebuild`。
+2. **推理模型的思考 token 吃 `max_tokens`**：总结必须用 `deepseek-chat`，或者把预算拉到 5000+。
+3. **模型会抄「今天」当日期**：提示词里的示例日期要写成 `（2026-03-12）` 这种不会误导的形式，
+   并且一定要 `sanitize_dates`。
+4. **B站搜索会混进 EP/英语教学/二创**：负向词表是必要开销。
+5. **作品名算进正文索引 → 只有标题也能命中所有段**：名字只用来做 alias 解析，不进 BM25。
+6. **萌娘百科的 `list=search` 被拒**：别想着用它做别名发现，直接 `titles` + `redirects` 试变体。
+7. **首启 prebuild 是后台的**：日志 `资料：给《…》做了本手册` 出现之前，她确实“还不认识”，
+   别以为坏了。
+
+#### 4.2v.11 怎么加 / 删 / 重学
+
+```powershell
+# 重学一本：删了让后台下次自己学（或在 /lore 里 forget）
+Remove-Item D:\app1\paopao_pet_gateway\lore\games\绝区零.md
+
+# 立刻手动学一本
+& $py D:\app1\paopao_pet_gateway\lore.py learn 绝区零
+
+# 删掉（连带进度和原料）
+Invoke-RestMethod http://127.0.0.1:9888/lore -Method Post -ContentType application/json `
+  -Body '{"action":"forget","name":"绝区零"}'
+```
+
+日志关键字：`资料：给《…》做了本手册`、`资料：… 检索到 N 段`、`识屏：带上资料（…）`、
+`聊天：带上资料`、`资料库：N 本手册 / M 段`。
+
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
 做过、试过、撤了。经过记在这里，免得后人又走一遍：
@@ -1361,6 +1555,10 @@ Invoke-WebRequest http://127.0.0.1:9888/health -UseBasicParsing
 | **同一句念两遍**（尤其「干完活」） | 数网关进程数，必须是 1；两个进程会各念一遍（见 4.2g） |
 | DSH 状态太吵 | `dsh.speak_tools=false`（当前）；再嫌吵把 `dsh.enabled` 设 false |
 | 识屏接不上 | `ledger.jsonl` 有没有 `"scenario":"vision"`；`inject_max_hours` 是否过期 |
+| 她对着游戏说不出玩法/术语/界面 | `GET /lore` 看看有没有这本手册；日志有没有 `资料：给《…》做了本手册`；没有就 `lore.py learn`（见 4.2v） |
+| 手册学出来是空的/只有半截 | `lore.model` 是不是被改回了推理模型；`summarize_max_tokens` 是不是太小（见 4.2v.3） |
+| 她每轮都在念刚学的名词 | 检查资料是不是又被改成常驻注入了；正常只在相关时给 3 段，还带「用不上别提」（见 4.2v.5） |
+| 「时效」里出现当天的日期 | 模型把示例日期抄进去了；`sanitize_dates` 会抹掉，若还在说明原料里真有这个日期，或者代码没重启（见 4.2v.3） |
 | 记忆没进 | `paopao_memory.py health` 的 `pet_writes`；`gateway.log` 有没有「记忆信箱已投递」 |
 | 音频目录越来越大 | `tts.retention_days` 与 janitor 日志「清理 N 个过期语音文件」 |
 

@@ -42,7 +42,7 @@ if (-not (Test-Path "$here\config.json")) {
 } else {
     Write-Host "  config.json 已存在，没动它"
 }
-New-Item -ItemType Directory -Force -Path "$here\logs", "$here\audio" | Out-Null
+New-Item -ItemType Directory -Force -Path "$here\logs", "$here\audio", "$here\lore" | Out-Null
 
 Write-Host "== 5/5 Edge 桌面快捷方式（B站视频模式要读播放进度）" -ForegroundColor Cyan
 if (Test-Path "$here\browser_ext\manifest.json") {

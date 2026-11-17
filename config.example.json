@@ -176,5 +176,38 @@
     "vision_black_ratio": 0.92,
     "vision_black_frames": 2,
     "fix_black_request_image": true,
-    "mode_feedback": true
+    "mode_feedback": true,
+    "lore": {
+        "enabled": true,
+        "dir": "lore",
+        "auto_learn": true,
+        "prebuild": true,
+        "poll_seconds": 45,
+        "cooldown_minutes": 720,
+        "refresh_days": 30,
+        "stale_days": 60,
+        "max_chunks": 3,
+        "budget_chars": 520,
+        "chunk_chars": 380,
+        "model": "deepseek-chat",
+        "summarize_max_tokens": 2400,
+        "moegirl": {
+            "enabled": true,
+            "max_chars": 12000
+        },
+        "bili": {
+            "enabled": true,
+            "videos": 2,
+            "max_chars": 2400,
+            "timeout": 150
+        },
+        "progress": {
+            "enabled": true,
+            "minutes": 30,
+            "min_rows": 2,
+            "window_minutes": 40,
+            "max_age_days": 7,
+            "max_chars": 120
+        }
+    }
 }

@@ -54,6 +54,7 @@ from video_watch import VideoWatcher
 from bubble_bridge import BubbleBridge
 from voice_mode import VoiceMode, LOOK_HINTS
 from player_watch import PlayerWatch
+from lore import Lore, LoreKeeper, ProgressKeeper
 import phrases as fixed_phrases
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -149,6 +150,27 @@ DEFAULTS = {
         "subtitle_window_seconds": 90,
         "subtitle_cache_hours": 24,
         "bili_cli": "bili",
+    },
+    # 作品的「肚子里的资料」：后台自己查百科 + B站攻略，总结成本地手册；识屏/语音按需检索。
+    # 手册不是常驻注入的（常驻她会逮着名词乱抖），只有画面/问题里出现线索才递一两段。
+    "lore": {
+        "enabled": True,
+        "dir": "lore",
+        "auto_learn": True,
+        "prebuild": True,
+        "poll_seconds": 45,
+        "cooldown_minutes": 720,
+        "refresh_days": 30,
+        "stale_days": 60,
+        "max_chunks": 3,
+        "budget_chars": 520,
+        "chunk_chars": 380,
+        "model": "deepseek-chat",
+        "summarize_max_tokens": 2400,
+        "moegirl": {"enabled": True, "max_chars": 12000},
+        "bili": {"enabled": True, "videos": 2, "max_chars": 2400, "timeout": 150},
+        "progress": {"enabled": True, "minutes": 30, "min_rows": 2,
+                     "window_minutes": 40, "max_age_days": 7, "max_chars": 120},
     },
     # 看到不认识的游戏/番剧，自己问一下写进 titles.json（作品小抄）
     "title_learner": {
@@ -2168,6 +2190,12 @@ class TitleLearner(threading.Thread):
             log.warning("作品小抄：写不进去（%s）", exc)
             return
         log.info("作品小抄：自动记下「%s」（%s，共 %d 条）", name, kind or "未知", total)
+        # 光知道名字不够：顺手排一课，把玩法/术语/角色也补成手册（后台慢慢查）
+        if kind in ("game", "anime") and getattr(self.gateway, "lore", None) is not None:
+            try:
+                self.gateway.lore.ensure(name, kind, aliases=list(updates.keys()))
+            except Exception as exc:  # noqa: BLE001
+                log.info("资料库排课没成（不影响小抄）：%s", exc)
 
 
 class GameWatcher(threading.Thread):
@@ -2926,6 +2954,13 @@ class Gateway:
         # 看到不认识的游戏/番剧，自己查一下补进 titles.json（作品小抄）
         self.title_learner = TitleLearner(cfg, self)
         self.title_learner.start()
+        # 作品的「肚子里的资料」：自己查百科+攻略 → 总结成本地手册；识屏/语音按需检索
+        self.lore = Lore(cfg, self)
+        self.lore_keeper = LoreKeeper(cfg, self, self.lore)
+        self.lore.keeper = self.lore_keeper
+        self.lore_keeper.start()
+        self.lore_progress = ProgressKeeper(cfg, self, self.lore)
+        self.lore_progress.start()
         # 前台是游戏、稳着待够 2 分钟：自动进游戏模式（不看键鼠活跃度）
         self.game_watch = GameWatcher(cfg, self)
         self.game_watch.start()
@@ -3155,6 +3190,13 @@ class Gateway:
         note = title_hint(app, title)
         if note:
             context.append("【这个作品你认识】%s" % note)
+        # 问到的作品不熟时顺手排一课（后台查，不挡这句话）；有资料就递一两段最相关的。
+        try:
+            lore_block = self.lore.block(app=app, title=title, query=text, allow_queue=True)
+            if lore_block:
+                context.append(lore_block)
+        except Exception as exc:  # noqa: BLE001
+            log.info("语音资料检索没成（不影响回答）：%s", exc)
         try:
             rows = self.ledger.recent_vision(1, 15)
             if rows:
@@ -3615,6 +3657,21 @@ class Gateway:
             elif title or app:
                 # 记一笔，方便以后往 titles.json 里补
                 log.info("识屏：小抄里没有这个作品（%s）", (title or app)[:40])
+            # 「肚子里的资料」：只有画面/问话里出现相关线索才递一两段，用不上就一个字不提。
+            try:
+                lore_block = self.lore.block(app=app, title=title, query=user_text)
+            except Exception as exc:  # noqa: BLE001
+                lore_block = ""
+                log.info("资料库检索没成（不影响识屏）：%s", exc)
+            if lore_block:
+                messages.insert(0, {"role": "system", "content": lore_block})
+                log.info("识屏：带上资料（%s）", (title or app or "?")[:30])
+            elif self.mode.get() == GAME_MODE:
+                # 打游戏时没有问话也要能接上话：只给「一句话」，不给大段资料
+                headline = self.lore.headline(app=app, title=title)
+                if headline:
+                    messages.insert(0, {"role": "system", "content": headline})
+                    log.info("识屏：带上资料一句话（%s）", (title or app or "?")[:30])
             if self.cfg.get("see_howto", True):
                 messages.insert(0, {"role": "system", "content": build_see_howto()})
 
@@ -3650,6 +3707,16 @@ class Gateway:
             if block:
                 messages.insert(0, {"role": "system", "content": block})
                 log.info("注入识屏：近况 %d 条 + 摘要 %d 字", len(rows), len(digest))
+            # 聊天里提到她学过的游戏/番剧，就把相关的一两段资料递过去（没提到就什么都不加）
+            if getattr(self, "lore", None) is not None:
+                try:
+                    lore_block = self.lore.block(query=user_text, allow_queue=True)
+                except Exception as exc:  # noqa: BLE001
+                    lore_block = ""
+                    log.info("聊天资料检索没成（不影响聊天）：%s", exc)
+                if lore_block:
+                    messages.insert(0, {"role": "system", "content": lore_block})
+                    log.info("聊天：带上资料")
         # 自动/普通模式下的识屏：说清「这是你自己瞥了一眼」，别当成老大在跟她说话
         if scenario == "vision" and self.mode.get() in ("auto", "normal"):
             messages.insert(0, {"role": "system", "content":
@@ -3727,6 +3794,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "count": len(notes), "items": notes,
                              "path": TITLES_PATH})
             return
+        if self.path.startswith("/lore"):
+            self._handle_lore()
+            return
         if self.path.startswith("/doctor"):
             self._handle_doctor()
             return
@@ -3766,6 +3836,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_warm()
         elif path.endswith("/titles"):
             self._handle_titles()
+        elif path.endswith("/lore"):
+            self._handle_lore()
         elif path.endswith("/voice/input"):
             self._handle_voice_input()
         elif path.endswith("/voice"):
@@ -3936,6 +4008,11 @@ class Handler(BaseHTTPRequestHandler):
             "player": getattr(g, "player", None).status() if getattr(g, "player", None) else None,
             "bubble": getattr(g, "bubble", None).status() if getattr(g, "bubble", None) else None,
             "voice": getattr(g, "voice", None).status() if getattr(g, "voice", None) else None,
+            "lore": (lambda lo: {
+                "count": len(lo.store.entries),
+                "names": [m.get("name") for m in lo.store.entries.values()],
+                "keeper": lo.keeper.status() if lo.keeper is not None else None,
+            })(g.lore) if getattr(g, "lore", None) is not None else None,
         })
 
     def _handle_doctor(self):
@@ -3988,6 +4065,10 @@ class Handler(BaseHTTPRequestHandler):
                     st.get("mode"), st.get("state"), st.get("hotkey")),
             })(getattr(g, "voice", None).status() if getattr(g, "voice", None) else {}),
             "ledger": {"ok": os.path.exists(g.ledger.path), "detail": g.ledger.path},
+            "lore": {"ok": bool(getattr(g, "lore", None) and g.lore.enabled),
+                     "detail": "资料库 %d 本手册（%s）" % (
+                         len(g.lore.store.entries) if getattr(g, "lore", None) else 0,
+                         g.lore.base if getattr(g, "lore", None) else "没起来")},
         }
         self._send_json({"ok": all(c["ok"] for c in checks.values()), "checks": checks})
 
@@ -4052,6 +4133,54 @@ class Handler(BaseHTTPRequestHandler):
             return
         log.info("作品小抄加了 %d 条：%s", len(added), "、".join(added[:6]))
         self._send_json({"ok": True, "added": added, "count": total})
+
+    def _handle_lore(self):
+        """资料库：GET 看状态；POST {action: learn|forget|retrieve|ensure|status}。"""
+        g = GATEWAY
+        lo = getattr(g, "lore", None)
+        if lo is None:
+            self._send_json({"ok": False, "error": "资料库没起来"}, 503)
+            return
+        if self.command == "GET":
+            self._send_json(lo.status())
+            return
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"error": "bad json"}, 400)
+            return
+        action = str(req.get("action") or "status").lower()
+        name = str(req.get("name") or "").strip()
+        kind = str(req.get("kind") or "game").strip().lower()
+        aliases = [str(a) for a in (req.get("aliases") or []) if str(a).strip()]
+        if action == "learn":
+            if not name:
+                self._send_json({"ok": False, "error": "缺 name"}, 400)
+                return
+            res = lo.learn_now(name, kind, aliases=aliases)
+            self._send_json(res, 200 if res.get("ok") else 500)
+        elif action == "ensure":
+            if not name:
+                self._send_json({"ok": False, "error": "缺 name"}, 400)
+                return
+            lo.ensure(name, kind, aliases=aliases)
+            self._send_json({"ok": True, "queued": name})
+        elif action == "forget":
+            if not name:
+                self._send_json({"ok": False, "error": "缺 name"}, 400)
+                return
+            res = lo.forget(name)
+            self._send_json(res, 200 if res.get("ok") else 404)
+        elif action == "retrieve":
+            query = str(req.get("query") or "")
+            hits = lo.retrieve(query, game=str(req.get("game") or ""))
+            self._send_json({"ok": True, "hits": [
+                {"name": h["name"], "heading": h["heading"], "score": h["score"],
+                 "text": h["text"]} for h in hits]})
+        elif action == "status":
+            self._send_json(lo.status())
+        else:
+            self._send_json({"ok": False, "error": "action 只能是 learn/ensure/forget/retrieve/status"}, 400)
 
     def _handle_warm(self):
         """重新预热固定句子（DSH 状态、气泡文案）；force=true 时先删缓存重合成。"""
