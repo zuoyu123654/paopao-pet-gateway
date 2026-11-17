@@ -196,6 +196,7 @@ class VoiceMode(threading.Thread):
         self.turns = 0
         self._last_rms = 0.0
         self._last_voiced = 0.0
+        self._last_voiced_at = 0.0
         self._listening_shown = False
         # 这一次「开口」的时间戳（第一个超过阈值的音频块）：语音问答要拿这一刻的屏幕
         self.last_onset_at = 0.0
@@ -234,8 +235,10 @@ class VoiceMode(threading.Thread):
                 "last_text": self.last_text[:80], "error": self.last_error}
 
     def is_speaking(self) -> bool:
-        """这一句里已经检测到有效人声（电话/按键都算）。"""
-        return bool(self.recording.is_set() and getattr(self, "_last_voiced", 0.0) > 0)
+        """这一刻是不是正在出声：不拿几十秒前的残留人声当「还在说」。"""
+        if not self.recording.is_set() or getattr(self, "_last_voiced", 0.0) <= 0:
+            return False
+        return (time.time() - float(getattr(self, "_last_voiced_at", 0.0) or 0.0)) < 0.8
 
     # ------------------------------------------------------------ 内部
     def _bubble(self, text: str, duration_ms: int = 0) -> None:
@@ -472,6 +475,7 @@ class VoiceMode(threading.Thread):
         blocks: "queue.Queue" = queue.Queue()
         self._last_blocks = 0
         self._last_voiced = 0.0
+        self._last_voiced_at = 0.0
 
         def cb(indata, frames, time_info, status):  # noqa: ANN001
             if self.cancel.is_set():
@@ -518,6 +522,7 @@ class VoiceMode(threading.Thread):
                     self._last_rms = rms
                     if rms >= self.threshold:
                         self._last_voiced += BLOCK_SECONDS
+                        self._last_voiced_at = time.time()
                         if not heard:
                             self.last_onset_at = time.time()
                             heard = True
