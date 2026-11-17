@@ -229,5 +229,9 @@
         "max_age_hours": 168,
         "max_items": 300,
         "inject_items": 3
+    },
+    "game_versions": {
+        "enabled": true,
+        "check_minutes": 360
     }
 }

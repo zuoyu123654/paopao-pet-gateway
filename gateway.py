@@ -56,7 +56,7 @@ from bubble_bridge import BubbleBridge
 from voice_mode import VoiceMode, LOOK_HINTS
 from player_watch import PlayerWatch
 from lore import Lore, LoreKeeper, ProgressKeeper, clean_query
-from game_versions import installed_versions
+from game_versions import current_versions
 import phrases as fixed_phrases
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -403,6 +403,10 @@ def save_title_notes(updates: dict) -> int:
     return len(data)
 
 
+def _version_tuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or ""))[:3]) or (0,)
+
+
 def rotate_title_version(title: str, version: str) -> bool:
     """游戏版本变了：latest 轮换 +1，满 3 次删除；只动写了手册的游戏。"""
     version = str(version or "").strip()
@@ -419,8 +423,8 @@ def rotate_title_version(title: str, version: str) -> bool:
         if not isinstance(entry, dict):
             continue
         old = str(entry.get("version") or "").strip()
-        if old == version:
-            continue
+        if old and _version_tuple(version) <= _version_tuple(old):
+            continue  # 只升不降：官网/注册表偶尔短暂回退，别把 latest 轮换乱了
         if old:
             kept = []
             for item in entry.get("latest") or []:
@@ -446,6 +450,49 @@ def rotate_title_version(title: str, version: str) -> bool:
         os.replace(tmp, TITLES_PATH)
         title_notes(refresh=True)
     return changed
+
+
+def add_latest_updates(title: str, version: str, texts: list[str]) -> int:
+    """把自动提取的新角色/新地区追加到 latest；去重、限量。"""
+    version = str(version or "").strip()
+    clean = [str(x).strip() for x in (texts or []) if str(x).strip()]
+    if not version or not clean:
+        return 0
+    try:
+        with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return 0
+    added = 0
+    for key in GAME_VERSION_ALIASES.get(title, (title,)):
+        entry = data.get(key)
+        if not isinstance(entry, dict):
+            continue
+        latest = [x for x in (entry.get("latest") or []) if isinstance(x, dict)]
+        existing = {str(x.get("text") or "") for x in latest}
+        visual = str(entry.get("visual") or "")
+        for text in clean:
+            if text in existing or text in visual:
+                continue
+            latest.append({"text": text, "version": version,
+                           "priority": 100, "rounds": 0})
+            existing.add(text)
+            added += 1
+        # 只留优先级最高的 5 条
+        latest.sort(key=lambda x: -int(x.get("priority", 0) or 0))
+        entry["latest"] = latest[:5]
+        entry["version"] = version
+        entry["version_checked_at"] = time.strftime("%Y-%m-%d")
+        entry["visual_at"] = time.strftime("%Y-%m-%d")
+    if added:
+        tmp = TITLES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            f.write("\n")
+        os.replace(tmp, TITLES_PATH)
+        title_notes(refresh=True)
+        log.info("版本内容：%s %s 新增 %d 条 latest", title, version, added)
+    return added
 
 
 def build_see_howto() -> str:
@@ -2435,10 +2482,11 @@ class GameVersionWatcher(threading.Thread):
         time.sleep(15)  # 等 titles 加载完
         while True:
             try:
-                versions = installed_versions()
+                versions = current_versions()
                 for title, ver in versions.items():
                     if title in GAME_VERSION_ALIASES:
-                        rotate_title_version(title, ver)
+                        if rotate_title_version(title, ver):
+                            self.gateway.refresh_game_updates(title, ver)
             except Exception as exc:  # noqa: BLE001
                 log.info("版本检查没成（不影响使用）：%s", exc)
             time.sleep(self.interval)
@@ -3673,6 +3721,56 @@ class Gateway:
             self._proactive_self = (bool(on), time.time())
         return ok
 
+    def refresh_game_updates(self, title: str, version: str) -> int:
+        """版本变了：从官方公告/wiki版本页提取新角色/新地区，写进 latest。
+
+        只提取原文明确出现的名字；模型返回的名字必须在原文里能找到，否则丢掉。
+        """
+        from game_versions import announcement_text
+
+        text = announcement_text(title, version)
+        if not text:
+            log.info("版本内容：%s %s 没找到官方版本页，先不自动补", title, version)
+            return 0
+        prompt = (
+            "下面是《%s》%s 版本的官方更新公告/版本页原文。\n"
+            "只提取这个版本**新上线**的角色和地区（新地图/新区域）。\n"
+            "角色最多 6 个，地区最多 3 个；每条格式「名字=身份/一眼特征」，不超过 25 字。\n"
+            "不要写「S级/限定/卡池/全新/强势」这种宣传词，写他/她是谁、长什么样；\n"
+            "只写原文里明确出现的名字；原文没写、你不确定的，一律不要写，不要编。\n"
+            "只回 JSON，不要解释：{\"characters\":[\"名字=特征\"],\"regions\":[\"地区=特征\"]}\n\n"
+            "原文：\n%s" % (title, version, text[:12000])
+        )
+        payload = {
+            "model": self.cfg.get("model") or "deepseek-v4-flash",
+            "max_tokens": 500, "temperature": 0.2, "stream": False,
+            "messages": [
+                {"role": "system", "content": "你只做版本内容提取，只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        try:
+            data = self.post_once(payload)
+            raw = (data["choices"][0]["message"].get("content") or "").strip()
+            raw = raw.strip("`").strip()
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+            obj = json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            log.info("版本内容：%s %s 提取失败（%s）", title, version, exc)
+            return 0
+        texts = []
+        for key, prefix in (("characters", "新角色"), ("regions", "新地区")):
+            for item in (obj.get(key) or [])[:6]:
+                item = str(item or "").strip()
+                if not item:
+                    continue
+                name = re.split(r"[=:：]", item, 1)[0].strip()
+                if name and name not in text:
+                    continue
+                texts.append("%s：%s" % (prefix, item[:40]))
+        return add_latest_updates(title, version, texts)
+
     def _mode_lock_loop(self) -> None:
         """托盘里手动选的模式锁几分钟（默认 5 分钟），**锁到期不退出**。
 
@@ -4689,7 +4787,7 @@ class Handler(BaseHTTPRequestHandler):
                           (None if lock_until == float("inf")
                            else max(0, int(lock_until - time.time()))))
         try:
-            game_versions = installed_versions()
+            game_versions = current_versions()
         except Exception:  # noqa: BLE001
             game_versions = {}
         self._send_json({
