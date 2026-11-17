@@ -3338,9 +3338,10 @@ class Gateway:
             {"role": "system", "content": self._persona()},
         ]
         # 自己看一眼这条捷径也要守「看片专心」的规矩，不然看番时照样催睡觉
-        watching = self.mode.get()
-        if self.cfg.get("watch_focus", True) and watching in FOCUS_MODES:
-            messages.append({"role": "system", "content": build_watch_focus(watching)})
+        mode = self.mode.get()
+        in_focus = mode in FOCUS_MODES
+        if self.cfg.get("watch_focus", True) and in_focus:
+            messages.append({"role": "system", "content": build_watch_focus(mode)})
         # 「先看清再说话」和作品小抄，这条路也不能少（它不走 prepare）
         if self.cfg.get("see_howto", True):
             messages.append({"role": "system", "content": build_see_howto()})
@@ -3348,6 +3349,53 @@ class Gateway:
         if note:
             messages.append({"role": "system", "content": (
                 "【这个作品你认识】%s\n（这是你自己的印象，顺着聊就行，别背简介、别逐字念。）" % note)})
+
+        # 两套识屏共用同一份上下文（2026-11-17 打通）：
+        #   * 之前看到过什么（账本里她看的 + 我们自己看的）
+        #   * 老大教过的事（facts）
+        #   * 作品资料（lore；只在这条路真带了问题/正在打游戏时给）
+        #   * 播放器进度（B站视频模式）
+        context_blocks: list[str] = []
+        try:
+            prev = self.ledger.recent_vision_for_app(
+                app,
+                max_minutes=float(self.cfg.get("vision_context_minutes", 30)),
+                budget_chars=int(self.cfg.get("vision_context_budget_chars", 600)),
+                item_chars=int(self.cfg.get("vision_context_item_chars", 90)),
+                max_items=int(self.cfg.get("vision_context_entries", 6)),
+            )
+            block = build_vision_context(prev, hide_clock=in_focus)
+            if block:
+                context_blocks.append(block)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("自己看一眼：近况没取出来：%s", exc)
+        try:
+            facts_block = self._facts_block(app, title)
+            if facts_block:
+                context_blocks.append(facts_block)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            lore_block = ""
+            if prompt:
+                lore_block = self.lore.block(app=app, title=title, query=prompt)
+            if not lore_block and mode == GAME_MODE:
+                lore_block = self.lore.headline(app=app, title=title)
+            if lore_block:
+                context_blocks.append(lore_block)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("自己看一眼：资料没取出来：%s", exc)
+        try:
+            if getattr(self, "player", None) is not None:
+                player_block = self.player.context_block()
+                if player_block:
+                    context_blocks.append(player_block)
+        except Exception:  # noqa: BLE001
+            pass
+        for line in context_blocks:
+            messages.append({"role": "system", "content": line})
+        if context_blocks:
+            log.info("自己看一眼：带上 %d 段共享上下文", len(context_blocks))
         messages.append({"role": "user", "content": parts})
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
                    "messages": messages, "max_tokens": 400, "stream": False}
@@ -3358,7 +3406,10 @@ class Gateway:
             reply = ""
         if reply:
             self.speech.say(reply, tag="vision")
-            self.ledger.add("vision", "（自己看一眼）", reply, {"own": True})
+            # 记进账本时带上前台：不然她的识屏上下文按 App 匹配时永远对不上这一条
+            label = ("（自己看一眼：前台应用为 %s | %s）" % (app or "?", title or "?")
+                     if (app or title) else "（自己看一眼）")
+            self.ledger.add("vision", label, reply, {"own": True})
             self.stats["vision"] = self.stats.get("vision", 0) + 1
             self.last_vision_at = time.time()
             # 自己看的这一眼也要进中枢：不然 QQ 那边永远不知道我们今晚看到过什么
