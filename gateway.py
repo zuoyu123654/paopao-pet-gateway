@@ -56,6 +56,7 @@ from bubble_bridge import BubbleBridge
 from voice_mode import VoiceMode, LOOK_HINTS
 from player_watch import PlayerWatch
 from lore import Lore, LoreKeeper, ProgressKeeper, clean_query
+from game_versions import installed_versions
 import phrases as fixed_phrases
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -188,6 +189,11 @@ DEFAULTS = {
         "min_checks": 2,
         "cooldown_minutes": 360,
     },
+    # 只对写进手册的游戏读本机版本号（注册表），版本变了轮换 latest
+    "game_versions": {
+        "enabled": True,
+        "check_minutes": 360,
+    },
     "vision_context_entries": 6,
     "vision_context_minutes": 30,
     "vision_context_budget_chars": 600,
@@ -226,16 +232,24 @@ log = logging.getLogger("petgw")
 # 值可以是一句话（老格式），也可以是 {"kind": "game|anime|video", "note": "..."}——
 # kind 是给「游戏模式自动进」判断用的（前台是游戏才自动进）。
 TITLES_PATH = os.path.join(APP_DIR, "titles.json")
+GAME_VERSION_ALIASES = {
+    "原神": ("原神", "yuanshen", "genshin"),
+    "崩坏：星穹铁道": ("崩坏：星穹铁道", "星穹铁道", "starrail", "崩坏星穹铁道"),
+    "绝区零": ("绝区零", "zenlesszonezero"),
+    "异环": ("异环", "htgame"),
+}
 _TITLE_NOTES: dict[str, str] = {}
 _TITLE_KINDS: dict[str, str] = {}
 _TITLE_VISUALS: dict[str, str] = {}
 _TITLE_VISUAL_AT: dict[str, str] = {}
+_TITLE_LATEST: dict[str, list] = {}
+_TITLE_VERSION: dict[str, str] = {}
 _TITLE_MTIME = 0.0
 
 
 def title_notes(refresh: bool = False) -> dict[str, str]:
     """读 titles.json（改了不用重启，按修改时间自动重载）。"""
-    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT, _TITLE_MTIME
+    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT, _TITLE_LATEST, _TITLE_VERSION, _TITLE_MTIME
     try:
         mtime = os.path.getmtime(TITLES_PATH)
     except OSError:
@@ -248,6 +262,8 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
             kinds: dict[str, str] = {}
             visuals: dict[str, str] = {}
             visual_at: dict[str, str] = {}
+            latest: dict[str, list] = {}
+            versions: dict[str, str] = {}
             for k, v in (data or {}).items():
                 key = str(k).strip().lower()
                 if not key:
@@ -257,8 +273,10 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                     kind = str(v.get("kind") or "").strip().lower()
                     visual = str(v.get("visual") or "").strip()
                     vat = str(v.get("visual_at") or "").strip()
+                    lst = v.get("latest")
+                    ver = str(v.get("version") or "").strip()
                 else:
-                    note, kind, visual, vat = str(v).strip(), "", "", ""
+                    note, kind, visual, vat, lst, ver = str(v).strip(), "", "", "", None, ""
                 if note:
                     notes[key] = note
                     kinds[key] = kind
@@ -266,8 +284,13 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                         visuals[key] = visual
                     if vat:
                         visual_at[key] = vat
+                    if isinstance(lst, list):
+                        latest[key] = lst
+                    if ver:
+                        versions[key] = ver
             _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT = (
                 notes, kinds, visuals, visual_at)
+            _TITLE_LATEST, _TITLE_VERSION = latest, versions
             _TITLE_MTIME = mtime
         except Exception as exc:  # noqa: BLE001
             log.warning("titles.json 读不了（先不注入小抄）：%s", exc)
@@ -305,12 +328,26 @@ def title_visual(app: str = "", title: str = "") -> str:
 
 
 def title_visual_with_age(app: str = "", title: str = "") -> str:
-    """外观线索 + 过期提醒：列表是静态的，太久没更新就别让她当权威。"""
+    """外观线索 + 新版本条目 + 过期提醒。"""
     key = _title_key(app, title)
     if not key:
         return ""
     visual = _TITLE_VISUALS.get(key, "")
     at = _TITLE_VISUAL_AT.get(key, "")
+    latest = _TITLE_LATEST.get(key) or []
+    parts: list[str] = []
+    for item in sorted(
+            [x for x in latest if isinstance(x, dict)],
+            key=lambda x: (-int(x.get("priority", 0) or 0), int(x.get("rounds", 0) or 0))):
+        text = str(item.get("text") or "").strip()
+        if not text or int(item.get("rounds", 0) or 0) >= 3:
+            continue
+        if text not in visual and text not in parts:
+            parts.append(text)
+    if parts:
+        head = "【新版本】" + "；".join(parts)
+        visual = (head + "｜" + visual) if visual else head
+    visual = visual[:520]
     if visual and at:
         try:
             age = (time.time() - time.mktime(time.strptime(at, "%Y-%m-%d"))) / 86400
@@ -364,6 +401,51 @@ def save_title_notes(updates: dict) -> int:
     os.replace(tmp, TITLES_PATH)
     title_notes(refresh=True)
     return len(data)
+
+
+def rotate_title_version(title: str, version: str) -> bool:
+    """游戏版本变了：latest 轮换 +1，满 3 次删除；只动写了手册的游戏。"""
+    version = str(version or "").strip()
+    if not version:
+        return False
+    try:
+        with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return False
+    changed = False
+    for key in GAME_VERSION_ALIASES.get(title, (title,)):
+        entry = data.get(key)
+        if not isinstance(entry, dict):
+            continue
+        old = str(entry.get("version") or "").strip()
+        if old == version:
+            continue
+        if old:
+            kept = []
+            for item in entry.get("latest") or []:
+                if not isinstance(item, dict):
+                    continue
+                rounds = int(item.get("rounds", 0) or 0) + 1
+                if rounds >= 3:
+                    continue
+                copy = dict(item)
+                copy["rounds"] = rounds
+                kept.append(copy)
+            entry["latest"] = kept
+        entry["version"] = version
+        entry["version_checked_at"] = time.strftime("%Y-%m-%d")
+        changed = True
+        log.info("游戏版本：%s %s → %s（latest 轮换 %d 条）",
+                 title, old or "?", version, len(entry.get("latest") or []))
+    if changed:
+        tmp = TITLES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            f.write("\n")
+        os.replace(tmp, TITLES_PATH)
+        title_notes(refresh=True)
+    return changed
 
 
 def build_see_howto() -> str:
@@ -2333,6 +2415,35 @@ class TitleLearner(threading.Thread):
                 log.info("资料库排课没成（不影响小抄）：%s", exc)
 
 
+class GameVersionWatcher(threading.Thread):
+    """只盯写进手册的几款游戏：读注册表版本号，版本变了轮换 latest。
+
+    不认识的游戏不查；读不到注册表就不动，绝不猜版本。
+    """
+
+    def __init__(self, cfg: dict, gateway):
+        super().__init__(name="game-versions", daemon=True)
+        conf = cfg.get("game_versions") or {}
+        self.cfg = cfg
+        self.gateway = gateway
+        self.enabled = bool(conf.get("enabled", True))
+        self.interval = max(60.0, float(conf.get("check_minutes", 360)) * 60)
+
+    def run(self) -> None:
+        if not self.enabled:
+            return
+        time.sleep(15)  # 等 titles 加载完
+        while True:
+            try:
+                versions = installed_versions()
+                for title, ver in versions.items():
+                    if title in GAME_VERSION_ALIASES:
+                        rotate_title_version(title, ver)
+            except Exception as exc:  # noqa: BLE001
+                log.info("版本检查没成（不影响使用）：%s", exc)
+            time.sleep(self.interval)
+
+
 class GameWatcher(threading.Thread):
     """前台是游戏、并且**稳着待够 enter_seconds**，就自动进游戏模式（老大 2026-11-17 要的）。
 
@@ -3357,6 +3468,8 @@ class Gateway:
         # 看到不认识的游戏/番剧，自己查一下补进 titles.json（作品小抄）
         self.title_learner = TitleLearner(cfg, self)
         self.title_learner.start()
+        self.game_versions = GameVersionWatcher(cfg, self)
+        self.game_versions.start()
         # 作品的「肚子里的资料」：自己查百科+攻略 → 总结成本地手册；识屏/语音按需检索
         self.lore = Lore(cfg, self)
         self.lore_keeper = LoreKeeper(cfg, self, self.lore)
@@ -4575,6 +4688,10 @@ class Handler(BaseHTTPRequestHandler):
         lock_remaining = (0 if lock_until <= 0 else
                           (None if lock_until == float("inf")
                            else max(0, int(lock_until - time.time()))))
+        try:
+            game_versions = installed_versions()
+        except Exception:  # noqa: BLE001
+            game_versions = {}
         self._send_json({
             "ok": True,
             "mode": g.mode.get(),
@@ -4583,6 +4700,7 @@ class Handler(BaseHTTPRequestHandler):
             "mode_lock_forever": bool(getattr(g.mode, "lock_forever", False)),
             "mode_lock_minutes": float(g.cfg.get("mode_lock_minutes", 5)),
             "mode_lock_remaining": lock_remaining,
+            "game_versions": game_versions,
             "front": front,
             "titles": len(title_notes()),
             "frames": frames,
