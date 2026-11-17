@@ -536,8 +536,12 @@ class VideoWatcher(threading.Thread):
             self._events.popleft()
         return idle >= self.idle_seconds or len(self._events) <= self.events_max
 
-    def _video_source(self, app: str, title: str) -> str:
-        """区分「B站视频」和「通用视频」：托盘那边靠 source 决定勾哪一项。"""
+    def _video_target(self, app: str, title: str) -> tuple[str, str]:
+        """自动判定该进哪个模式：番剧 / 直播 / B站视频 / 通用视频。
+
+        托盘那边靠 (mode, source) 决定勾哪一项；以前只有 video 一种，B站看番
+        也会显示成「B站视频」。
+        """
         hay = ("%s %s" % (app or "", title or "")).lower()
         url = ""
         try:
@@ -546,9 +550,17 @@ class VideoWatcher(threading.Thread):
             url = str((snap or {}).get("url") or "").lower()
         except Exception:  # noqa: BLE001
             pass
+        if "bangumi" in url or "番剧" in hay or ("动画" in hay and "第" in hay and "集" in hay):
+            return "anime", "auto-anime"
+        if "live.bilibili" in url or ("直播" in hay and not any(
+                w in hay for w in ("回放", "录播", "切片", "解说"))):
+            return "live", "auto-live"
         if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
-            return "auto-video-bili"
-        return "auto-video"
+            return "video", "auto-video-bili"
+        return "video", "auto-video"
+
+    def _video_source(self, app: str, title: str) -> str:
+        return self._video_target(app, title)[1]
 
     def _enter(self) -> None:
         with self.lock:
@@ -566,8 +578,9 @@ class VideoWatcher(threading.Thread):
         try:
             cur = self.gateway.mode.get()
             if cur == "auto":
-                self.gateway.mode.set("video", source=self._video_source(self.app, self.title))
-                log.info("通用视频模式：进入（%s｜%s）", self.app, self.title[:40])
+                target, source = self._video_target(self.app, self.title)
+                self.gateway.mode.set(target, source=source)
+                log.info("视频类模式：自动进入（%s｜%s，%s）", target, source, self.title[:40])
         except Exception as exc:  # noqa: BLE001
             log.warning("切到 video 模式失败：%s", exc)
 
@@ -628,9 +641,10 @@ class VideoWatcher(threading.Thread):
                             with self.lock:
                                 self.app, self.title = app, title
                                 self.session_since = now
-                            mode.set("video", source=self._video_source(app, title))
+                            target, source = self._video_target(app, title)
+                            mode.set(target, source=source)
                             self._enter()
-                            log.info("视频模式：从游戏接管（前台播放器 %s）", app)
+                            log.info("视频类模式：从游戏接管（%s｜%s）", target, app)
                     else:
                         self._game_seen = 0.0
                 return

@@ -2287,7 +2287,7 @@ class GameWatcher(threading.Thread):
                         log.info("游戏模式：自动进入（%s｜%s）", app, title[:40])
                 elif (cur in ("video", "anime", "live", "course")
                       and str(self.gateway.mode.source) in (
-                          "auto-video", "auto-video-bili", "video-leave")):
+                          "auto-video", "auto-video-bili", "auto-anime", "auto-live", "video-leave")):
                     # 刚才自动进了视频模式，现在前台换成游戏：不用等视频那边 5 分钟才走，
                     # 短暂确认后就接管（老大 2026-11-17 说「一堆问题」里的一个）。
                     if now - self.first_seen >= self.switch_seconds:
