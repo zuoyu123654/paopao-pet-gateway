@@ -516,7 +516,10 @@ class VoiceMode(threading.Thread):
                         if not heard:
                             self.last_onset_at = time.time()
                             heard = True
-                        if self._last_voiced >= self.onset_voiced:
+                        # 电话模式要等够「有效人声」才冒，短促一声不显示也不回复
+                        show_at = (self.call_min_voiced if self.mode == "call"
+                                   else self.onset_voiced)
+                        if self._last_voiced >= show_at:
                             self._show_listening()
                         silence = 0.0
                     elif heard:
