@@ -56,6 +56,37 @@ def find_character_pics(mid: str, names: list[str], max_pages: int = 10) -> dict
     return found
 
 
+def recent_character_pics(mid: str, max_pages: int = 3) -> dict[str, str]:
+    """最近几页里所有「海特洛特别资讯 | 角色名」的立绘。"""
+    found: dict[str, str] = {}
+    offset = ""
+    for _ in range(max_pages):
+        cmd = [_bili(), "--raw", "dynamic", "list", "--mid", str(mid), "--compact"]
+        if offset:
+            cmd += ["--offset", offset]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=60)
+            data = json.loads(proc.stdout).get("data") or {}
+        except Exception:
+            break
+        for item in data.get("items") or []:
+            opus = (((item.get("modules") or {}).get("module_dynamic") or {})
+                    .get("major") or {}).get("opus") or {}
+            m = re.search(r"海特洛特别资讯\s*[|｜]\s*(.+)$",
+                          str(opus.get("title") or ""))
+            if not m:
+                continue
+            name = m.group(1).strip()
+            pics = opus.get("pics") or []
+            if name and pics and name not in found:
+                found[name] = str(pics[0].get("url") or "")
+        offset = str(data.get("offset") or "")
+        if not offset:
+            break
+    return found
+
+
 def download_image(url: str, timeout: int = 20) -> bytes:
     req = urllib.request.Request(
         url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.bilibili.com/"})

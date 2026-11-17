@@ -495,6 +495,44 @@ def add_latest_updates(title: str, version: str, texts: list[str]) -> int:
     return added
 
 
+def add_preview_updates(title: str, texts: list[str]) -> int:
+    """预告立绘：追加 latest，但不改当前游戏版本，也不参与版本的“升/降”判断。"""
+    clean = [str(x).strip() for x in (texts or []) if str(x).strip()]
+    if not clean:
+        return 0
+    try:
+        with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return 0
+    added = 0
+    for key in GAME_VERSION_ALIASES.get(title, (title,)):
+        entry = data.get(key)
+        if not isinstance(entry, dict):
+            continue
+        latest = [x for x in (entry.get("latest") or []) if isinstance(x, dict)]
+        existing = {str(x.get("text") or "") for x in latest}
+        visual = str(entry.get("visual") or "")
+        for text in clean:
+            if text in existing or text in visual:
+                continue
+            latest.append({"text": text, "version": "preview",
+                           "priority": 95, "rounds": 0})
+            existing.add(text)
+            added += 1
+        latest.sort(key=lambda x: -int(x.get("priority", 0) or 0))
+        entry["latest"] = latest[:5]
+    if added:
+        tmp = TITLES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            f.write("\n")
+        os.replace(tmp, TITLES_PATH)
+        title_notes(refresh=True)
+        log.info("预告立绘：%s 新增 %d 条 latest", title, added)
+    return added
+
+
 def build_see_howto() -> str:
     """识屏时「怎么看」的规矩：先把场景看清楚，再挑一两句说出口。"""
     return "\n".join([
@@ -2487,6 +2525,10 @@ class GameVersionWatcher(threading.Thread):
                     if title in GAME_VERSION_ALIASES:
                         if rotate_title_version(title, ver):
                             self.gateway.refresh_game_updates(title, ver)
+                try:
+                    self.gateway.refresh_bili_previews("异环")
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception as exc:  # noqa: BLE001
                 log.info("版本检查没成（不影响使用）：%s", exc)
             time.sleep(self.interval)
@@ -3829,6 +3871,33 @@ class Gateway:
             except Exception as exc:  # noqa: BLE001
                 log.info("B站立绘「%s」外观描述没成：%s", name, exc)
         return out
+
+    def refresh_bili_previews(self, title: str) -> int:
+        """扫描最近官方动态里的「海特洛特别资讯 | 角色名」，补预告立绘。"""
+        from bili_visual import BILI_UID, recent_character_pics
+
+        mid = BILI_UID.get(title)
+        if not mid:
+            return 0
+        try:
+            with open(TITLES_PATH, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            entry = data.get(title) if isinstance(data.get(title), dict) else {}
+            known = str(entry.get("visual") or "") + " " + " ".join(
+                str(x.get("text") or "") for x in (entry.get("latest") or [])
+                if isinstance(x, dict))
+        except Exception:  # noqa: BLE001
+            known = ""
+        pics = recent_character_pics(mid, max_pages=3)
+        new_names = [n for n in pics if n not in known][:2]
+        if not new_names:
+            return 0
+        descs = self.enrich_bili_visuals(title, new_names)
+        texts = []
+        for desc in descs:
+            if desc.startswith("角色："):
+                texts.append("预告" + desc)
+        return add_preview_updates(title, texts)
 
     def _mode_lock_loop(self) -> None:
         """托盘里手动选的模式锁几分钟（默认 5 分钟），**锁到期不退出**。
