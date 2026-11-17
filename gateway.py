@@ -4190,6 +4190,55 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _voice_video_context(self) -> str:
+        """语音回答用的看片参考：标题/进度/字幕/转写；30 秒内同一段复用。"""
+        if self.mode.get() not in FOCUS_MODES or not getattr(self, "video", None):
+            return ""
+        try:
+            snap = self.player.snapshot() if getattr(self, "player", None) else {}
+        except Exception:  # noqa: BLE001
+            snap = {}
+        app = str((snap or {}).get("app") or "")
+        title = str((snap or {}).get("title") or getattr(self.video, "title", "") or "")
+        url = str((snap or {}).get("url") or "")
+        key = (self.mode.get(), app, title, url,
+               str((snap or {}).get("bvid") or ""),
+               str((snap or {}).get("page") or ""))
+        now = time.time()
+        ttl = float((self.cfg.get("voice") or {}).get("ref_context_seconds", 30))
+        cached_key, cached_text, cached_at = getattr(
+            self, "_voice_ref_cache", ("", "", 0.0))
+        if cached_key == key and now - cached_at <= ttl:
+            log.debug("语音参考：复用 %.0fs 缓存", now - cached_at)
+            return cached_text
+        parts = []
+        try:
+            ref = self.video.mode_context()
+            if ref:
+                parts.append(ref)
+        except Exception:  # noqa: BLE001
+            pass
+        player_block = ""
+        try:
+            if getattr(self, "player", None):
+                player_block = self.player.context_block()
+                if player_block:
+                    parts.append(player_block)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if not player_block or "B站字幕" not in player_block:
+                block = self.video.context_block()
+                if block:
+                    parts.append(block)
+        except Exception:  # noqa: BLE001
+            pass
+        text = "\n".join(parts)
+        self._voice_ref_cache = (key, text, now)
+        if text:
+            log.info("语音参考：重新取 %d 字（%s）", len(text), title[:30] or "?")
+        return text
+
     def voice_reply(self, text: str) -> str:
         """语音问一句 → 模型 → 她开口 + 头顶气泡（和 TTS 一起出）。"""
         text = str(text or "").strip()
@@ -4227,25 +4276,9 @@ class Gateway:
             if facts_block:
                 context.append(facts_block)
             if self.mode.get() in FOCUS_MODES and getattr(self, "video", None):
-                ref_block = self.video.mode_context()
+                ref_block = self._voice_video_context()
                 if ref_block:
                     context.append(ref_block)
-                # 语音问「这个视频讲了什么」也要和识屏一样带最近字幕/转写
-                player_block = ""
-                try:
-                    if getattr(self, "player", None):
-                        player_block = self.player.context_block()
-                        if player_block:
-                            context.append(player_block)
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    if not player_block or "B站字幕" not in player_block:
-                        block = self.video.context_block()
-                        if block:
-                            context.append(block)
-                except Exception:  # noqa: BLE001
-                    pass
         except Exception as exc:  # noqa: BLE001
             log.info("语音资料检索没成（不影响回答）：%s", exc)
         try:

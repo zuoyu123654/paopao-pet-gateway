@@ -123,7 +123,8 @@
         "screenshot": "always",
         "call_min_voiced": 0.5,
         "onset_voiced": 0.35,
-        "max_tokens": 800
+        "max_tokens": 800,
+        "ref_context_seconds": 30
     },
     "video_watch": {
         "enabled": true,

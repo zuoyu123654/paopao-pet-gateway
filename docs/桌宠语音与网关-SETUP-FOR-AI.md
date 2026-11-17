@@ -2807,8 +2807,9 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body $body `
 只有话里带「这个 / 看看 / 看一眼 / 屏幕 / 我这样」这类词，或者当前在视频模式，
 才顺手带一张当前帧。
 
-**看视频时语音问内容**：和识屏走同一套参考——当前播放器进度/字幕、最近转写/OCR
-都会塞进语音回答的 context；问「这个视频讲了什么」不再只拿到标题。
+**看视频时语音回答**：只要在 video/anime/live/course 模式，**所有语音回答**都和识屏走同一套参考——
+当前播放器进度/字幕、最近转写/OCR 都会塞进 context；参考内容缓存 30 秒
+（`voice.ref_context_seconds`），30 秒内复用，换标题/URL/直播间/集数或切模式立即失效重取。
 
 **半双工**：她说话的时候**不听**（没有回声消除，听自己的声音会自激）。
 `call` 模式是她说完自动开听音窗；真正的“她说着我插话”要耳机 + 回声消除，`barge_in`
@@ -2854,6 +2855,7 @@ Invoke-WebRequest http://127.0.0.1:9888/voice/input -Method POST -Body $b `
 | `max_record` / `min_record` | 30 / 0.3 | 秒 |
 | `energy_threshold` | 0.012 | 多大算“有人在说”；安静环境可降到 0.008 |
 | `max_tokens` | 800 | 语音回答预算；deepseek-flash 空回复时会自动抬到 1200 重试一次 |
+| `ref_context_seconds` | 30 | 看片时语音参考缓存；同一段 30 秒内复用，换内容立即失效 |
 | `no_speech_timeout` | 3.0 | 没人说话多久收工 |
 | `call_window` | 8 | 电话模式的听音窗 |
 | `device` | "" | 空=自动；可填序号或名字片段 |
