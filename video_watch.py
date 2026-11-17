@@ -557,6 +557,61 @@ class VideoWatcher(threading.Thread):
             "也别报在线人数/播放进度。" % "｜".join(bits)
         )
 
+    def _clean_ref_title(self, text: str) -> str:
+        s = str(text or "").strip()
+        if not s:
+            return ""
+        # Edge 窗口标题会带「和另外 N 个页面 - 个人 - Microsoft Edge」这种尾巴
+        s = re.sub(r"\s*和另外\s*\d+\s*个页面.*$", "", s, flags=re.I)
+        s = re.sub(r"\s*-\s*Microsoft\S*\s*Edge.*$", "", s, flags=re.I)
+        s = re.sub(r"\s*-\s*个人\s*-\s*.*$", "", s, flags=re.I)
+        return s.strip(" -|")[:100]
+
+    def mode_context(self) -> str:
+        """各模式的参考：视频/网课标题、番剧名、游戏名；通用视频要提醒标题可能不准。"""
+        try:
+            mode = self.gateway.mode.get()
+            source = str(self.gateway.mode.source)
+        except Exception:  # noqa: BLE001
+            return ""
+        if mode == "live":
+            return self.live_context()
+        if mode not in ("video", "anime", "course", "game"):
+            return ""
+        try:
+            snap = self.gateway.player.snapshot() if self.gateway.player else {}
+        except Exception:  # noqa: BLE001
+            snap = {}
+        title = self._clean_ref_title((snap or {}).get("title") or self.title)
+        if not title:
+            try:
+                app, title = foreground()
+                title = self._clean_ref_title(title)
+            except Exception:  # noqa: BLE001
+                title = ""
+        if mode == "game":
+            name = title or self._clean_ref_title(getattr(self, "app", ""))
+            if not name:
+                return ""
+            return ("【游戏参考】老大在玩：%s\n"
+                    "只是参考：认得出角色/玩法就自然聊，不确定的别编。" % name)
+        if not title:
+            return ""
+        if mode == "anime":
+            return ("【番剧参考】名字/标题：%s\n"
+                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title)
+        if mode == "course":
+            return ("【网课参考】标题：%s\n"
+                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title)
+        # mode == video：B站视频 / 通用视频
+        generic = ("generic" in source) or (source in ("auto-video", "video-leave"))
+        if generic:
+            return ("【网页视频参考】网页标题：%s\n"
+                    "通用视频的网页标题可能不准，只当线索，不要当成确定事实，"
+                    "更不要逐字念。" % title)
+        return ("【视频参考】标题：%s\n"
+                "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title)
+
     def context_block(self) -> str:
         with self.lock:
             rows = list(self.transcript)
