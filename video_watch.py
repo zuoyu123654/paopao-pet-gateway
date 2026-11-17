@@ -374,6 +374,7 @@ class VideoWatcher(threading.Thread):
         self.away_grace = float(self.conf.get("away_grace_seconds", 300))
         self.paused_grace = float(self.conf.get("paused_grace_seconds", 600))
         self.paused_away_grace = float(self.conf.get("paused_away_grace_seconds", 120))
+        self.switch_seconds = max(5.0, float(self.conf.get("switch_seconds", 20)))
         self.keep = int(self.conf.get("transcript_keep", 12))
         self.min_cjk = float(self.conf.get("asr_min_cjk_ratio", 0.25))
         self.speak_hint = bool(self.conf.get("speak_hint", True))
@@ -397,6 +398,7 @@ class VideoWatcher(threading.Thread):
         self.error = ""
         self._prev_idle = 99.0
         self._events: "collections.deque" = collections.deque()
+        self._game_seen = 0.0
         self.audio = AudioLoop(self.conf)
         self.asr = AsrWorker(self.conf, self.audio, self._on_text)
         self.ocr = OcrWorker(self.conf, self._on_text)
@@ -436,7 +438,7 @@ class VideoWatcher(threading.Thread):
             self.first_hint = self.speak_hint
             self.app, self.title = app, title
         self.asr.active.set()
-        log.info("通用视频模式：手动进入（%s / %s）", app or "?", (title or "")[:40])
+        log.info("视频类模式：手动进入（%s / %s）", app or "?", (title or "")[:40])
 
     def context_block(self) -> str:
         with self.lock:
@@ -534,6 +536,20 @@ class VideoWatcher(threading.Thread):
             self._events.popleft()
         return idle >= self.idle_seconds or len(self._events) <= self.events_max
 
+    def _video_source(self, app: str, title: str) -> str:
+        """区分「B站视频」和「通用视频」：托盘那边靠 source 决定勾哪一项。"""
+        hay = ("%s %s" % (app or "", title or "")).lower()
+        url = ""
+        try:
+            player = getattr(self.gateway, "player", None)
+            snap = player.snapshot() if player is not None else {}
+            url = str((snap or {}).get("url") or "").lower()
+        except Exception:  # noqa: BLE001
+            pass
+        if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
+            return "auto-video-bili"
+        return "auto-video"
+
     def _enter(self) -> None:
         with self.lock:
             self.state = "active"
@@ -550,7 +566,7 @@ class VideoWatcher(threading.Thread):
         try:
             cur = self.gateway.mode.get()
             if cur == "auto":
-                self.gateway.mode.set("video", source="auto-video")
+                self.gateway.mode.set("video", source=self._video_source(self.app, self.title))
                 log.info("通用视频模式：进入（%s｜%s）", self.app, self.title[:40])
         except Exception as exc:  # noqa: BLE001
             log.warning("切到 video 模式失败：%s", exc)
@@ -567,12 +583,11 @@ class VideoWatcher(threading.Thread):
             self.ocr.active.clear()
         log.info("通用视频模式：退出（%s）", reason)
         try:
-            # 番剧/直播/网课跟视频用同一套退出判断（老大 2026-11-17 说的）：
-            # 播放停了/窗口走了就回自动。锁在托盘里的时候不动。
             m = self.gateway.mode
-            if m.get() in ("video", "anime", "live", "course") and not self._mode_locked():
+            old = m.get()
+            if old in ("video", "anime", "live", "course") and not self._mode_locked():
                 m.set("auto", source="video-leave")
-                log.info("视频类模式：%s 回自动（%s）", m.get(), reason)
+                log.info("视频类模式：%s 回自动（%s）", old, reason)
         except Exception as exc:  # noqa: BLE001
             log.warning("切回 auto 失败：%s", exc)
 
@@ -592,11 +607,32 @@ class VideoWatcher(threading.Thread):
             if self.gateway.mode.get() == "off":
                 if self.state != "idle" or self.active:
                     self._leave("模式关闭")
+                self._game_seen = 0.0
                 return
-            # 游戏模式：不吃字幕也不吃转写（老大要的「不用字幕」），已经在看就先退出来
+            # 游戏模式：不吃字幕也不吃转写（老大要的「不用字幕」）。
+            # 但如果这个游戏模式是自动进的、现在前台已经换成播放器，就短暂确认后
+            # 直接接管成视频模式——不用等她 5 分钟「离开太久」再回自动。
             if self.gateway.mode.get() == "game":
                 if self.state != "idle" or self.active:
                     self._leave("切到游戏模式")
+                mode = self.gateway.mode
+                if str(mode.source) == "auto-game" and not self._mode_locked():
+                    app, title = foreground()
+                    playing = self.audio.has_signal(3.0, self.audio_threshold)
+                    player = self._is_player(app)
+                    if player and playing:
+                        if not self._game_seen:
+                            self._game_seen = now
+                        elif now - self._game_seen >= self.switch_seconds:
+                            self._game_seen = 0.0
+                            with self.lock:
+                                self.app, self.title = app, title
+                                self.session_since = now
+                            mode.set("video", source=self._video_source(app, title))
+                            self._enter()
+                            log.info("视频模式：从游戏接管（前台播放器 %s）", app)
+                    else:
+                        self._game_seen = 0.0
                 return
         except Exception:  # noqa: BLE001
             pass

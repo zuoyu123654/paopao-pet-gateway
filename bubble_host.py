@@ -60,6 +60,8 @@ WATCH_ITEMS = (
     ("auto", "自动模式"),
     ("video", "B站视频"),
     ("anime", "B站看番"),
+    ("live", "看直播"),
+    ("course", "上网课"),
     ("game", "玩游戏"),
     ("generic", "通用视频"),
 )
@@ -70,6 +72,29 @@ VOICE_ITEMS = (
 )
 # 反馈文案在 phrases.py 里统一管理（网关预合成时用的是同一份）
 FEEDBACK = TRAY_FEEDBACK
+
+
+def watch_key(mode: str, source: str) -> str:
+    """把网关的 (mode, source) 映射成托盘里该勾哪一项。
+
+    2026-11-17 修：以前 game/live/course 全落到「自动模式」，通用视频锁到期后
+    还会被当成 B站视频；现在按 source 区分，并且 live/course 也有自己的菜单项。
+    """
+    mode = str(mode or "auto").lower()
+    source = str(source or "").lower()
+    if mode == "off":
+        return "off"
+    if mode in ("anime", "live", "course", "game"):
+        return mode
+    if mode == "video":
+        if "generic" in source:
+            return "generic"          # 托盘选的通用视频 / 自动判定的非B站播放器
+        if "bili" in source:
+            return "video"            # 自动判定的B站
+        if source == "auto-video":
+            return "generic"
+        return "video"                # 托盘选的 B站 / API 指定
+    return "auto"                     # auto / normal / 未知
 
 
 def make_tray_icon() -> QIcon:
@@ -107,6 +132,7 @@ class TrayMenu(QObject):
         self.on_feedback = on_feedback          # 回调：传一句话，弹默认 3.2 秒的气泡
         self.nam = QNetworkAccessManager(self)
         self.syncing = False
+        self._last_watch = ""
 
         self.menu = QMenu()
         self.status_act = self.menu.addAction("当前：自动 · 按键说话")
@@ -211,14 +237,10 @@ class TrayMenu(QObject):
             reply.deleteLater()
         mode = str(data.get("mode") or "auto")
         source = str(data.get("mode_source") or "")
-        if mode == "off":
-            watch = "off"
-        elif mode == "anime":
-            watch = "anime"
-        elif mode == "video":
-            watch = "generic" if ("generic" in source or source == "auto-video") else "video"
-        else:
-            watch = "auto"
+        watch = watch_key(mode, source)
+        if watch != getattr(self, "_last_watch", ""):
+            self._last_watch = watch
+            log("托盘同步：%s / %s → %s" % (mode, source, watch))
         voice = str(((data.get("voice") or {}).get("mode")) or "ptt")
         labels = dict(WATCH_ITEMS)
         self.status_act.setText("当前：%s · %s" % (labels.get(watch, watch),
@@ -396,6 +418,14 @@ def main() -> int:
             demo_anchor = None
 
     app = QApplication(sys.argv[:1])
+    # 记下 pid：网关重启时用它收掉上一任气泡小工，免得托盘出现两个图标
+    try:
+        pid_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(pid_dir, exist_ok=True)
+        with open(os.path.join(pid_dir, "bubble_host.pid"), "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
     bubble = PetSpeechBubble(None, style_id="classic_top")
     state = {"style": "classic_top", "scale": 1.0, "duration_ms": 3200}
     cmds: "queue.Queue[dict]" = queue.Queue()

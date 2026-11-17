@@ -39,7 +39,29 @@ class BubbleBridge:
         self.last_reason = ""
 
     # ------------------------------------------------------------ 进程
+    def _kill_stale(self) -> None:
+        """网关重启后，上一任气泡小工可能还活着（stdin 没断干净），先收掉。"""
+        path = os.path.join(APP_DIR, "logs", "bubble_host.pid")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                pid = int((f.read() or "0").strip())
+        except (OSError, ValueError):
+            return
+        if pid <= 0 or pid == os.getpid():
+            return
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, timeout=5)
+            log.info("收掉旧气泡小工（pid %s）", pid)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
     def _spawn(self) -> None:
+        self._kill_stale()
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"

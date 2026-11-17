@@ -143,7 +143,8 @@
         "transcript_keep": 12,
         "speak_hint": true,
         "loopback_device": "",
-        "subtitle_ocr": false
+        "subtitle_ocr": false,
+        "switch_seconds": 20
     },
     "soften_self_recognition": true,
     "self_recognition": {
@@ -182,7 +183,8 @@
         "poll_seconds": 5,
         "enter_seconds": 120,
         "away_grace_seconds": 180,
-        "game_apps": []
+        "game_apps": [],
+        "switch_seconds": 20
     },
     "skip_black_frames": true,
     "vision_black_ratio": 0.92,

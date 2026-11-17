@@ -146,6 +146,7 @@ DEFAULTS = {
         "enabled": True,
         "poll_seconds": 5,
         "enter_seconds": 120,
+        "switch_seconds": 20,
         "away_grace_seconds": 180,
         "game_apps": [],
     },
@@ -2046,7 +2047,11 @@ class Mode:
         with self.lock:
             if not str(self.source).startswith("tray"):
                 return
-            self.source = "tray-released"
+            # 保留「通用视频」这个身份：只把 -released 后缀加上，托盘同步还认得出来
+            if str(self.source) == "tray-generic":
+                self.source = "tray-generic-released"
+            else:
+                self.source = "tray-released"
             self.since = time.time()
             data = {"mode": self.value, "source": self.source, "since": self.since}
             try:
@@ -2235,6 +2240,7 @@ class GameWatcher(threading.Thread):
         self.enabled = bool(conf.get("enabled", True))
         self.poll = max(3.0, float(conf.get("poll_seconds", 5)))
         self.enter_seconds = max(10.0, float(conf.get("enter_seconds", 120)))
+        self.switch_seconds = max(5.0, float(conf.get("switch_seconds", 20)))
         self.away_grace = max(30.0, float(conf.get("away_grace_seconds", 180)))
         self.extra_apps = [str(x).strip().lower().replace(".exe", "")
                            for x in (conf.get("game_apps") or []) if str(x).strip()]
@@ -2274,10 +2280,19 @@ class GameWatcher(threading.Thread):
             self.last_seen = now
             if self.app != app:
                 self.app, self.first_seen = app, now
-            if cur == "auto" and not self._locked():
-                if now - self.first_seen >= self.enter_seconds:
-                    self.gateway.mode.set(GAME_MODE, source="auto-game")
-                    log.info("游戏模式：自动进入（%s｜%s）", app, title[:40])
+            if not self._locked():
+                if cur == "auto":
+                    if now - self.first_seen >= self.enter_seconds:
+                        self.gateway.mode.set(GAME_MODE, source="auto-game")
+                        log.info("游戏模式：自动进入（%s｜%s）", app, title[:40])
+                elif (cur in ("video", "anime", "live", "course")
+                      and str(self.gateway.mode.source) in (
+                          "auto-video", "auto-video-bili", "video-leave")):
+                    # 刚才自动进了视频模式，现在前台换成游戏：不用等视频那边 5 分钟才走，
+                    # 短暂确认后就接管（老大 2026-11-17 说「一堆问题」里的一个）。
+                    if now - self.first_seen >= self.switch_seconds:
+                        self.gateway.mode.set(GAME_MODE, source="auto-game")
+                        log.info("游戏模式：从视频接管（%s｜%s）", app, title[:40])
             return
         # 不是游戏了：只负责「自己自动进来的」那一次退出
         self.app = ""
@@ -3206,6 +3221,7 @@ class Gateway:
         self.digester = Digester(cfg, self.ledger, self)
         self.digester.start()
         self.mode = Mode(cfg)
+        self.mode_lock_until = 0.0
         # 每次模式真的变了，就播一句 + 冒个泡（两种都是预合成好的固定句子）
         self.mode.on_change = self._announce_mode
         self.divination = DivinationWatcher(cfg, self.speech)
@@ -3395,6 +3411,11 @@ class Gateway:
                     if not cur and self.mode.get() != "off":
                         self.mode.set("off", source="pet-proactive")
                         log.info("主动识屏是关的 → 模式切换为关闭")
+                    # 反过来：上次是被她关掉留下的 off，这次她开着，就回自动
+                    elif cur and self.mode.get() == "off" \
+                            and str(self.mode.source).startswith("pet-proactive"):
+                        self.mode.set("auto", source="pet-proactive")
+                        log.info("主动识屏是开的 → 模式回自动")
                     continue
                 if cur == last:
                     continue
@@ -3437,9 +3458,11 @@ class Gateway:
             try:
                 if self.mode.get() == "off":
                     continue
-                if (str(self.mode.source) == "tray"
+                src = str(self.mode.source)
+                if (src.startswith("tray") and not src.endswith("released")
                         and time.time() - self.mode.since > lock_minutes * 60):
                     self.mode.release("满 %.0f 分钟" % lock_minutes)
+                    self.mode_lock_until = 0.0
             except Exception:  # noqa: BLE001
                 pass
 
@@ -4306,12 +4329,12 @@ class Handler(BaseHTTPRequestHandler):
             if data["mode"] == "off" and not GATEWAY.cfg.get("mode_feedback", True):
                 # 模式提示关掉时兜底：这句话不能没有（正常情况由 _announce_mode 说）
                 GATEWAY.speech.say(fixed_phrases.PROACTIVE_OFF, tag="mode")
-        if source == "tray-generic":
-            # 托盘里手动选了「通用视频」：不等 2 分钟条件，直接进
+        if source.startswith("tray") and data["mode"] in ("video", "anime", "live", "course"):
+            # 托盘里手动选了视频类模式：不等 2 分钟条件，直接进会话
             try:
                 GATEWAY.video.force()
             except Exception as exc:  # noqa: BLE001
-                log.warning("手动进通用视频失败：%s", exc)
+                log.warning("手动进视频类模式失败：%s", exc)
         self._send_json({"ok": True, **data})
 
     def _handle_status(self):

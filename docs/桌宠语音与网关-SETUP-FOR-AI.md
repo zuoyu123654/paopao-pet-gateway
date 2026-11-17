@@ -1719,6 +1719,38 @@ vision | （参考元数据：老大当前前台应用为 guangyapan.exe | 光�
 注意：`own_look()` 只在 `/lookself` 或热键/菜单失败时走；正常主动识屏还是她的
 `prepare()`。现在两条路是同一套代码，不会再各看各的。
 
+### 4.2x 自动切换与托盘同步：一次修一批（2026-11-17）
+
+老大用着觉得「一堆问题」，实测下来确实是几处独立的小毛病叠在一起：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 托盘选了「玩游戏」，托盘勾还是「自动模式」 | `bubble_host._apply_status` 只映射了 off/anime/video，`game/live/course` 全落到 auto | 抽成 `watch_key(mode, source)`，八种模式各有映射；托盘补了「看直播」「上网课」两项 |
+| 选了「通用视频」，5 分钟后自动判定再也不动 | `_mode_lock_loop` / `Mode.release` 只认 `source == "tray"`，`tray-generic` 永远不释放 | 改成 `startswith("tray")`；release 保留身份：`tray-generic` → `tray-generic-released` |
+| 通用视频锁到期后，托盘跳回「B站视频」 | release 把 source 统一写成 `tray-released`，丢了 generic | 同上，release 带 `-generic` 后缀 |
+| 自动进 B站 也显示「通用视频」 | 自动判定统一写 `auto-video`，托盘只能当通用 | `VideoWatcher._video_source()` 按 URL/标题区分 `auto-video-bili` / `auto-video` |
+| 从视频切游戏（或反过来）要等 5 分钟 | `GameWatcher` 只在 `mode == auto` 时进；`VideoWatcher` 在 game 模式直接 return | 两个方向加「自动模式接管」：`switch_seconds`（默认 20 秒），只接管 `auto-*` 来源，手动锁不碰 |
+| 托盘选「B站视频」后要等 2 分钟才进会话 | 只有 `tray-generic` 调了 `video.force()` | 所有托盘视频类（video/anime/live/course）都 `video.force()`，立即开会话 |
+| 网关重启后出现两个托盘图标 | 旧 `bubble_host.py` 进程的 stdin 没断干净，新网关又拉起一个 | `bubble_host` 写 `logs/bubble_host.pid`；`BubbleBridge._spawn()` 先 `taskkill` 旧 pid 再拉新 |
+| 网关重启后她那边开着主动识屏，模式却停在 off | 启动只处理「她关 → 我关」，不处理「她开 → 我开」 | `_proactive_sync_loop` 首次同步补反向：off + `pet-proactive` 来源 → auto |
+
+**接管规则（不碰手动锁）**
+
+- 视频 → 游戏：`mode in (video/anime/live/course)` 且 source 是 `auto-video` / `auto-video-bili` / `video-leave`，游戏前台稳 20 秒 → `game`（`auto-game`）。
+- 游戏 → 视频：`mode == game` 且 source 是 `auto-game`，播放器前台有声 20 秒 → `video`（自动识别 B站/通用）。
+- 手动（`tray*`）和 `pet-proactive` 来源不参与接管；手动锁到期由 4.2t 的 `release` 交回自动判定，仍然不直接退模式。
+
+**测试（2026-11-17 14:45–14:50）**
+
+- `watch_key` 12 组：off/auto/normal/game/live/course/video/tray-generic/tray-generic-released/auto-video/auto-video-bili/anime 全对；
+- `Mode.release`：`tray-generic → tray-generic-released`、`tray → tray-released`；
+- 接管单元测试：游戏从 `video/auto-video` 接管、视频从 `game/auto-game` 接管，均命中；
+- 实际依次切 auto/game/auto/video/video-generic/anime/live/course/off，托盘日志逐项跟着变：
+  `托盘同步：game / tray → game`、`video / tray-generic → generic`、`course / tray → course`；
+- 把 `mode_lock_minutes` 临时改成 1 分钟，选通用视频，70 秒后 `source=tray-generic-released`，确认不会再永久锁死；测试完已改回 5 分钟。
+
+**配置**：`game_watch.switch_seconds`、`video_watch.switch_seconds`（默认 20 秒，自动模式互相接管的确认时间；手动锁不受影响）。
+
 ## 5. 鼠标手势：已撤掉（2026-11-15 凌晨）
 
 做过、试过、撤了。经过记在这里，免得后人又走一遍：
