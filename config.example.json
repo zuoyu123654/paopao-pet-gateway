@@ -119,7 +119,9 @@
         "call_window": 8,
         "barge_in": false,
         "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions",
-        "screenshot": "always"
+        "screenshot": "always",
+        "call_min_voiced": 0.5,
+        "onset_voiced": 0.35
     },
     "video_watch": {
         "enabled": true,

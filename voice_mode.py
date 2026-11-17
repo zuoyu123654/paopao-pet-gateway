@@ -178,6 +178,9 @@ class VoiceMode(threading.Thread):
         self.max_record = float(conf.get("max_record", 30.0))
         self.min_record = float(conf.get("min_record", 0.3))
         self.threshold = float(conf.get("energy_threshold", 0.012))
+        # 电话模式防咳嗽：至少连续出声这么久才算一句话；「我在听」也要撑够 onset
+        self.call_min_voiced = float(conf.get("call_min_voiced", 0.45))
+        self.onset_voiced = float(conf.get("onset_voiced", 0.25))
         self.call_window = float(conf.get("call_window", 8.0))
         self.asr_url = str(conf.get("asr_url") or "http://127.0.0.1:9881/v1/audio/transcriptions")
         self.barge_in = bool(conf.get("barge_in", False))
@@ -192,6 +195,7 @@ class VoiceMode(threading.Thread):
         self.last_error = ""
         self.turns = 0
         self._last_rms = 0.0
+        self._last_voiced = 0.0
         self._listening_shown = False
         # 这一次「开口」的时间戳（第一个超过阈值的音频块）：语音问答要拿这一刻的屏幕
         self.last_onset_at = 0.0
@@ -321,9 +325,14 @@ class VoiceMode(threading.Thread):
                 except Exception as exc:  # noqa: BLE001
                     log.info("语音：换默认输入失败：%s", exc)
             self.recording.clear()
-            if self.cancel.is_set() or pcm is None or len(pcm) / SAMPLE_RATE < self.min_record:
+            too_short_voice = (self.mode == "call"
+                               and getattr(self, "_last_voiced", 0.0) < self.call_min_voiced)
+            if self.cancel.is_set() or pcm is None or len(pcm) / SAMPLE_RATE < self.min_record \
+                    or too_short_voice:
                 self._set_state("idle")
-                log.info("语音：这次没录到有效内容（%.2fs）", (len(pcm) if pcm is not None else 0) / SAMPLE_RATE)
+                log.info("语音：这次没录到有效内容（%.2fs，有效人声 %.2fs）",
+                         (len(pcm) if pcm is not None else 0) / SAMPLE_RATE,
+                         getattr(self, "_last_voiced", 0.0))
                 self._reopen_call()
                 continue
             self._set_state("thinking")
@@ -457,6 +466,7 @@ class VoiceMode(threading.Thread):
         """录到「静音够久 / 到上限 / 被取消」为止，返回 float32 单声道。"""
         blocks: "queue.Queue" = queue.Queue()
         self._last_blocks = 0
+        self._last_voiced = 0.0
 
         def cb(indata, frames, time_info, status):  # noqa: ANN001
             if self.cancel.is_set():
@@ -502,10 +512,12 @@ class VoiceMode(threading.Thread):
                     rms = float(np.sqrt((block ** 2).mean()))
                     self._last_rms = rms
                     if rms >= self.threshold:
+                        self._last_voiced += BLOCK_SECONDS
                         if not heard:
                             self.last_onset_at = time.time()
+                            heard = True
+                        if self._last_voiced >= self.onset_voiced:
                             self._show_listening()
-                        heard = True
                         silence = 0.0
                     elif heard:
                         silence += BLOCK_SECONDS
