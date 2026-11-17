@@ -197,7 +197,7 @@ DEFAULTS = {
     "bili_previews": {
         "enabled": True,
         "hour": 11,
-        "minute": 0,
+        "minute": 5,
     },
     "vision_context_entries": 6,
     "vision_context_minutes": 30,
@@ -2545,7 +2545,7 @@ class BiliPreviewWatcher(threading.Thread):
         self.gateway = gateway
         self.enabled = bool(conf.get("enabled", True))
         self.hour = max(0, min(23, int(conf.get("hour", 11))))
-        self.minute = max(0, min(59, int(conf.get("minute", 0))))
+        self.minute = max(0, min(59, int(conf.get("minute", 5))))
 
     def _next_at(self) -> float:
         now = time.time()
