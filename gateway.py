@@ -3760,6 +3760,7 @@ class Gateway:
             log.info("版本内容：%s %s 提取失败（%s）", title, version, exc)
             return 0
         texts = []
+        names = []
         for key, prefix in (("characters", "新角色"), ("regions", "新地区")):
             for item in (obj.get(key) or [])[:6]:
                 item = str(item or "").strip()
@@ -3768,8 +3769,66 @@ class Gateway:
                 name = re.split(r"[=:：]", item, 1)[0].strip()
                 if name and name not in text:
                     continue
+                if key == "characters" and name:
+                    names.append(name)
                 texts.append("%s：%s" % (prefix, item[:40]))
+        # 异环：官方 B站动态「海特洛特别资讯 | 角色」里就是立绘，补一个外观描述
+        try:
+            texts.extend(self.enrich_bili_visuals(title, names))
+        except Exception as exc:  # noqa: BLE001
+            log.info("B站立绘补外观没成（不影响身份条目）：%s", exc)
         return add_latest_updates(title, version, texts)
+
+    def enrich_bili_visuals(self, title: str, names: list[str]) -> list[str]:
+        """从官方 B站动态找角色立绘，让视觉模型只描述外观。"""
+        from bili_visual import BILI_UID, download_image, find_character_pics
+
+        mid = BILI_UID.get(title)
+        if not mid or not names:
+            return []
+        pics = find_character_pics(mid, names)
+        out = []
+        for name in names[:4]:
+            url = pics.get(name)
+            if not url:
+                continue
+            try:
+                raw = download_image(url)
+                try:
+                    from PIL import Image
+                    im = Image.open(io.BytesIO(raw)).convert("RGB")
+                    im.thumbnail((1024, 1024))
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=85)
+                    raw = buf.getvalue()
+                except Exception:  # noqa: BLE001
+                    pass
+                b64 = base64.b64encode(raw).decode()
+                prompt = (
+                    "这是《%s》角色「%s」的官方立绘。只写能一眼认出她的外观："
+                    "发色/发型、服装主色和款式、最显眼的标志物；20~40 字。"
+                    "不要写名字、剧情、评价、S级/限定；只回一行中文。" % (title, name)
+                )
+                payload = {
+                    "model": self.cfg.get("model") or "deepseek-v4-flash",
+                    "max_tokens": 120, "temperature": 0.2, "stream": False,
+                    "messages": [
+                        {"role": "system", "content": "你只描述角色外观，不写别的。"},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": "data:image/jpeg;base64," + b64}},
+                        ]},
+                    ],
+                }
+                data = self.post_once(payload)
+                desc = (data["choices"][0]["message"].get("content") or "").strip()
+                desc = desc.replace("\n", " ").strip("「」\"' ")[:80]
+                if 4 <= len(desc):
+                    out.append("角色：%s=%s" % (name, desc))
+            except Exception as exc:  # noqa: BLE001
+                log.info("B站立绘「%s」外观描述没成：%s", name, exc)
+        return out
 
     def _mode_lock_loop(self) -> None:
         """托盘里手动选的模式锁几分钟（默认 5 分钟），**锁到期不退出**。
