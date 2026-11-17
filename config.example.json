@@ -17,14 +17,17 @@
         "text_lang": "zh",
         "max_sentences": 40,
         "max_chars_per_sentence": 32,
-        "first_min_chars": 24,
+        "first_min_chars": 16,
         "second_min_chars": 5,
         "early_sentences": 3,
         "early_min_chars": 8,
         "timeout": 180,
         "volume": 1.0,
         "synth_workers": 3,
-        "pre_cue": [],
+        "pre_cue": [
+            "让我看看……",
+            "唔，我瞅瞅。"
+        ],
         "pre_cue_min_interval": 20,
         "retention_days": 3,
         "speed": 1.2,
@@ -33,13 +36,13 @@
         "streaming_first": true,
         "streaming_mode": 3,
         "stream_min_chunk_length": 32,
-        "stream_min_chunk_length_first": 24,
+        "stream_min_chunk_length_first": 8,
         "stream_overlap_length": 2,
         "stream_merge_chars": 40,
         "stream_gpu_wait": 25,
         "strip_stream_punct_max_chars": 24,
         "prebuffer_seconds": 0.5,
-        "prebuffer_first_seconds": 1.0,
+        "prebuffer_first_seconds": 0.4,
         "exclusive_gpu": false,
         "strip_stream_punct": true,
         "stream_split_method": "cut0",
@@ -245,6 +248,5 @@
         "hour": 11,
         "minute": 30
     },
-    "anime_resolve_seconds": 10,
-    "auto_precue_voice": true
+    "anime_resolve_seconds": 10
 }

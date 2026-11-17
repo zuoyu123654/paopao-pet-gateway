@@ -103,7 +103,6 @@ DEFAULTS = {
     "inject_vision_ledger": True,
     # 文字聊天问「这个角色是谁」时补一张当前屏幕，别拿最近聊过的角色硬套
     "chat_screen_look": True,
-    "auto_precue_voice": True,
     "mouse_look": {
         "enabled": True,
         "cooldown_seconds": 3,
@@ -2785,6 +2784,35 @@ class FrameBuffer(threading.Thread):
         self.black_ratio = float(conf.get("black_ratio", 0.92))
         self.lock = threading.Lock()
         self.last_error = ""
+        # 模式「关闭」时停掉自动截屏：一直抓屏既没用，又容易在重新打开时
+        # 把旧帧/旧识屏带回来。resume 后重新攒新帧。
+        self.running = threading.Event()
+        self.running.set()
+
+    def pause(self) -> None:
+        self.running.clear()
+        with self.lock:
+            self.buf.clear()
+            self.darks.clear()
+        log.info("帧缓冲：暂停（模式关闭，不自动截屏）")
+
+    def resume(self) -> None:
+        if not self.running.is_set():
+            self.running.set()
+            log.info("帧缓冲：恢复自动截屏")
+
+    def capture_once(self):
+        """手动看一眼时现抓一张（关闭模式不跑后台截屏，但手动仍要能看）。"""
+        try:
+            from PIL import ImageGrab
+
+            shot = ImageGrab.grab()
+            h = max(1, int(shot.height * self.width / shot.width))
+            shot = shot.resize((self.width, h)).convert("RGB")
+            return (time.time(), shot)
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            return None
 
     def is_black(self, n: int = 2, fresh: float = 15.0, ratio: float | None = None) -> bool:
         """最近 n 张是不是都几乎全黑（默认 92% 以上像素接近纯黑）。"""
@@ -2818,6 +2846,9 @@ class FrameBuffer(threading.Thread):
         last_sig = None
         last_store = time.time()
         while True:
+            # 关闭模式：停在这里等 resume，不抓屏、不占 CPU
+            if not self.running.wait(0.2):
+                continue
             now = time.time()
             try:
                 shot = ImageGrab.grab()
@@ -3753,6 +3784,8 @@ class Gateway:
         self.last_vision_at = time.time()
         self.frames = FrameBuffer(cfg)
         self.frames.start()
+        if self.mode.get() == "off":
+            self.frames.pause()
         threading.Thread(target=self.speech.warm_pre_cues, name="precue-warmer", daemon=True).start()
         threading.Thread(target=self._warm_dsh_phrases, name="dsh-warmer", daemon=True).start()
         self.divination.start()
@@ -3884,6 +3917,10 @@ class Gateway:
         # 两边看到的素材就一致了（prepare 会把帧拼图插在图片前面）。
         try:
             snap = self.frames.snapshot(1)
+            if not snap:
+                one = self.frames.capture_once()
+                if one:
+                    snap = [one]
             if snap:
                 from PIL import Image
 
@@ -3931,13 +3968,14 @@ class Gateway:
         return reply
 
     def _proactive_sync_loop(self) -> None:
-        """只跟着桌宠的「主动识屏」开关走，**不再拿它当网关总开关**。
+        """跟着桌宠的「主动识屏」开关走：她关 → 我们关闭；她开 → 我们自动。
 
-        以前她那边一关，我们就把 mode 设成 off，结果看片看到一半、或者想开着
-        视频模式但不想让她自己冒气泡时，模式会被她关掉。现在拆开：
-          * 她关 → 网关只是不主动看屏（LookGuard 跳过），看视频/番剧照常判定；
-          * 她开 → 网关恢复主动看屏；
-          * 要整个停掉识屏，用托盘的「关闭」。
+        2026-11-18 老大重新确认的口径：
+          * 桌宠关掉主动识屏 = 网关也关闭，不进任何模式，也不看视频/不出视频声；
+          * 桌宠打开主动识屏 = 网关同步成自动模式；
+          * 托盘点别的模式（看番/看视频/直播/网课/游戏）会把她那边的主动识屏一起打开；
+          * 托盘点「关闭」也会把她那边关掉。
+        我们自己写配置时用 `_proactive_self` 记一笔，避免刚点的模式被她自己的开关立刻改回自动。
         """
         last: bool | None = None
         while True:
@@ -3949,12 +3987,32 @@ class Gateway:
                 self.pet_proactive_on = cur
                 if last is None:
                     last = cur
-                    log.info("桌宠主动识屏：%s（不影响看片模式）", "开" if cur else "关")
+                    # 第一次看到：她关着而我们在看，就跟着关掉
+                    if not cur and self.mode.get() != "off":
+                        self.mode.set("off", source="pet-proactive")
+                        log.info("主动识屏是关的 → 模式切换为关闭")
+                    # 反过来：关机时她是开着的，就回自动（不管 off 是谁留下的）
+                    elif cur and self.mode.get() == "off":
+                        self.mode.set("auto", source="pet-proactive")
+                        log.info("主动识屏是开的 → 模式回自动")
                     continue
                 if cur == last:
                     continue
                 last = cur
-                log.info("桌宠主动识屏 → %s（看片模式不受影响）", "开" if cur else "关")
+                stamp = self._proactive_self
+                if stamp and stamp[0] == cur and time.time() - stamp[1] < 6:
+                    continue                     # 我们自己刚写的，不动模式
+                if not cur:
+                    self.mode.set("off", source="pet-proactive")
+                    # 桌宠那边关掉时不冒泡，所以这句由我们冒 + 出声
+                    self.bubble.show(fixed_phrases.PROACTIVE_OFF)
+                    self.speech.say(fixed_phrases.PROACTIVE_OFF, tag="mode")
+                    log.info("桌宠关掉主动识屏 → 关闭")
+                else:
+                    self.mode.set("auto", source="pet-proactive")
+                    # 桌宠那边开的时候自己会冒气泡（"主动识屏已开启~…"），我们只出声
+                    self.speech.say(fixed_phrases.PROACTIVE_ON, tag="mode")
+                    log.info("桌宠打开主动识屏 → 自动模式")
             except Exception:  # noqa: BLE001
                 pass
 
@@ -4443,6 +4501,16 @@ class Gateway:
             write_pet_pre_cue(mode == "auto")
         except Exception as exc:  # noqa: BLE001
             log.info("同步先兆提示没成（不影响模式）：%s", exc)
+        # 关闭 = 连自动截屏也停掉；重新开模式时再恢复
+        try:
+            frames = getattr(self, "frames", None)
+            if frames is not None:
+                if mode == "off":
+                    frames.pause()
+                else:
+                    frames.resume()
+        except Exception as exc:  # noqa: BLE001
+            log.info("同步帧缓冲没成（不影响模式）：%s", exc)
         self._announce_mode(mode, source)
 
     def _announce_mode(self, mode: str, source: str) -> None:
@@ -4542,7 +4610,7 @@ class Gateway:
                 while True:
                     # 前三段都按标点切（。！？；，、：… 都算），够长就切：
                     # 前几段要的是「快点开口」，切碎了先播出去，后面再慢慢合成。
-                    # 但第一段要更长一点（first_min_chars，默认 24 字 ≈ 5.5 秒音频）：
+                    # 但第一段要更长一点（first_min_chars，当前 16 字 ≈4～6 秒音频）：
                     # 第一段太短（8 字只有 1.6 秒）的话，等它念完第二句还没合成好，
                     # 中间就空一下——「后面几句卡」最早那一空就是这么来的。
                     early = int(self.cfg["tts"].get("early_sentences", 3) or 3)
@@ -4562,7 +4630,15 @@ class Gateway:
                             logged_feed = True
                             log.info("首句入队 %.2fs（%d 字：%s）", time.time() - t0,
                                      len(cleaned), cleaned[:40])
-                        self.speech.feed_sentences(split_sentences(cleaned, max_chars), speech_tag)
+                        # 第一段已经是按 first_min_chars 切好的「第一小句」，
+                        # 别再按句号拆一次：拆成「唔，还是老样子嘛。」这种 8 字碎片，
+                        # 流式 2.8 秒就念完，后面的整句还没合成好，听感就是一句一卡。
+                        # 第一段只按 max_chars 限长，保住 16 字左右 ≈4～6 秒的缓冲。
+                        if fed_count == 0:
+                            parts = split_long(cleaned, max_chars)
+                        else:
+                            parts = split_sentences(cleaned, max_chars)
+                        self.speech.feed_sentences(parts, speech_tag)
                         fed_count += 1
                 yield piece
             tail = clean_for_speech(buf)
@@ -5372,10 +5448,9 @@ class Handler(BaseHTTPRequestHandler):
                 lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
                 GATEWAY.mode_lock_until = time.time() + lock_min * 60
                 log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
-            # 托盘的「关闭」顺手把桌宠主动识屏也关掉；其它模式不再替她打开——
-            # 她想开着看片、但不想让桌宠自己冒气泡，这个开关得由她自己说了算。
-            if data["mode"] == "off":
-                GATEWAY.set_proactive(False)
+            # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
+            # （关闭 = 识屏关；其它模式 = 识屏开）
+            GATEWAY.set_proactive(data["mode"] != "off")
             if data["mode"] == "anime":
                 GATEWAY.schedule_anime_resolve()
             if data["mode"] == "off" and not GATEWAY.cfg.get("mode_feedback", True):
@@ -5779,21 +5854,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 新一轮开始：前一段还没念完就掐掉，直接改念这一轮
         GATEWAY.speech.interrupt()
-        # 「让我看看」按最近的实测耗时推迟到首句开口前（见 arm_vision_cue）
+        # 「让我看看」用预缓存直接播（winsound），不占用正文的第一句流式名额；
+        # 以前这里再 say 一句会把 pre-cue 塞进同一代，正文第一句就被当成“第二句”
+        # 去整句合成，开口慢 4 秒、后面也跟着拖——2026-11-18 实测。
         if scenario == "vision":
             GATEWAY.speech.arm_vision_cue()
-        # 桌宠只冒泡不出声时，自动模式补一句语音；其他模式不补。
-        if (proactive and GATEWAY.cfg.get("auto_precue_voice", True)
-                and GATEWAY.mode.get() == "auto"):
-            try:
-                if not (getattr(GATEWAY, "voice", None) and GATEWAY.voice.is_speaking()):
-                    last = float(getattr(GATEWAY, "last_pre_cue_at", 0.0) or 0.0)
-                    if time.time() - last >= 20:
-                        GATEWAY.last_pre_cue_at = time.time()
-                        GATEWAY.speech.say("让我看看……", tag="precue")
-                        log.info("先兆语音：让我看看（自动模式）")
-            except Exception as exc:  # noqa: BLE001
-                log.info("先兆语音没成：%s", exc)
 
         sink: list[str] = []
         suppress_proactive = bool(
