@@ -4406,22 +4406,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, 400)
             return
         log.info("模式切换 → %s（%s）", data["mode"], data["source"])
+        if not source.startswith("tray"):
+            # API/插件切模式：不吃托盘残留的锁
+            GATEWAY.mode_lock_until = 0.0
         if source.startswith("tray"):
-            if data["mode"] == "auto":
-                # 老大 2026-11-17：手动切到「自动模式」就是让自动判定接管，
-                # 这一个**不加锁**（不然选了自动还要干等 5 分钟才有反应）。
-                GATEWAY.mode.release("手动选自动")
-                GATEWAY.mode_lock_until = 0.0
-                log.info("自动模式不加锁：自动判定立即接管")
+            # 托盘所有模式（包括「通用模式」，内部值仍是 auto）都按手动锁走：
+            # 默认锁 N 分钟；「一直」就锁到手动换掉为止。
+            if getattr(GATEWAY.mode, "lock_forever", False):
+                GATEWAY.mode_lock_until = float("inf")
+                log.info("模式锁：%s 一直保持（手动锁=一直）", data["mode"])
             else:
-                # 托盘选的模式：默认锁 N 分钟；手动锁设成「一直」就锁到手动换掉为止
-                if getattr(GATEWAY.mode, "lock_forever", False):
-                    GATEWAY.mode_lock_until = float("inf")
-                    log.info("模式锁：%s 一直保持（手动锁=一直）", data["mode"])
-                else:
-                    lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
-                    GATEWAY.mode_lock_until = time.time() + lock_min * 60
-                    log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
+                lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
+                GATEWAY.mode_lock_until = time.time() + lock_min * 60
+                log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
             # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
             # （关闭 = 识屏关；其它模式 = 识屏开）
             GATEWAY.set_proactive(data["mode"] != "off")
@@ -4448,7 +4445,7 @@ class Handler(BaseHTTPRequestHandler):
         g.mode.set_lock_forever(forever)
         cur = g.mode.get()
         src = str(g.mode.source)
-        if cur != "auto" and src.startswith("tray"):
+        if src.startswith("tray"):
             new_src = "tray-generic" if src.startswith("tray-generic") else "tray"
             if src != new_src:
                 # 从 released 拉回锁住状态（模式不变，不播提示）
