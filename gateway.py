@@ -229,12 +229,13 @@ TITLES_PATH = os.path.join(APP_DIR, "titles.json")
 _TITLE_NOTES: dict[str, str] = {}
 _TITLE_KINDS: dict[str, str] = {}
 _TITLE_VISUALS: dict[str, str] = {}
+_TITLE_VISUAL_AT: dict[str, str] = {}
 _TITLE_MTIME = 0.0
 
 
 def title_notes(refresh: bool = False) -> dict[str, str]:
     """读 titles.json（改了不用重启，按修改时间自动重载）。"""
-    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_MTIME
+    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT, _TITLE_MTIME
     try:
         mtime = os.path.getmtime(TITLES_PATH)
     except OSError:
@@ -246,6 +247,7 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
             notes: dict[str, str] = {}
             kinds: dict[str, str] = {}
             visuals: dict[str, str] = {}
+            visual_at: dict[str, str] = {}
             for k, v in (data or {}).items():
                 key = str(k).strip().lower()
                 if not key:
@@ -254,14 +256,18 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                     note = str(v.get("note") or "").strip()
                     kind = str(v.get("kind") or "").strip().lower()
                     visual = str(v.get("visual") or "").strip()
+                    vat = str(v.get("visual_at") or "").strip()
                 else:
-                    note, kind, visual = str(v).strip(), "", ""
+                    note, kind, visual, vat = str(v).strip(), "", "", ""
                 if note:
                     notes[key] = note
                     kinds[key] = kind
                     if visual:
                         visuals[key] = visual
-            _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS = notes, kinds, visuals
+                    if vat:
+                        visual_at[key] = vat
+            _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT = (
+                notes, kinds, visuals, visual_at)
             _TITLE_MTIME = mtime
         except Exception as exc:  # noqa: BLE001
             log.warning("titles.json 读不了（先不注入小抄）：%s", exc)
@@ -298,6 +304,24 @@ def title_visual(app: str = "", title: str = "") -> str:
     return _TITLE_VISUALS.get(key, "") if key else ""
 
 
+def title_visual_with_age(app: str = "", title: str = "") -> str:
+    """外观线索 + 过期提醒：列表是静态的，太久没更新就别让她当权威。"""
+    key = _title_key(app, title)
+    if not key:
+        return ""
+    visual = _TITLE_VISUALS.get(key, "")
+    at = _TITLE_VISUAL_AT.get(key, "")
+    if visual and at:
+        try:
+            age = (time.time() - time.mktime(time.strptime(at, "%Y-%m-%d"))) / 86400
+            if age > 120:
+                visual += ("（这版外观线索更新于 %s，可能没含最新角色/地区；"
+                           "认不出就以画面为准，别硬套。）" % at)
+        except ValueError:
+            pass
+    return visual
+
+
 def save_title_notes(updates: dict) -> int:
     """把几条写进 titles.json（原子替换），返回写入后的总条数。
 
@@ -318,13 +342,20 @@ def save_title_notes(updates: dict) -> int:
             note = str(val.get("note") or "").strip()
             kind = str(val.get("kind") or "").strip().lower()
             visual = str(val.get("visual") or "").strip()
+            visual_at = str(val.get("visual_at") or "").strip()
             if note:
                 entry = {"kind": kind, "note": note}
                 if visual:
                     entry["visual"] = visual
+                if visual_at:
+                    entry["visual_at"] = visual_at
                 data[key] = entry if kind else note
-                if not kind and visual:
-                    data[key] = {"note": note, "visual": visual}
+                if not kind and (visual or visual_at):
+                    data[key] = {"note": note}
+                    if visual:
+                        data[key]["visual"] = visual
+                    if visual_at:
+                        data[key]["visual_at"] = visual_at
         else:
             data[key] = str(val).strip()
     tmp = TITLES_PATH + ".tmp"
@@ -2283,6 +2314,7 @@ class TitleLearner(threading.Thread):
         entry = {"kind": kind, "note": note}
         if visual:
             entry["visual"] = visual
+            entry["visual_at"] = time.strftime("%Y-%m-%d")
         updates = {name: entry}
         low_app = (app or "").lower().replace(".exe", "")
         if low_app and low_app not in self.BROWSER_LIKE:
@@ -3580,7 +3612,7 @@ class Gateway:
         note = title_hint(app, title)
         if note:
             context.append("【这个作品你认识】%s" % note)
-        visual = title_visual(app, title)
+        visual = title_visual_with_age(app, title)
         if visual:
             context.append("【认人/认地方用】%s" % visual)
         # 问到的作品不熟时顺手排一课（后台查，不挡这句话）；有资料就递一两段最相关的。
@@ -4092,7 +4124,7 @@ class Gateway:
             app = (m.group(1) or "").strip() if m else ""
             title = (m.group(2) or "").strip() if m else ""
             note = title_hint(app, title)
-            visual = title_visual(app, title)
+            visual = title_visual_with_age(app, title)
             if note or visual:
                 parts = []
                 if note:
@@ -4183,7 +4215,7 @@ class Gateway:
                 messages.insert(0, {"role": "system", "content": facts_block})
                 log.info("聊天：带上老大教过的事")
             if self.mode.get() in (GAME_MODE, "anime"):
-                visual = title_visual(fapp, ftitle)
+                visual = title_visual_with_age(fapp, ftitle)
                 if visual:
                     messages.insert(0, {"role": "system", "content":
                                         "【认人/认地方用】%s" % visual})
