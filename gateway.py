@@ -2675,10 +2675,16 @@ class GameWatcher(threading.Thread):
         self.last_seen = 0.0
         self.app = ""
 
+    BROWSER_APPS = ("msedge", "chrome", "firefox", "brave", "opera", "vivaldi",
+                    "browser", "dsh-pet", "explorer", "wezterm", "windowsterminal")
+
     def _is_game(self, app: str, title: str) -> bool:
+        # 浏览器标题里带游戏名（B站《原神》视频）不是游戏本机进程，别误进游戏模式
+        low = (app or "").lower().replace(".exe", "")
+        if any(b in low for b in self.BROWSER_APPS):
+            return False
         if title_kind(app, title) == "game":
             return True
-        low = (app or "").lower().replace(".exe", "")
         return bool(low) and low in self.extra_apps
 
     def _locked(self) -> bool:
