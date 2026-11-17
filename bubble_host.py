@@ -60,8 +60,6 @@ WATCH_ITEMS = (
     ("auto", "自动模式"),
     ("video", "B站视频"),
     ("anime", "B站看番"),
-    ("live", "看直播"),
-    ("course", "上网课"),
     ("game", "玩游戏"),
     ("generic", "通用视频"),
 )
@@ -84,8 +82,11 @@ def watch_key(mode: str, source: str) -> str:
     source = str(source or "").lower()
     if mode == "off":
         return "off"
-    if mode in ("anime", "live", "course", "game"):
-        return mode
+    # 直播/网课不单独占菜单项：老大说它们统合在「B站看番」里
+    if mode in ("anime", "live", "course"):
+        return "anime"
+    if mode == "game":
+        return "game"
     if mode == "video":
         if "generic" in source:
             return "generic"          # 托盘选的通用视频 / 自动判定的非B站播放器

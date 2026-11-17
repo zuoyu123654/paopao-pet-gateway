@@ -554,7 +554,8 @@ class VideoWatcher(threading.Thread):
             return "anime", "auto-anime"
         if "live.bilibili" in url or ("直播" in hay and not any(
                 w in hay for w in ("回放", "录播", "切片", "解说"))):
-            return "live", "auto-live"
+            # 老大定的：直播/网课不单独占托盘项，统合到「B站看番」
+            return "anime", "auto-anime"
         if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
             return "video", "auto-video-bili"
         return "video", "auto-video"

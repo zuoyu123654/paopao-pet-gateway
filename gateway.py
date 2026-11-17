@@ -2287,7 +2287,7 @@ class GameWatcher(threading.Thread):
                         log.info("游戏模式：自动进入（%s｜%s）", app, title[:40])
                 elif (cur in ("video", "anime", "live", "course")
                       and str(self.gateway.mode.source) in (
-                          "auto-video", "auto-video-bili", "auto-anime", "auto-live", "video-leave")):
+                          "auto-video", "auto-video-bili", "auto-anime", "video-leave")):
                     # 刚才自动进了视频模式，现在前台换成游戏：不用等视频那边 5 分钟才走，
                     # 短暂确认后就接管（老大 2026-11-17 说「一堆问题」里的一个）。
                     if now - self.first_seen >= self.switch_seconds:
@@ -4319,10 +4319,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         log.info("模式切换 → %s（%s）", data["mode"], data["source"])
         if source.startswith("tray"):
-            # 托盘选的模式先锁住 N 分钟（期间自动判定都不许动它）
-            lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
-            GATEWAY.mode_lock_until = time.time() + lock_min * 60
-            log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
+            if data["mode"] == "auto":
+                # 老大 2026-11-17：手动切到「自动模式」就是让自动判定接管，
+                # 这一个**不加锁**（不然选了自动还要干等 5 分钟才有反应）。
+                GATEWAY.mode.release("手动选自动")
+                GATEWAY.mode_lock_until = 0.0
+                log.info("自动模式不加锁：自动判定立即接管")
+            else:
+                # 托盘选的模式先锁住 N 分钟（期间自动判定都不许动它）
+                lock_min = max(1.0, float(GATEWAY.cfg.get("mode_lock_minutes", 5)))
+                GATEWAY.mode_lock_until = time.time() + lock_min * 60
+                log.info("模式锁：%s 锁 %.0f 分钟（到点只放开，不退出）", data["mode"], lock_min)
             # 托盘选的最后一步：把她那边的「主动识屏」也拨成一致
             # （关闭 = 识屏关；其它模式 = 识屏开）
             GATEWAY.set_proactive(data["mode"] != "off")
