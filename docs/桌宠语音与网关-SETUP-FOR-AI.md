@@ -1346,6 +1346,15 @@ lore.py                模块：抓取 / 总结 / 分块 / 检索 / 后台补课
 4. 时长 90 秒～50 分钟（太短没内容，太长多半是整活/直播）；
 5. 两路关键词合并去重，先按「正向词命中数」再按播放量排，取前 `bili.videos`（默认 2）。
 
+**试过但没接的源**（别再走一遍）：
+
+- **BWIKI**（`wiki.biligame.com/<子域>/api.php`）：API 能通（`ys`、`zzz` 都试过），但**一款游戏
+  一个子域**，得先知道映射；返回的是 wikitext，模板/表格噪声很大，还要再洗一遍。萌娘 + B站
+  已经能覆盖「玩法/术语/界面/角色」，先不接。
+- **Bangumi API**（`api.bgm.tv`）：本机直接超时（网络不通），番剧只走萌娘百科。
+- **萌娘百科的搜索/分类/links API**：`list=search` 返回 `Unauthorized API call`，
+  `list=categorymembers`、`parse&prop=links` 返回空——别指望用它们发现角色页或别名。
+
 #### 4.2v.3 总结：用 chat 模型，不要用推理模型
 
 `Lore.summarize()` 调 `gateway.post_once()`，模型是 `lore.model`，**默认 `deepseek-chat`**。
