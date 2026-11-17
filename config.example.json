@@ -138,7 +138,6 @@
         "ocr_python": "C:\\path\\to\\ocrvenv\\Scripts\\python.exe",
         "ocr_bottom_ratio": 0.34,
         "transcript_keep": 12,
-        "speak_hint": true,
         "loopback_device": "",
         "subtitle_ocr": false,
         "switch_seconds": 20,

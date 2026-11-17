@@ -4056,10 +4056,6 @@ class Gateway:
                 if block:
                     messages.insert(0, {"role": "system", "content": block})
                     log.info("视频模式：带上 %d 条对白/字幕", self.video.transcript_count())
-            hint = self.video.take_first_hint()
-            if hint:
-                messages.insert(0, {"role": "system", "content": hint})
-                log.info("视频模式：第一次开口的引导已注入")
 
         if scenario == "vision":
             # 「先看清再说话」+ 作品小抄：认得出是哪款游戏/哪部番，也接得住话。

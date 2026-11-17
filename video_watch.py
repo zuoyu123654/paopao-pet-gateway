@@ -381,7 +381,6 @@ class VideoWatcher(threading.Thread):
             5.0, float(self.conf.get("game_takeover_seconds", 90)))
         self.keep = int(self.conf.get("transcript_keep", 12))
         self.min_cjk = float(self.conf.get("asr_min_cjk_ratio", 0.25))
-        self.speak_hint = bool(self.conf.get("speak_hint", True))
         # 字幕 OCR 默认关（老大 2026-11-17 说的：很多视频根本没字幕条，OCR 白跑；
         # 有声音就够了，环回转写才是主路）。真要 OCR 兜底再开。
         self.use_ocr = bool(self.conf.get("subtitle_ocr", False))
@@ -398,7 +397,6 @@ class VideoWatcher(threading.Thread):
         self.asr_bad = 0
         self.ocr_on = False
         self.last_asr_at = 0.0
-        self.first_hint = False
         self.error = ""
         self._prev_idle = 99.0
         self._events: "collections.deque" = collections.deque()
@@ -441,7 +439,6 @@ class VideoWatcher(threading.Thread):
             self.last_fore_at = now
             self.asr_bad = 0
             self.ocr_on = False
-            self.first_hint = self.speak_hint
             self.app, self.title = app, title
         self.asr.active.set()
         log.info("视频类模式：手动进入（%s / %s）", app or "?", (title or "")[:40])
@@ -469,16 +466,6 @@ class VideoWatcher(threading.Thread):
             "然后说你自己看到什么、怎么想、猜接下来会怎样。",
             "说话规矩：只在有值得说的点开口，一两句；不剧透、不报进度、不提时间、不催他睡觉。",
         ])
-
-    def take_first_hint(self) -> str:
-        with self.lock:
-            if not self.first_hint:
-                return ""
-            self.first_hint = False
-        return (
-            "【刚进入看视频模式，这是你第一次开口】顺口带一句你也在看（比如「哦，看视频啊」），"
-            "一句话融进你本来要说的话里，不要单独立一句，也不要每次都提。"
-        )
 
     def status(self) -> dict:
         with self.lock:
@@ -584,8 +571,7 @@ class VideoWatcher(threading.Thread):
             self.transcript.clear()
             self.asr_bad = 0
             self.ocr_on = False
-            self.first_hint = self.speak_hint
-        self.asr.active.set()
+            self.asr.active.set()
         # 字幕 OCR 只当兜底：先靠环回转写，转不出来（没声/外文）再开 OCR
         self.last_asr_at = time.time()
         self.last_fore_at = time.time()
