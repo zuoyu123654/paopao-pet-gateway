@@ -492,7 +492,7 @@ def add_latest_updates(title: str, version: str, texts: list[str]) -> int:
             added += 1
         # 只留优先级最高的 5 条
         latest.sort(key=lambda x: -int(x.get("priority", 0) or 0))
-        entry["latest"] = latest[:5]
+        entry["latest"] = latest[:8]
         entry["version"] = version
         entry["version_checked_at"] = time.strftime("%Y-%m-%d")
         entry["visual_at"] = time.strftime("%Y-%m-%d")
@@ -533,7 +533,7 @@ def add_preview_updates(title: str, texts: list[str]) -> int:
             existing.add(text)
             added += 1
         latest.sort(key=lambda x: -int(x.get("priority", 0) or 0))
-        entry["latest"] = latest[:5]
+        entry["latest"] = latest[:8]
     if added:
         tmp = TITLES_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
