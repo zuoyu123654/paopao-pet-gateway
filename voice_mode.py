@@ -233,6 +233,10 @@ class VoiceMode(threading.Thread):
                 "hotkey": self.hotkey, "hotkey_ok": self.hotkey_ok, "turns": self.turns,
                 "last_text": self.last_text[:80], "error": self.last_error}
 
+    def is_speaking(self) -> bool:
+        """这一句里已经检测到有效人声（电话/按键都算）。"""
+        return bool(self.recording.is_set() and getattr(self, "_last_voiced", 0.0) > 0)
+
     # ------------------------------------------------------------ 内部
     def _bubble(self, text: str, duration_ms: int = 0) -> None:
         try:

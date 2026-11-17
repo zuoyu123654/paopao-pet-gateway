@@ -4360,12 +4360,17 @@ class Gateway:
         log.info("模式提示：%s（%s / %s）", text, mode, source)
 
     # ---- 一次对话
-    def stream_reply(self, payload: dict, scenario: str, sink: list[str]):
+    def stream_reply(self, payload: dict, scenario: str, sink: list[str],
+                     proactive: bool = False, suppress_proactive: bool = False):
         """生成器：逐块产出正文增量；同时按标点把句子塞进朗读流水线。"""
         # 模式 off 现在只表示「别自动进看视频/看番」，**不再把识屏说哑**：
         # 之前一按「关闭」，她照常识屏却一句不出声，看着就像语音坏了。
         # 真要静音（夜间/开会）就打开 mute_vision_when_off。
         speak_this = True
+        if proactive and suppress_proactive:
+            # 老大正在说话：主动识屏只冒泡，别插嘴念
+            speak_this = False
+            log.info("主动识屏：老大正在说话，只冒泡不念")
         if (scenario == "vision" and self.cfg.get("mute_vision_when_off", False)
                 and getattr(self, "mode", None) and self.mode.get() == "off"):
             speak_this = False
@@ -5597,13 +5602,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         log.info("请求 scenario=%s stream=%s user=%r", scenario, client_stream, user_text[:60])
-        # 电话模式正在听/说：主动识屏先别插嘴，否则会把这一轮回答顶掉
-        if (scenario == "vision" and getattr(GATEWAY, "voice", None)
-                and GATEWAY.voice.mode == "call"
-                and str(user_text).startswith("（参考元数据")):
-            log.info("电话模式：跳过主动识屏，别盖住对话")
-            self._send_blank_completion(client_stream, model)
-            return
+        # 电话模式不关主动识屏；如果老大正在说话，只冒泡不念（见 stream_reply）
         # 黑屏守卫：独占全屏游戏 / 锁屏 / DRM 画面截出来一片黑，说出去就是「我什么也看不见」。
         # 连续 2 张都黑就整轮跳过（不叫模型、不说话、不冒泡），也不占账本。
         if scenario == "vision" and GATEWAY.vision_is_black():
@@ -5617,7 +5616,15 @@ class Handler(BaseHTTPRequestHandler):
             GATEWAY.speech.arm_vision_cue()
 
         sink: list[str] = []
-        gen = GATEWAY.stream_reply(payload, scenario, sink)
+        proactive = (scenario == "vision"
+                     and str(user_text).startswith("（参考元数据"))
+        suppress_proactive = bool(
+            proactive and getattr(GATEWAY, "voice", None)
+            and GATEWAY.voice.mode == "call"
+            and GATEWAY.voice.is_speaking())
+        gen = GATEWAY.stream_reply(payload, scenario, sink,
+                                   proactive=proactive,
+                                   suppress_proactive=suppress_proactive)
 
         try:
             if client_stream:
