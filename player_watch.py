@@ -326,6 +326,7 @@ class PlayerWatch(threading.Thread):
             self._ext_state = {
                 "url": url,
                 "title": str(data.get("title") or "")[:100],
+                "referrer": str(data.get("referrer") or "")[:300],
                 "t": tval,
                 "d": float(d) if isinstance(d, (int, float)) else 0.0,
                 "paused": data.get("paused"),

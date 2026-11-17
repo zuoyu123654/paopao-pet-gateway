@@ -1178,9 +1178,12 @@ Edge 下次启动会按自己的策略覆盖，轻则被禁，重则整个扩展
 > **B站隐藏 iframe 会把真实进度覆盖掉（2026-11-17 实测）**：B站页面里有一个
 > `message.bilibili.com/pages/nav/header_sync` 的跨域 iframe，旧用户脚本/扩展会在里面也跑，
 > 每秒把 `header sync / 0:00` 写进 `/player`，导致 `player.url` 变成 header sync、模式看着像失灵。
-> 修法两层：用户脚本只跑**顶层页面**且必须有 `<video>`；网关 `PlayerWatch.push_ext()` 只认带有效
-> `currentTime` 的上报，没有时间戳的一律丢弃——不只 B站，YouTube/爱奇艺/腾讯/抖音的隐藏 iframe
-> 也走同一条规则；直播的 `duration` 是 `Infinity` 也没关系，只要 `currentTime` 是数字就收。
+> 修法两层：用户脚本 1.0.2 不再限制顶层，而是**只在真的有 `<video>` 且 `currentTime` 是数字的帧**
+> 上报（隐藏 iframe 没 video 自然被挡；B站直播/番剧播放器即使在 iframe 里也能报）；
+> 网关 `PlayerWatch.push_ext()` 只认带有效 `currentTime` 的上报，没有时间戳的一律丢弃——
+> 不只 B站，YouTube/爱奇艺/腾讯/抖音的隐藏 iframe 也走同一条规则；直播的 `duration` 是
+> `Infinity` 也没关系，只要 `currentTime` 是数字就收。B站直播/番剧若在 iframe 里，
+> 网关会用 `referrer` 里的 `live.bilibili` / `bangumi` 补判。
 
 
 #### 4.2q.4 2026-11-17 傍晚这版：90 秒、直播/番剧、DSH 完成不吞

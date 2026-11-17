@@ -554,6 +554,12 @@ class VideoWatcher(threading.Thread):
             player = getattr(self.gateway, "player", None)
             snap = player.snapshot() if player is not None else {}
             url = str((snap or {}).get("url") or "").lower()
+            ref = str((snap or {}).get("referrer") or "").lower()
+            # B站直播/番剧的播放器在 iframe 里时，location 可能是 player.bilibili.com，
+            # 真正的番剧/直播页在 referrer 里；优先用能识别集/直播的那个。
+            if (("live.bilibili" in ref or "bangumi" in ref)
+                    and "live.bilibili" not in url and "bangumi" not in url):
+                url = ref
         except Exception:  # noqa: BLE001
             pass
         # 老大 2026-11-17 确认：B站番剧的链接里就是 bangumi（/bangumi/play/...），
@@ -653,7 +659,13 @@ class VideoWatcher(threading.Thread):
                             target, source = self._video_target(app, title)
                             mode.set(target, source=source)
                             self._enter()
-                            log.info("视频类模式：从游戏接管（%s｜%s）", target, app)
+                            purl = ""
+                            try:
+                                purl = str((self.gateway.player.snapshot() or {}).get("url") or "")
+                            except Exception:  # noqa: BLE001
+                                pass
+                            log.info("视频类模式：从游戏接管（%s｜%s｜%s）",
+                                     target, app, purl[:80] or title[:40])
                     else:
                         self._game_seen = 0.0
                 return

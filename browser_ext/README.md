@@ -27,11 +27,13 @@ POST 到 `http://127.0.0.1:9888/player`。只读进度，不碰页面内容，�
 网关侧 `PlayerWatch` 的优先级：**扩展/用户脚本 → CDP 调试端口 → B站历史**。
 所以扩展/脚本没跑时，看片窗口的 CDP 或 B站历史还能兜底。
 
-> **B站隐藏 iframe 的坑**：B站页面里有 `message.bilibili.com/pages/nav/header_sync`
-> 的跨域 iframe。用户脚本 1.0.1 只在**顶层页面**、且页面里**真有 `<video>`** 时才上报；
-> 网关 `PlayerWatch.push_ext()` 也只认带有效 `currentTime` 的上报，没有时间戳的一律丢弃
-> （不限 B站，YouTube/爱奇艺/腾讯/抖音的隐藏帧同样处理；直播 `duration` 为空但 `currentTime`
-> 是数字，照收）。
+> **B站隐藏 iframe 的坑（2026-11-17 修到 1.0.2）**：B站页面里有
+> `message.bilibili.com/pages/nav/header_sync` 的跨域 iframe。用户脚本 1.0.2 不再限制只在顶层，
+> 而是**只在真的有 `<video>`、且 `currentTime` 是数字的帧**上报；隐藏 iframe 没有 video 自然被挡。
+> 这样 B站直播/番剧的播放器即使在 iframe 里也能上报；网关再用 `referrer` 里的
+> `live.bilibili` / `bangumi` 补判直播/番剧。`PlayerWatch.push_ext()` 也只认带有效 `currentTime`
+> 的上报，没有时间戳的一律丢弃（不限 B站，YouTube/爱奇艺/腾讯/抖音的隐藏帧同样处理；
+> 直播 `duration` 为空但 `currentTime` 是数字，照收）。
 
 ## 验证
 

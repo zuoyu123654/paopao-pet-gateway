@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         泡泡桌宠 · 播放进度上报（免开发者模式）
 // @namespace    https://github.com/paopao
-// @version      1.0.1
+// @version      1.0.2
 // @description  把当前网页视频的地址/标题/进度 POST 给本机网关（127.0.0.1:9888），只读进度、不碰页面内容。
 // @author       paopao
 // @match        *://*.bilibili.com/*
@@ -27,7 +27,8 @@
  */
 
 (() => {
-  if (window.top !== window) return;       // 只在顶层页面跑：B站有一堆隐藏 iframe（header_sync 之类）
+  // 不再只限顶层：B站直播/番剧的播放器可能在 iframe 里。
+  // 只上报「真的有 <video> 且 currentTime 是数字」的帧，隐藏 iframe（没有 video）自然被挡掉。
   if (window.__paopaoPlayerReporter) return;
   window.__paopaoPlayerReporter = true;
 
@@ -62,6 +63,7 @@
       post({
         url: location.href,
         title: document.title,
+        referrer: document.referrer || "",
         t: v.currentTime,
         d: Number.isFinite(v.duration) ? v.duration : null,
         paused: v.paused,
