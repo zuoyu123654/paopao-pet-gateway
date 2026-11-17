@@ -1721,6 +1721,13 @@ class SpeechPipeline:
     def pending_count(self) -> int:
         return self.pending.qsize()
 
+    def busy(self) -> bool:
+        """还有话没念完（排队/合成/正在响）。电话模式要等这个结束再开麦。"""
+        try:
+            return self._low_busy()
+        except Exception:  # noqa: BLE001
+            return False
+
     # ---------------------------------------------------------------- 合成
     def _synth_loop(self) -> None:
         while True:
@@ -4257,7 +4264,9 @@ class Gateway:
         except (KeyError, IndexError, TypeError):
             reply = ""
         if not reply:
+            log.warning("语音回答：模型回了空内容（%s）", str(data)[:160])
             return ""
+        log.info("语音回答：%d 字（%s）", len(reply), text[:20])
         self.speech.say(reply, tag="voice")
         # 气泡停留：跟字数和语音差不多长，但别赖着——3.2 秒起步，最多 5 秒
         self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))
@@ -5588,6 +5597,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         log.info("请求 scenario=%s stream=%s user=%r", scenario, client_stream, user_text[:60])
+        # 电话模式正在听/说：主动识屏先别插嘴，否则会把这一轮回答顶掉
+        if (scenario == "vision" and getattr(GATEWAY, "voice", None)
+                and GATEWAY.voice.mode == "call"
+                and str(user_text).startswith("（参考元数据")):
+            log.info("电话模式：跳过主动识屏，别盖住对话")
+            self._send_blank_completion(client_stream, model)
+            return
         # 黑屏守卫：独占全屏游戏 / 锁屏 / DRM 画面截出来一片黑，说出去就是「我什么也看不见」。
         # 连续 2 张都黑就整轮跳过（不叫模型、不说话、不冒泡），也不占账本。
         if scenario == "vision" and GATEWAY.vision_is_black():

@@ -353,10 +353,16 @@ class VoiceMode(threading.Thread):
                 self._reopen_call()
 
     def _reopen_call(self) -> None:
-        """电话模式：没听到/没转出来也继续听，不要停下来等热键。"""
+        """电话模式：没听到/没转出来也继续听；等她这一轮的话念完再开麦。"""
         if self.mode != "call" or self.cancel.is_set():
             return
-        time.sleep(0.25)
+        speech = getattr(self.gateway, "speech", None)
+        deadline = time.time() + 90
+        while (self.mode == "call" and not self.cancel.is_set()
+               and speech is not None and speech.busy()):
+            if time.time() > deadline:
+                break
+            time.sleep(0.2)
         if self.mode == "call" and not self.recording.is_set():
             self.begin()
 
