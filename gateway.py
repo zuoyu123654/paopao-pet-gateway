@@ -3068,7 +3068,18 @@ class Facts:
             except OSError as exc:
                 log.debug("事实没存下（不影响这轮）：%s", exc)
 
-    def add(self, text: str, app: str = "", title: str = "", source: str = "chat") -> bool:
+    def extract_name(self, text: str) -> str:
+        """从「她是X」里取出具体名字；纯提问返回空。"""
+        m = self.ASSERT_RE.search(re.sub(r"\s+", " ", str(text or "")))
+        if not m:
+            return ""
+        name = m.group(1).strip()
+        if not name or any(name == bad or name.startswith(bad) for bad in self.BAD_NAMES):
+            return ""
+        return name
+
+    def add(self, text: str, app: str = "", title: str = "", source: str = "chat",
+            visual: str = "") -> bool:
         if not self.enabled:
             return False
         text = re.sub(r"\s+", " ", str(text or "")).strip(" 　")
@@ -3077,11 +3088,8 @@ class Facts:
             return False
         if not self.TEACH_RE.search(text):
             return False
-        m = self.ASSERT_RE.search(text)
-        if not m:
-            return False
-        name = m.group(1).strip()
-        if not name or any(name == bad or name.startswith(bad) for bad in self.BAD_NAMES):
+        name = self.extract_name(text)
+        if not name:
             return False
         now = time.time()
         with self.lock:
@@ -3090,8 +3098,11 @@ class Facts:
                     return False
         row = {"ts": int(now), "text": text, "app": (app or "")[:40],
                "title": (title or "")[:80], "source": source}
+        if visual:
+            row["visual"] = str(visual).strip()[:120]
         self._append(row)
-        log.info("记下老大教的事（%s）：%s", source, text[:40])
+        log.info("记下老大教的事（%s）：%s%s", source, text[:40],
+                 ("｜外观：" + row["visual"][:30]) if row.get("visual") else "")
         return True
 
     def block(self, app: str = "", title: str = "", limit: int | None = None,
@@ -3122,6 +3133,9 @@ class Facts:
         used = 0
         for row in rows:
             text = re.sub(r"\s+", " ", str(row.get("text") or "")).strip()
+            vis = str(row.get("visual") or "").strip()
+            if vis:
+                text += "（外观：%s）" % vis
             tag = str(row.get("title") or row.get("app") or "").strip()
             line = "- %s%s" % (text, ("（%s）" % tag) if tag else "")
             if used + len(line) > max_chars:
@@ -4471,9 +4485,59 @@ class Gateway:
                     app, title = foreground()
                 except Exception:  # noqa: BLE001
                     pass
-            self.facts.add(text, app, title, source=scenario)
+            name = self.facts.extract_name(text)
+            visual = self._screen_character_visual(name) if name else ""
+            self.facts.add(text, app, title, source=scenario, visual=visual)
         except Exception as exc:  # noqa: BLE001
             log.debug("事实没记成（不影响这轮）：%s", exc)
+
+    def _screen_character_visual(self, name: str) -> str:
+        """老大纠正名字时顺手截当前画面，让视觉模型只描述这个角色的外观。"""
+        if not name:
+            return ""
+        try:
+            snap = self.frames.snapshot(3)
+        except Exception:  # noqa: BLE001
+            return ""
+        if not snap:
+            return ""
+        try:
+            import io as _io
+            from PIL import Image
+
+            _ts, im = snap[-1]
+            im = im.convert("RGB")
+            im.thumbnail((1024, 1024))
+            raw = _io.BytesIO()
+            im.save(raw, "JPEG", quality=85)
+            b64 = base64.b64encode(raw.getvalue()).decode()
+            prompt = (
+                "这是老大电脑的屏幕截图。他刚指着画面里的角色说「她叫%s」。"
+                "只描述画面里那个最显眼的角色：发色/发型、服装主色和款式、最显眼的标志物；"
+                "20~40 字。如果画面里没有明确角色，只回「看不清」，不要猜名字、不要描述界面。"
+                % name
+            )
+            payload = {
+                "model": self.cfg.get("model") or "deepseek-v4-flash",
+                "max_tokens": 100, "temperature": 0.2, "stream": False,
+                "messages": [
+                    {"role": "system", "content": "你只描述角色外观，不写别的。"},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {
+                            "url": "data:image/jpeg;base64," + b64}},
+                    ]},
+                ],
+            }
+            data = self.post_once(payload)
+            desc = (data["choices"][0]["message"].get("content") or "").strip()
+            desc = desc.replace("\n", " ").strip("「」\"' ")
+            if "看不清" in desc or len(desc) < 4:
+                return ""
+            return desc[:120]
+        except Exception as exc:  # noqa: BLE001
+            log.info("纠正时截角色外观没成（只记名字）：%s", exc)
+            return ""
 
     def _facts_block(self, app: str = "", title: str = "") -> str:
         if getattr(self, "facts", None) is None:
