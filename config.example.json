@@ -142,7 +142,7 @@
         "loopback_device": "",
         "subtitle_ocr": false,
         "switch_seconds": 20,
-        "game_takeover_seconds": 5
+        "game_takeover_seconds": 90
     },
     "soften_self_recognition": true,
     "self_recognition": {

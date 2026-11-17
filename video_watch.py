@@ -375,9 +375,10 @@ class VideoWatcher(threading.Thread):
         self.paused_grace = float(self.conf.get("paused_grace_seconds", 600))
         self.paused_away_grace = float(self.conf.get("paused_away_grace_seconds", 120))
         self.switch_seconds = max(5.0, float(self.conf.get("switch_seconds", 20)))
-        # 游戏里退出来直接看直播/视频：这个方向只确认几秒，别让人干等 20 秒
+        # 游戏里退出来直接看直播/视频：这个方向也按「进入判断」的 90 秒确认，
+        # 5 秒太容易把“游戏里切出来瞄一眼浏览器”误判成看片（老大 2026-11-17 定的）。
         self.game_takeover_seconds = max(
-            3.0, float(self.conf.get("game_takeover_seconds", 5)))
+            5.0, float(self.conf.get("game_takeover_seconds", 90)))
         self.keep = int(self.conf.get("transcript_keep", 12))
         self.min_cjk = float(self.conf.get("asr_min_cjk_ratio", 0.25))
         self.speak_hint = bool(self.conf.get("speak_hint", True))
