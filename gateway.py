@@ -2632,7 +2632,10 @@ class TitleLearner(threading.Thread):
             '游戏写怎么玩/核心机制/大致流程；番剧和影视写大体剧情 + 主要人物名字。'
             '不要写公司、平台、发售时间、评分这类常识。",'
             '"visual":"给识屏用的外观线索，150~250 字：游戏写 6~10 个常见角色/地区的一眼特征'
-            '（名字 + 发色/服装/地标），番剧写主要角色的外观特征和场景；只写能认人的点，不要剧情长文。"}\n'
+            '（名字 + 发色/服装/地标），番剧写主要角色的外观特征和场景；只写能认人的点，不要剧情长文。",'
+            '"short_names":{"全名":"常用简称"}'
+            '——只在番剧有全名超过 4 个字的角色时给，最多 8 条；简称只取常用叫法/最自然的 2~3 个字，'
+            '不确定就不要编，没有就给空对象。}\n'
             "其他情况（网页、文档、代码、聊天、工具）就回 {\"kind\":\"other\"}。只回 JSON，不要解释。"
             % (title, app)
         )
@@ -2665,6 +2668,7 @@ class TitleLearner(threading.Thread):
         name = str(obj.get("name") or "").strip()
         note = str(obj.get("note") or "").strip()
         visual = str(obj.get("visual") or "").strip()
+        shorts = obj.get("short_names")
         kind = str(obj.get("kind") or "").strip().lower()
         if not name or not note:
             return
@@ -2672,6 +2676,14 @@ class TitleLearner(threading.Thread):
         if visual:
             entry["visual"] = visual
             entry["visual_at"] = time.strftime("%Y-%m-%d")
+        if kind == "anime" and isinstance(shorts, dict):
+            clean_shorts = {
+                str(n).strip(): str(s).strip()
+                for n, s in shorts.items()
+                if str(n).strip() and str(s).strip()
+            }
+            if clean_shorts:
+                entry["short_names"] = clean_shorts
         updates = {name: entry}
         low_app = (app or "").lower().replace(".exe", "")
         if low_app and low_app not in self.BROWSER_LIKE:
