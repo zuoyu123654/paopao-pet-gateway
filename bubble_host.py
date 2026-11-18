@@ -499,6 +499,8 @@ def main() -> int:
     anchor_bottom = int(os.environ.get("PAOPAO_BUBBLE_ANCHOR_BOTTOM", "150") or 150)
     anchor_bottom = max(40, min(CAPTURE_H - 80, anchor_bottom))
     if capture_overlay:
+        log("采集画布 %dx%d，头顶锚点离底边 %dpx" % (CAPTURE_W, CAPTURE_H, anchor_bottom))
+    if capture_overlay:
         overlay = QWidget()
         overlay.setWindowTitle("泡泡气泡")
         overlay.setWindowFlags(

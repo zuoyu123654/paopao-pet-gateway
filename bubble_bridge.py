@@ -106,6 +106,11 @@ class BubbleBridge:
             log.warning("气泡小工拉不起来：%s", exc)
             return False
 
+    def warm(self) -> None:
+        """启动时就把气泡窗口拉起来，OBS 一开始就能选到“泡泡气泡”。"""
+        if self.enabled:
+            self._ensure()
+
     def _request(self, payload: dict) -> dict | None:
         """发一条命令，等它自己那个 id 的 ack（超时返回 None）。"""
         if not self.enabled:

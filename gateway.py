@@ -3919,6 +3919,10 @@ class Gateway:
         self.player.start()
         # 头顶原生气泡（独立 Qt 小工，按需拉起）
         self.bubble = BubbleBridge(cfg)
+        try:
+            self.bubble.warm()
+        except Exception:  # noqa: BLE001
+            pass
         self.bubble.start()
         # 托盘里手动选的模式锁 10 分钟，超时回自动
         threading.Thread(target=self._mode_lock_loop, name="mode-lock", daemon=True).start()
