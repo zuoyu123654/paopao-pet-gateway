@@ -969,7 +969,15 @@ class SpeechPipeline:
         now = time.time()
         self.last_text, self.last_at = cleaned, now
         max_chars = int(self.cfg["tts"].get("max_chars_per_sentence", 60))
-        sentences = split_sentences(cleaned, max_chars)[: int(self.cfg["tts"].get("max_sentences", 40))]
+        # 固定文案（模式提示/DSH 状态）是**整句预合成**的；这里若再按标点拆成
+        # 「哦，开局了？」+「我在这儿陪你…」，两个碎片都命中不了整句缓存，
+        # 会当场流式/整句合成——听着就是一句半生不熟、后面还慢半拍。
+        # 整句缓存命中时原样送一条，别再拆。
+        if self._phrase_cache_path(cleaned):
+            sentences = [cleaned]
+        else:
+            sentences = split_sentences(cleaned, max_chars)[: int(
+                self.cfg["tts"].get("max_sentences", 40))]
         # 电话模式里主动识屏先开口时，语音回话也排队，别把它掐掉
         if queue_if_busy and self._low_busy():
             self.deferred.append((text, tag))
