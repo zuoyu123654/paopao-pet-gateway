@@ -455,6 +455,16 @@ class HostMode(threading.Thread):
                 bits.append("正在看：%s" % (snap.get("title") or "")[:80])
         except Exception:  # noqa: BLE001
             pass
+        # 直播模式没有 B站字幕接口，靠环回转写；把主播刚说的带进上下文，
+        # 不然回弹幕时她只会说“听不见”。
+        try:
+            video = getattr(self.gateway, "video", None)
+            if video is not None and getattr(video, "active", False):
+                lines = [str(x[2]) for x in list(video.transcript)[-6:] if str(x[2]).strip()]
+                if lines:
+                    bits.append("主播刚说：\n" + "\n".join(x[:80] for x in lines))
+        except Exception:  # noqa: BLE001
+            pass
         recent = []
         for it in list(self.q.queue)[-8:]:
             recent.append("%s：%s" % (it["user"], it["text"][:50]))

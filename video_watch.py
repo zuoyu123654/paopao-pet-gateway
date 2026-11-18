@@ -131,6 +131,9 @@ class AudioLoop(threading.Thread):
         self.lock = threading.Lock()
         self.alive = False
         self.error = ""
+        # 她自己在说话时，环回会把她自己的 TTS 也录进去，转写出来就是“自己念自己”。
+        # 由 VideoWatcher 挂一个 gate：返回 True 时丢掉这期间的环回。
+        self.gate = None
 
     def recent_level(self, seconds: float) -> float:
         now = time.time()
@@ -222,6 +225,15 @@ class AudioLoop(threading.Thread):
                     log.warning("环回已经 2 分钟没声音：媒体是不是在蓝牙耳机上？"
                                 "把输出换到扬声器/HDMI，或设 video_watch.loopback_device")
                 continue
+            # 她自己在发声：这几秒的环回全是她自己的 TTS，直接丢，别转成“主播说话”
+            try:
+                if self.gate is not None and self.gate():
+                    for k in acc:
+                        acc[k] = []
+                        loud[k] = 0.0
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
             rms = float(np.sqrt((b ** 2).mean()))
             with self.lock:
                 self.level.append((time.time(), rms))
@@ -413,6 +425,7 @@ class VideoWatcher(threading.Thread):
         self._target_title = ""
         self._target_since = 0.0
         self.audio = AudioLoop(self.conf)
+        self.audio.gate = self._self_speaking
         self.asr = AsrWorker(self.conf, self.audio, self._on_text)
         self.ocr = OcrWorker(self.conf, self._on_text)
 
@@ -667,6 +680,17 @@ class VideoWatcher(threading.Thread):
             }
 
     # ---------------------------------------------------------- 内部
+    def _self_speaking(self) -> bool:
+        """她自己的 TTS 正在响/排队时，环回里会有她自己的声音，别当主播转写。"""
+        sp = getattr(self.gateway, "speech", None)
+        if sp is None:
+            return False
+        try:
+            return bool(getattr(sp, "_playing", False)
+                        or getattr(sp, "current_stream", None))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _on_text(self, source: str, text: str) -> None:
         text = text.strip()
         if not text:

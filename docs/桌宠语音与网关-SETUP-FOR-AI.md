@@ -3132,6 +3132,12 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
 
 - 弹幕源：B站直播 WebSocket（`getDanmuInfo`，-352 风控时回退旧版 `Danmu/getConf`）；
   `protover=2` + zlib，鉴权 op=8 成功才算 connected；
+- **直播没有 B站字幕接口**：live 模式靠环回音频转写（9881），状态看 `video.lines/last`；
+  她自己的 TTS 也会经环回被录进去，2026-11-18 加了 gate：`speech.busy()` 期间的环回
+  直接丢，不然会转出她自己的话，误当主播说的；
+- 如果 `video.lines` 一直 0：先看媒体输出是不是在蓝牙耳机/别的声卡——环回只录
+  `video_watch.loopback_device` 或默认扬声器；把输出换到扬声器/HDMI，或在配置里
+  钉一个端点；
 - 只当输入源，不改 mode；回复时把「当前模式 + 前台标题/播放器 + 最近弹幕」拼进上下文；
 - 队列筛选：问句/@她/SC/礼物优先，广告/链接/`!命令`/自己发的跳过，60 秒内重复去重；
 - 回复会叫对方名字/简称（观众知道在回谁）；名字先去掉 @/符号/表情，超过
