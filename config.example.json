@@ -4,6 +4,8 @@
     "upstream_base_url": "https://api.deepseek.com",
     "upstream_chat_path": "/v1/chat/completions",
     "api_key": "",
+    "api_key_credential_target": "",
+    "model": "deepseek-chat",
     "upstream_timeout": 300,
     "vision": {
         "enabled": false,
@@ -102,6 +104,12 @@
     "speak_chat": true,
     "speak_vision": true,
     "inject_vision_ledger": true,
+    "chat_screen_look": true,
+    "mouse_look": {
+        "enabled": true,
+        "cooldown_seconds": 3
+    },
+    "inject_vision_context": true,
     "wipe_owner_word": true,
     "memory_inbox_url": "",
     "memory_inbox_scenarios": [
@@ -133,6 +141,7 @@
         "frame_width": 640,
         "jpeg_quality": 82,
         "grid_frames": 4,
+        "frame_idle_interval": 4.0,
         "attach_to_vision": true,
         "black_ratio": 0.92
     },
@@ -159,6 +168,15 @@
         "onset_voiced": 0.35,
         "max_tokens": 800,
         "ref_context_seconds": 30
+    },
+    "player_watch": {
+        "enabled": true,
+        "cdp_port": 9222,
+        "poll_seconds": 1.0,
+        "fresh_seconds": 8,
+        "subtitle_window_seconds": 90,
+        "subtitle_cache_hours": 24,
+        "bili_cli": "bili"
     },
     "video_watch": {
         "enabled": true,
@@ -194,6 +212,14 @@
     "vision_context_entries": 6,
     "vision_context_budget_chars": 600,
     "vision_context_item_chars": 90,
+    "vision_markers": [
+        "截图",
+        "识屏",
+        "屏幕",
+        "框选",
+        "画面",
+        "image_url"
+    ],
     "divination_voice": {
         "enabled": true,
         "max_line_age_seconds": 90,

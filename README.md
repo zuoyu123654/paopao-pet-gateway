@@ -1,17 +1,32 @@
 # 泡泡陪伴网关
 
-桌宠 / 桌娘的本地陪伴网关：**OpenAI 兼容代理 + TTS + 识屏账本 + 头顶气泡 + 语音模式**。
+桌宠 / 桌娘的本地陪伴网关：**OpenAI 兼容代理 + TTS + 识屏账本 + 头顶气泡 + 直播弹幕 + 语音模式**。
 
 ```
 桌宠 ──(base_url=http://127.0.0.1:9888)──> 网关 ──> DeepSeek（或任意 OpenAI 兼容上游）
                                             ├─> TTS（GPT-SoVITS / 豆包 / edge / MiMo / SAPI）
                                             ├─> ledger.jsonl（识屏账本 + 摘要）
+                                            ├─> 作品手册 lore/（自己查资料、自己总结）
                                             ├─> DSH 事件（可选）→ 状态播报
+                                            ├─> 直播弹幕 → 气泡 / 可选出声
                                             └─> 头顶气泡 / 托盘模式菜单 / 语音模式
 ```
 
 桌宠本身是闭源打包的，加不了本地 TTS；但它的聊天走 OpenAI 兼容 provider，`base_url` 可改。
 把地址指到这里，就拿到了每一次模型交互的全文——音色、语速、音量、什么时候打断全在自己手里。
+
+## 能做什么
+
+- **语音**：聊天、识屏、语音问答都用自己练的音色念；高优先级打断低优先级，不叠着说。
+- **识屏**：帧缓冲 + 拼图 + 前情账本，接得住「刚才那个」「这个角色是谁」。
+- **五档 + 游戏**：`auto` / `normal` / `video` / `anime` / `live` / `course` / `game` / `off`，
+  切换有气泡有声，托盘也能点。
+- **看视频/番剧/直播/网课**：字幕 OCR + 环回转写，按来源标注「剧情内容参考」「主播说的」「网课老师说的」。
+- **直播弹幕**：连 B站直播间，问句/@/SC 优先，按简称回；托盘勾「回弹幕出声」才念，热键 `Ctrl+Alt+B`。
+- **头顶气泡**：用桌宠那套气泡显示；开 `bubble.capture_window` 会多一个全屏透明采集窗
+  **`泡泡气泡（全屏）`**，给 OBS/直播姬做窗口采集。
+- **作品手册**：遇到新游戏/番剧自己查萌娘百科 + B站攻略，总结成 `lore/` 手册，按需检索一两段。
+- **语音模式**：`Ctrl+Alt+V` 按住说话 / 电话模式；`bubble/` 是搬来的气泡组件（MIT）。
 
 ## 快速开始
 
@@ -26,6 +41,13 @@ Invoke-WebRequest http://127.0.0.1:9888/doctor -UseBasicParsing
 
 然后把桌宠的 provider `base_url` 改成 `http://127.0.0.1:9888`，并关掉桌宠自带的聊天语音。
 
+**开机自启，二选一**（配个启动文件夹 vbs 隐藏拉起）：
+
+| 脚本 | 行为 |
+|---|---|
+| `follow_pet.ps1` | 桌宠开→网关开，桌宠关→网关关 |
+| `watchdog.ps1` | 每 5 分钟 `ensure_running.ps1`，缺谁补谁 |
+
 ## 更新
 
 ```powershell
@@ -33,20 +55,23 @@ powershell -ExecutionPolicy Bypass -File .\update.ps1
 ```
 
 它做三件事：`git pull` → `pip install -r requirements.txt`（只补缺的）→ 提示重启网关。
-`config.json` 和 `logs/`、`audio/`、`ledger.jsonl` 都在 `.gitignore` 里，**不会被覆盖**。
+`config.json` 和 `logs/`、`audio/`、`ledger.jsonl`、`lore/` 都在 `.gitignore` 里，**不会被覆盖**。
 
 ## 目录
 
 | 路径 | 说明 |
 |---|---|
-| `gateway.py` | 主程序（HTTP 服务 + 转发 + 朗读流水线 + 识屏账本） |
+| `gateway.py` | 主程序（HTTP 服务 + 转发 + 朗读流水线 + 识屏账本 + 模式机） |
 | `tts_backends.py` | 语音后端：GPT-SoVITS / 豆包 / edge / MiMo / SAPI |
+| `host_mode.py` | 直播弹幕：B站 WebSocket + 队列筛选 + 回复 |
 | `video_watch.py` | 通用视频模式（前台播放器 + 环回有声 + 键鼠低活跃） |
 | `voice_mode.py` | 语音模式（热键开录 + VAD 断句 + 转写） |
+| `lore.py` | 作品手册（自动检索 + 总结 + 按需注入） |
 | `bubble_host.py` / `bubble_bridge.py` | 头顶气泡小工（独立 Qt 进程）+ 网关侧桥 |
 | `bubble/` | 从 [dsh-pet-indesktop](https://github.com/MerZlin/dsh-pet-indesktop) 搬来的气泡组件（MIT，见 `bubble/README.md`） |
 | `phrases.py` | 固定文案（预合成用） |
 | `ocr_worker.py` | 字幕 OCR 小工（RapidOCR） |
+| `install.ps1` / `start.ps1` / `ensure_running.ps1` / `watchdog.ps1` / `follow_pet.ps1` | 安装、启动、自启 |
 | `config.example.json` | 配置模板 |
 | `docs/` | 施工单（含为什么这么调、踩过哪些坑） |
 

@@ -5996,10 +5996,16 @@ class Handler(BaseHTTPRequestHandler):
                            else "没分家，全走 9882"),
             },
             "asr_9881": {"ok": port_ok(9881), "detail": "本地转写服务"},
-            "ocr_venv": {"ok": os.path.exists(r"D:\app1\tools\ocrvenv\Scripts\python.exe"),
-                         "detail": "rapidocr 独立环境"},
-            "ytdlp": {"ok": os.path.exists(r"D:\app1\tools\ytdlp\yt_dlp"),
-                      "detail": "字幕抓取"},
+            "ocr_venv": (lambda p: {
+                "ok": bool(p) and os.path.exists(p),
+                "detail": ("rapidocr 独立环境：%s" % p) if p
+                else "没配 video_watch.ocr_python（字幕 OCR 用不了）",
+            })(str((g.cfg.get("video_watch") or {}).get("ocr_python") or "").strip()),
+            "bili_cli": (lambda name: {
+                "ok": bool(shutil.which(name)),
+                "detail": ("字幕/房间号：%s" % shutil.which(name)) if shutil.which(name)
+                else "没装 bili 命令（B站字幕、直播间自动找房间号用不了）",
+            })(str((g.cfg.get("player_watch") or {}).get("bili_cli") or "bili")),
             "ffmpeg": {"ok": bool(shutil.which("ffmpeg")), "detail": "音视频工具"},
             "frames": {"ok": len(g.frames.buf) > 0, "detail": "%d 帧在缓冲" % len(g.frames.buf)},
             "video_watch": (lambda st: {
@@ -6008,6 +6014,13 @@ class Handler(BaseHTTPRequestHandler):
                     st.get("state"), "（%d 条对白）" % st.get("lines", 0)
                     if st.get("lines") else "（环回%s）" % ("有声" if st.get("audio") else "没声")),
             })(getattr(g, "video", None).status() if getattr(g, "video", None) else {}),
+            "host": (lambda st: {
+                "ok": (not st.get("enabled")) or bool(st.get("connected")),
+                "detail": ("直播弹幕：没开" if not st.get("enabled") else
+                           ("直播弹幕：已连（房 %s，队列 %s）" % (st.get("room_id"), st.get("queued"))
+                            if st.get("connected") else
+                            "直播弹幕：开着但没连上（%s）" % (st.get("error") or "等连接"))),
+            })(getattr(g, "host", None).status() if getattr(g, "host", None) else {}),
             "precue": (lambda cues: {
                 "ok": (not cues) or bool(getattr(g.speech, "cue_paths", [])),
                 "detail": ("已关闭（tts.pre_cue 为空）" if not cues

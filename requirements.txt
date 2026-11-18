@@ -7,6 +7,9 @@ soundcard
 websocket-client
 brotli
 
+# Python 3.13 起标准库移除了 audioop（网关要拿它调音量/重采样），3.13+ 装这个补回来
+audioop-lts; python_version >= "3.13"
+
 # 可选：头顶气泡小工（不装就只是没有气泡，语音照常）
 PySide6-Essentials
 

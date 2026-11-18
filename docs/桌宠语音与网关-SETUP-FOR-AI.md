@@ -80,8 +80,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\update.ps1   # git pull + 补依赖，不碰 config/logs/audio
 ```
 
+> 没用 git、直接下的 zip：重新解压覆盖同一目录即可；`config.json`、`logs/`、`audio/`、
+> `ledger.jsonl` 都不在包里，不会被覆盖。`.ps1` 若被浏览器存成 `.txt` 记得改回来。
+
 仓库里带：全部代码、`bubble/`（附上游 MIT 声明）、`assets/`、`config.example.json`、
-`install.ps1` / `start.ps1` / `ensure_running.ps1` / `update.ps1`、`README-FOR-AI.md`、`docs/`。
+`install.ps1` / `start.ps1` / `ensure_running.ps1` / `watchdog.ps1` / `follow_pet.ps1`（自启用）
+/ `update.ps1`、`README-FOR-AI.md`、`docs/`。
 `.gitignore` 已经把 `config.json`、`logs/`、`audio/`、`ledger.jsonl` 挡在外面——**更新不会覆盖用户数据**。
 
 dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给不方便用 git 的人），内容一致，
@@ -90,9 +94,10 @@ dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给�
 | 包 | 内容 | 怎么用 |
 |---|---|---|
 | 网关仓库（上面那个） | 代码 + 脚本 + 手册 + docs | `git clone` → `install.ps1` → 改 `config.json` → `start.ps1` |
-| `泡泡音色包-dafeiyu\` | GPT 权重（148 MB）+ SoVITS 权重（129 MB）+ 参考音频 + `tts_infer_dafeiyu.yaml` + README | 丢进用户的 GPT-SoVITS，改 yaml 里的路径，带 `-c` 启动 |
+| `泡泡音色包-dafeiyu\` | GPT 权重（148 MB）+ SoVITS 权重（129 MB）+ 参考音频 + `tts_infer_dafeiyu.yaml` + README | 丢进 GPT-SoVITS 根目录（yaml 里是**相对路径**，按目录放好就不用改），带 `-c` 启动；参考音频路径填到网关 `config.json` |
 
-网关包里**不包含**：TTS 模型、ASR 模型、`ledger` 历史、`config.json`（只给模板）、凭据。
+网关包里**不包含**：GPT-SoVITS 本体（只给音色权重包）、ASR/OCR 运行环境、`ledger` 历史、
+`config.json`（只给模板）、凭据、`lore/` 里已有的手册（每台机器第一次用会自己学，见 4.2v）。
 
 ## 2. 角色设定同步（这一步早就做了，别再改回去）
 
@@ -2056,6 +2061,22 @@ self_talk_texts 恢复原来 6 条口癖。
 启动文件夹（免管理员）：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\泡泡语音与网关.vbs`
 → 隐藏拉起 `watchdog.ps1` → 每 5 分钟 `ensure_running.ps1`：9882 没开起 TTS、9888 没开起网关。
 
+**两种自启方案，二选一：**
+
+| 方案 | 用哪个脚本 | 效果 |
+|---|---|---|
+| 跟随桌宠（推荐） | `follow_pet.ps1` | 桌宠开→网关开，桌宠关→网关关，不占一个常驻项 |
+| 常驻守护 | `watchdog.ps1` | 不管桌宠，登录后 5 分钟一查，缺谁补谁 |
+
+vbs 一行就够（路径换成自己的网关目录）：
+
+```vbscript
+CreateObject("Wscript.Shell").Run "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File ""D:\你的目录\follow_pet.ps1""", 0, False
+```
+
+> `ensure_running.ps1` 起 TTS 用的是 `config.json → tts.guard.launch`（和网关自愈同一份）；
+> 旧写法 `mark = {gsv_root, gsv_python}` 也还认，但新机器别再用它。
+
 > 网关是**单实例**的：已经有一个在跑，第二个会自己退出（见 4.2g）。
 > 手动重启时先确认旧进程退了，别和计划任务抢。
 
@@ -2542,8 +2563,9 @@ Gemini 3 Pro；豆包 Seed 1.6 Vision 适合已有火山引擎额度的场景。
 - 桌宠关 → 网关 3 秒内自己退；
 - 桌宠再开 → 网关自己起来（4 秒内 `/health` 就绪）。
 
-实现：`D:\app1\paopao_pet_gateway\follow_pet.ps1`，每 3 秒看一次
-「桌宠进程在不在 / gateway.py 在不在」，按需起停。
+实现：网关目录里的 `follow_pet.ps1`，每 3 秒看一次
+「桌宠进程在不在 / 这个目录的 gateway.py 在不在」，按需起停（桌宠进程名不一样时
+`-ProcessName "xxx"`；它只认自己目录下的网关，不会误杀别的实例）。
 登录自启：`%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\泡泡伴生.vbs`
 （旧的 `泡泡语音与网关.vbs` 已改名 `.off` 停用，`ensure_running.ps1` 保留给手动用）。
 
@@ -2804,7 +2826,7 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body $body `
 ```
 
 `config.json → bubble`：`enabled`（总开关）、`duration_ms`（默认 3200）、
-`max_chars`（默认 60，超了截断）、`capture_window`（默认 false；true 时给
+`max_chars`（默认 60，超了截断）、`capture_window`（默认 true；给
 OBS/直播姬一个**全屏透明采集画布**，窗口标题 **“泡泡气泡（全屏）”**，
 用窗口采集抓它，气泡按桌面真实位置画）。旧的 `capture_anchor_bottom` /
 `use_pet_window_rect` / `offset_y` 已经不用了，不要写。
@@ -3269,3 +3291,56 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
 **已知**：B站房间没开播也能连上，但没弹幕；`room_id` 自动找的是 `bili-cli` 账号 /
 `owner.json` 的 mid，换了账号要重填。
 
+
+---
+
+## 20. 从「下载包」到「同款效果」：对照清单（2026-11-18 加）
+
+四样东西凑齐才算一套：**桌宠本体** + **网关包（本仓库/导出快照）** + **陪伴插件** +
+**音色包**，再配这份文档。少一样都不会是同一个泡泡。
+
+| 拿到手的东西 | 放在哪 | 干什么 |
+|---|---|---|
+| 桌宠发行版 | `%LOCALAPPDATA%\Programs\dsh-pet-standalone-webm-chat\` | 改 provider `base_url` → 9888；关掉它自己的聊天语音 |
+| 网关包 | 任意目录（路径别带空格最省事） | `install.ps1` → 改 `config.json` → `start.ps1` |
+| 陪伴插件 | `<AstrBot>\data\plugins\astrbot_plugin_paopao_companion\` | 填 `gateway_url` → 重载 → `陪伴 医生` |
+| 音色包 | 丢进 GPT-SoVITS 根目录 | 带 `-c tts_infer_dafeiyu.yaml` 启动 9882 |
+
+### 20.1 装完应该能做的事（逐条验收）
+
+| 能力 | 怎么验 | 期望 |
+|---|---|---|
+| 聊天走网关 | 桌宠里随便说一句 | 有回复、能出声；`gateway.log` 有上游请求 |
+| 音色是 dafeiyu | `POST /say {"text":"测试一下"}` | 是她那个声音；不像就是 9882 没带 `-c` |
+| 识屏连续性 | `GET /status` | `frames` > 0，`today_vision` 会涨 |
+| 头顶气泡 | `POST /bubble {"text":"看得见吗"}` | 头顶冒泡（要 PySide6） |
+| 模式切换带声 | `POST /mode {"mode":"anime"}` | 冒泡 + 一句「哦，看番去啦」 |
+| 托盘菜单 | 托盘图标右键 | 自动/通用视频/番剧/直播/网课/游戏/关闭 + 语音 + 直播弹幕 |
+| 直播弹幕 | 托盘勾「直播弹幕」→ 勾「回弹幕出声」 | 气泡回弹幕；勾了出声才念，热键 `Ctrl+Alt+B` |
+| 气泡能被 OBS 抓 | 窗口列表里找 `泡泡气泡（全屏）` | 有，且 OBS「窗口采集 + 允许透明度」能用 |
+| 作品手册 | `GET /lore` | 看过一两次游戏/番之后有手册；`lore.py list` 同 |
+| 记忆进中枢 | 装生活桥后 `paopao_memory.py health` | `pet_writes` 能涨 |
+| 插件遥控 | 聊天发 `陪伴` / `陪伴 医生` / `陪伴 模式 game` | 状态、逐项 ✅、模式切换成功 |
+| 插件管弹幕 | `陪伴 弹幕 开` / `陪伴 弹幕出声 关` | 和托盘勾选等价，且持久化 |
+
+### 20.2 包里**没有**、要用户自己装的（不算坏）
+
+| 缺的 | 影响 | 怎么补 |
+|---|---|---|
+| GPT-SoVITS 本体 + CUDA | 没它就没 dafeiyu 声音（会退回只出文字） | 官方 v2pro 包，见 13.1 |
+| 转写 9881（faster-whisper 之类） | 直播/网课/看片的「说的内容」没有 | 见 13 节 |
+| OCR venv（rapidocr） | 番剧/外文字幕读不到 | 见 13 节，装完填 `video_watch.ocr_python` |
+| `bili` 命令 | B站视频拿不到字幕、直播间不能自动找房间号 | 装 bili-cli 并登录 |
+| ffmpeg | 非 GPT-SoVITS 后端转 wav、部分素材处理 | `winget install ffmpeg` |
+| DeepSeek / Qwen Key | 聊天、识屏、手册总结全停 | 填 `api_key` / `vision.profiles.*.api_key` |
+| 作品手册 | 第一次用不认识新游戏/番 | 不用手写，看一会儿自己学（4.2v） |
+
+> 这些缺项在 `GET /doctor` 里是 ❌，补完变 ✅；`陪伴 医生` 只是把它翻译成人话。
+
+### 20.3 仍然达不到的（已知边界）
+
+- **OBS 窗口采集的偏移**：不同缩放/分辨率下气泡和桌宠的贴合要微调 `bubble_host.py` 里的
+  捕获偏移（本机 2560×1440 @125% 是 70px），换机器可能要改一次，不是配置项。
+- **直播没有官方字幕**：只能环回转写，主播不说话/纯音乐时没内容。
+- **弹幕只读不发**：不会自动发弹幕，也不会在直播间说话。
+- **游戏模式不吃字幕**：游戏里没有字幕可读，她只聊画面和操作。

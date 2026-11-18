@@ -44,7 +44,20 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 脚本会：建 `.venv` → 装 `requirements.txt` → 从 `config.example.json` 生成 `config.json`
-→ 建 `logs/`、`audio/`。
+→ 建 `logs/`、`audio/`、`lore/`。
+
+> Python 用 **3.10–3.12 最省事**。3.13+ 也能跑：标准库删了 `audioop`，`requirements.txt`
+> 里已经按版本自动装 `audioop-lts`。
+
+**开机自启，二选一**（都是网关目录里的脚本，配一个启动文件夹 vbs 隐藏拉起）：
+
+| 脚本 | 适合 | 行为 |
+|---|---|---|
+| `follow_pet.ps1` | 平时就在用桌宠 | 桌宠开→网关开，桌宠关→网关关 |
+| `watchdog.ps1` | 想让网关一直活着 | 每 5 分钟 `ensure_running.ps1`，缺谁补谁 |
+
+`ensure_running.ps1` 起 TTS 认 `config.json → tts.guard.launch`（和网关自愈同一份），
+旧写法 `mark` 也兼容。
 
 ## 3. 配置（`config.json`，**必须改的只有四类**）
 
@@ -128,6 +141,7 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body '{"text":"看�
 | 头顶气泡 | 我们生成的话用她那套气泡显示 | `PySide6-Essentials` |
 | 语音模式 | 热键 `Ctrl+Alt+V` 说话、三句气泡、电话模式 | 麦克风；`sounddevice` |
 | 托盘模式菜单 | 自动/B站视频/看番/通用/关闭 + 语音开关 | `PySide6`（跟着气泡小工） |
+| 直播弹幕（叠加层） | 连 B站直播间，按弹幕回话；托盘勾「直播弹幕」「回弹幕出声」 | 直播间号或 `bili` 账号；OBS 采集见 §10 |
 | DSH 状态播报 | 「开工/收工」这类状态念出来 | DSH + `dsh-pet-bridge` 事件 |
 | QQ 语音 | AstrBot 里发语音 | AstrBot + GPT_SoVITS 插件（见第 19 节） |
 | 作品手册（`lore.py`） | 自己查萌娘百科 + B站攻略并总结成本地手册；识屏/语音/聊到才检索一两段，不常驻 | 无（默认开；首次启动会在后台一本一本补，要联网） |
@@ -170,3 +184,9 @@ QQ/AstrBot 人格、插件角色设定），把「称呼、自称、禁区、说
 - **手册生成在后台**：第一次启动/遇到新游戏时一本一本补（十几秒到一分钟一本），
   日志 `资料：给《…》做了本手册` 出现之前她确实“还不认识”。
 - **改配置**不用换代码，但改完要重启网关（除非该键是每次现读的）。
+- **Python 3.13 报 `No module named audioop`**：新标准库删了它，`pip install audioop-lts`。
+- **直播弹幕连上但没内容**：房间没开播 / `host.room_id` 还是 0 又没 `bili` 账号
+  （`/doctor` 的 `host`、`bili_cli` 两项会说明）；弹幕只读不发，测试用 `POST /host/test`。
+- **OBS 里气泡和桌宠对不齐**：用窗口采集抓 `泡泡气泡（全屏）`，别用显示器采集；
+  换分辨率/缩放后要微调 `bubble_host.py` 的捕获偏移（本机 2560×1440@125% 是 70px）。
+- **`.ps1` 打不开/中文乱码**：仓库里的脚本都带 UTF-8 BOM，下载/解压时别让编辑器转码。

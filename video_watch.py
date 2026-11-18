@@ -304,7 +304,7 @@ class OcrWorker(threading.Thread):
         super().__init__(name="video-ocr", daemon=True)
         self.conf = conf
         self.on_text = on_text
-        self.python = str(conf.get("ocr_python") or r"D:\app1\tools\ocrvenv\Scripts\python.exe")
+        self.python = str(conf.get("ocr_python") or "").strip()
         self.script = os.path.join(APP_DIR, "ocr_worker.py")
         self.bottom = float(conf.get("ocr_bottom_ratio", 0.34))
         self.interval = max(1.0, float(conf.get("ocr_interval_seconds", 2.0)))
@@ -337,6 +337,13 @@ class OcrWorker(threading.Thread):
         while True:
             time.sleep(self.interval)
             if not self.active.is_set():
+                continue
+            # 没配 / 配错就安静跳过，别每 2 秒往日志里扔一次异常
+            if not self.python:
+                self.error = "没配 video_watch.ocr_python（字幕 OCR 用不了）"
+                continue
+            if not os.path.exists(self.python):
+                self.error = "OCR 环境不存在：%s" % self.python
                 continue
             try:
                 if self.proc is None or self.proc.poll() is not None:

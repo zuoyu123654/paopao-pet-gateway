@@ -22,21 +22,42 @@ function Test-RecentlyStarted([string]$marker, [int]$minutes) {
     return ($age.TotalMinutes -lt $minutes)
 }
 
-# 1) 本地 TTS（可选：config.mark = {gsv_root, gsv_python, gsv_config}）
+# 1) 本地 TTS（可选）
+#    两种写法都认：
+#      a) config.tts.guard.launch = {python, script, args[], workdir}  ← 推荐（网关自愈也用这一份）
+#      b) config.mark = {gsv_root, gsv_python, gsv_config}            ← 旧写法，留着兼容
+$ttsPort = if ($cfg.tts.api) { [int]([uri]$cfg.tts.api).Port } else { 9882 }
+$markerGsv = Join-Path $logDir '.gsv-started'
+$ttsExe = ''
+$ttsArgs = @()
+$ttsWorkDir = $here
+
+$gl = $cfg.tts.guard.launch
 $mark = $cfg.mark
-if ($mark -and $mark.gsv_root -and $mark.gsv_python) {
-    $ttsPort = if ($cfg.tts.api) { [int]([uri]$cfg.tts.api).Port } else { 9882 }
-    $markerGsv = Join-Path $logDir '.gsv-started'
-    if (-not (Test-Port $ttsPort) -and -not (Test-RecentlyStarted $markerGsv 3)) {
-        Set-Content -LiteralPath $markerGsv -Value (Get-Date -Format o)
-        $args = @((Join-Path $mark.gsv_root 'api_v2.py'), '-a', '127.0.0.1', '-p', "$ttsPort")
-        if ($mark.gsv_config) { $args += @('-c', $mark.gsv_config) }
-        Start-Process -FilePath $mark.gsv_python -ArgumentList $args `
-            -WorkingDirectory $mark.gsv_root -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $logDir 'gsv_stdout.log') `
-            -RedirectStandardError (Join-Path $logDir 'gsv_stderr.log')
-        Start-Sleep -Seconds 3
-    }
+if ($gl -and $gl.python -and $gl.script) {
+    $ttsExe = [string]$gl.python
+    $extraArgs = @()
+    if ($gl.args) { $extraArgs = @($gl.args) }
+    $ttsArgs = @([string]$gl.script) + $extraArgs
+    if ($gl.workdir) { $ttsWorkDir = [string]$gl.workdir }
+    # 没写 -a/-p 的话补上，否则 api_v2 会去占 9880
+    if ($ttsArgs -notcontains '-a') { $ttsArgs += @('-a', '127.0.0.1') }
+    if ($ttsArgs -notcontains '-p') { $ttsArgs += @('-p', "$ttsPort") }
+}
+elseif ($mark -and $mark.gsv_root -and $mark.gsv_python) {
+    $ttsExe = [string]$mark.gsv_python
+    $ttsArgs = @((Join-Path $mark.gsv_root 'api_v2.py'), '-a', '127.0.0.1', '-p', "$ttsPort")
+    if ($mark.gsv_config) { $ttsArgs += @('-c', $mark.gsv_config) }
+    $ttsWorkDir = [string]$mark.gsv_root
+}
+
+if ($ttsExe -and -not (Test-Port $ttsPort) -and -not (Test-RecentlyStarted $markerGsv 3)) {
+    Set-Content -LiteralPath $markerGsv -Value (Get-Date -Format o)
+    Start-Process -FilePath $ttsExe -ArgumentList $ttsArgs `
+        -WorkingDirectory $ttsWorkDir -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $logDir 'gsv_stdout.log') `
+        -RedirectStandardError (Join-Path $logDir 'gsv_stderr.log')
+    Start-Sleep -Seconds 3
 }
 
 # 2) 网关
