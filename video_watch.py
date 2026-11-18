@@ -623,7 +623,9 @@ class VideoWatcher(threading.Thread):
         suffix = self._switch_note()
         if mode == "anime":
             return ("【番剧参考】名字/标题：%s\n"
-                    "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title) + suffix
+                    "只是参考：自然带上，不要逐字念标题，不确定的别编。"
+                    "角色全名很长时可以用简称/昵称（前 2～3 个字或常用短叫法），"
+                    "第一次可以全名，后面不要每次都完整念五六个字。" % title) + suffix
         if mode == "course":
             return ("【网课参考】标题：%s\n"
                     "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title) + suffix
