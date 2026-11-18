@@ -1369,7 +1369,7 @@ class SpeechPipeline:
             except queue.Full:
                 pass
             t_put = time.time()
-            # 等这段播完再返回，下一句才接得上；被打断时最多等 5 秒
+            # 等这段播完再返回，下一句才接得上（现在不打断，所以基本会等到播完）
             writer_done.wait(timeout=max(5.0, played + 5.0))
             log.info("这一小句说完：%.2fs 音频（收队 %.2fs）", played, time.time() - t_put)
             with self.lock:
@@ -2176,7 +2176,7 @@ class SpeechPipeline:
                 log.info("念第%d句：%.2fs 音频（跟上一句隔着 %.2fs）", idx, dur, lead)
                 self._playing = True
                 try:
-                    winsound.PlaySound(path, winsound.SND_FILENAME)  # 阻塞；被打断时会被 PlaySound(None) 截断
+                    winsound.PlaySound(path, winsound.SND_FILENAME)  # 阻塞；只有人工 interrupt() 才会截断
                 finally:
                     self._playing = False
                 self.play_end_at = time.time()
