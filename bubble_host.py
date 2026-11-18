@@ -51,7 +51,7 @@ ACK = {"ok": True}
 DEFAULT_STYLE = "classic_top"
 DEFAULT_DURATION_S = 3.2
 # 位置缓存：30ms 一跟，靠 mtime 判断要不要重新解析，别每次都读 JSON
-_RECT_CACHE: dict = {"path": "", "mtime": 0, "rect": None}
+_RECT_CACHE: dict = {"path": "", "mtime": 0, "capture": None, "rect": None}
 _SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
 
 # ---------------------------------------------------------------- 托盘菜单
@@ -427,14 +427,23 @@ def read_pet_rect() -> QRect | None:
     for path in files[:3]:
         try:
             mtime = path.stat().st_mtime_ns
-            if _RECT_CACHE["path"] == str(path) and _RECT_CACHE["mtime"] == mtime:
+            capture = pet_stream_capture()
+            if (_RECT_CACHE["path"] == str(path)
+                    and _RECT_CACHE["mtime"] == mtime
+                    and _RECT_CACHE.get("capture") == capture):
                 return _RECT_CACHE["rect"]
             data = json.loads(path.read_text(encoding="utf-8"))
             w, h = int(data.get("w") or 0), int(data.get("h") or 0)
             if w > 0 and h > 0:
                 rect = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
                 rect.pet_pid = int(data.get("pid") or 0)  # type: ignore[attr-defined]
-                _RECT_CACHE.update(path=str(path), mtime=mtime, rect=rect)
+                if pet_stream_capture():
+                    # 桌宠开直播捕获兼容后主窗上方预留空间；所有定位（首次/跟随）
+                    # 都统一用这个下移后的锚点，避免只下移一下就弹回去。
+                    rect = QRect(rect.x(), rect.y() + 70,
+                                 rect.width(), rect.height())
+                    rect.pet_pid = int(data.get("pid") or 0)  # type: ignore[attr-defined]
+                _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
                 return rect
         except Exception:
             continue
@@ -613,10 +622,6 @@ def main() -> int:
             explicit = True
         if anchor is None:
             anchor = read_pet_rect()
-            if anchor is not None and pet_stream_capture():
-                # 直播捕获兼容会在主窗上方预留空间；下移 40px（80 太多）。
-                anchor = QRect(anchor.x(), anchor.y() + 40,
-                               anchor.width(), anchor.height())
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
             _ack(id=cmd.get("id"), shown=False, reason="no-pet")
