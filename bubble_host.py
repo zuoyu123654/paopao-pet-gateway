@@ -496,6 +496,8 @@ def main() -> int:
     capture_overlay = os.environ.get("PAOPAO_BUBBLE_CAPTURE", "0") == "1"
     overlay = None
     CAPTURE_W, CAPTURE_H = 760, 600
+    anchor_bottom = int(os.environ.get("PAOPAO_BUBBLE_ANCHOR_BOTTOM", "150") or 150)
+    anchor_bottom = max(40, min(CAPTURE_H - 80, anchor_bottom))
     if capture_overlay:
         overlay = QWidget()
         overlay.setWindowTitle("泡泡气泡")
@@ -577,7 +579,7 @@ def main() -> int:
                 # OBS 里把画布底边对齐桌宠头顶即可。
                 g = overlay.geometry()
                 anchor = QRect(g.x() + g.width() // 2 - 40,
-                               g.y() + g.height() - 150, 80, 80)
+                               g.y() + g.height() - anchor_bottom, 80, 80)
             else:
                 anchor = read_pet_rect()
         if anchor is None:

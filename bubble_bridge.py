@@ -30,6 +30,7 @@ class BubbleBridge:
         self.duration_ms = int(conf.get("duration_ms", 3200) or 3200)
         self.max_chars = int(conf.get("max_chars", 60) or 60)
         self.capture_window = bool(conf.get("capture_window", False))
+        self.capture_anchor_bottom = int(conf.get("capture_anchor_bottom", 150) or 150)
         self.ack_timeout = float(conf.get("ack_timeout", 3.0) or 3.0)
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
@@ -68,6 +69,7 @@ class BubbleBridge:
         env["PYTHONIOENCODING"] = "utf-8"
         if self.capture_window:
             env["PAOPAO_BUBBLE_CAPTURE"] = "1"
+            env["PAOPAO_BUBBLE_ANCHOR_BOTTOM"] = str(self.capture_anchor_bottom)
         log_path = os.path.join(APP_DIR, "logs", "bubble.log")
         try:
             stderr = open(log_path, "a", encoding="utf-8", buffering=1)
