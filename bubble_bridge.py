@@ -191,7 +191,7 @@ class BubbleBridge:
         threading.Thread(target=self._ensure, name="bubble-spawn", daemon=True).start()
 
     def show(self, text: str, duration_ms: int | None = None,
-             scale: float | None = None) -> dict:
+             scale: float | None = None, offset_y: int = 0) -> dict:
         text = str(text or "").strip()
         if not text:
             return {"shown": False, "reason": "empty"}
@@ -201,6 +201,8 @@ class BubbleBridge:
                "duration_ms": int(duration_ms or self.duration_ms)}
         if scale is not None:
             req["scale"] = max(0.5, min(3.0, float(scale)))
+        if offset_y:
+            req["offset_y"] = int(offset_y)
         ack = self._request(req)
         if ack is None:
             self.last_reason = "no-ack"

@@ -643,6 +643,11 @@ def main() -> int:
             explicit = True
         if anchor is None:
             anchor = read_pet_rect()
+        if anchor is not None:
+            state["offset_y"] = int(cmd.get("offset_y") or 0)
+            if state["offset_y"]:
+                anchor = QRect(anchor.x(), anchor.y() + state["offset_y"],
+                               anchor.width(), anchor.height())
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
             _ack(id=cmd.get("id"), shown=False, reason="no-pet")
@@ -703,6 +708,9 @@ def main() -> int:
         rect = read_pet_rect()
         if rect is None:
             return
+        off = int(state.get("offset_y") or 0)
+        if off:
+            rect = QRect(rect.x(), rect.y() + off, rect.width(), rect.height())
         cur = (rect.x(), rect.y(), rect.width(), rect.height())
         scale = read_pet_scale(state.get("pet_scale", 1.0))
         try:

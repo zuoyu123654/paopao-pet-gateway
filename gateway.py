@@ -4226,7 +4226,7 @@ class Gateway:
                 scale = float(host_cfg.get("bubble_scale", 2.0) or 2.0)
                 base_ms = int(float(host_cfg.get("bubble_duration_seconds", 10) or 10) * 1000)
                 duration = max(base_ms, min(15000, len(reply) * 180))
-                self.bubble.show(reply, duration, scale=scale)
+                self.bubble.show(reply, duration, scale=scale, offset_y=-20)
             except Exception:  # noqa: BLE001
                 pass
             log.info("直播弹幕回复（%s）：%s", "出声" if speak else "只气泡", reply[:40])
