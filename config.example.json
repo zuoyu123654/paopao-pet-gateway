@@ -140,8 +140,7 @@
         "duration_ms": 3200,
         "max_chars": 60,
         "capture_window": true,
-        "use_pet_window_rect": false,
-        "offset_y": 0
+        "use_pet_window_rect": false
     },
     "voice": {
         "enabled": true,

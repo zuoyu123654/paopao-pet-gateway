@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import socketserver
 import sys
 import threading
 import time
@@ -36,7 +37,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bubble.speech_bubble import PetSpeechBubble  # noqa: E402
@@ -183,6 +184,19 @@ class TrayMenu(QObject):
             act.triggered.connect(self._on_pick)
             self.voice_actions[key] = act
 
+        # 直播弹幕：跟语音同一栏，但**不是单选**，可以和任何模式/语音一起开
+        self.menu.addSeparator()
+        self.host_act = QAction("直播弹幕", self)
+        self.host_act.setCheckable(True)
+        self.host_act.setData(("host", "enabled"))
+        self.host_act.triggered.connect(self._on_pick)
+        self.menu.addAction(self.host_act)
+        self.host_speak_act = QAction("回弹幕出声（Ctrl+Alt+B）", self)
+        self.host_speak_act.setCheckable(True)
+        self.host_speak_act.setData(("host", "speak"))
+        self.host_speak_act.triggered.connect(self._on_pick)
+        self.menu.addAction(self.host_speak_act)
+
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("泡泡 · 模式")
         self.tray.setContextMenu(self.menu)
@@ -192,6 +206,8 @@ class TrayMenu(QObject):
         self.watch_actions["auto"].setChecked(True)
         self.lock_actions["5m"].setChecked(True)
         self.voice_actions["ptt"].setChecked(True)
+        self.host_act.setChecked(False)
+        self.host_speak_act.setChecked(False)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync)
@@ -220,6 +236,15 @@ class TrayMenu(QObject):
             forever = key == "forever"
             self._post("/mode-lock", {"forever": forever})
             self._feedback("lock_forever" if forever else "lock_5m")
+            return
+        if kind == "host":
+            on = bool(act.isChecked())
+            if key == "enabled":
+                self._post("/host", {"enabled": on})
+                self._feedback("host_on" if on else "host_off")
+            else:
+                self._post("/host", {"speak": on})
+                self._feedback("host_speak_on" if on else "host_speak_off")
             return
         self._post("/voice", {"action": "set_mode", "mode": key})
         self._feedback("voice_off" if key == "off" else key)
@@ -285,6 +310,14 @@ class TrayMenu(QObject):
             act.blockSignals(True)
             act.setChecked(key == voice)
             act.blockSignals(False)
+        host = data.get("host") or {}
+        for act, on in ((self.host_act, bool(host.get("enabled"))),
+                        (self.host_speak_act, bool(host.get("speak")))):
+            act.blockSignals(True)
+            act.setChecked(on)
+            act.blockSignals(False)
+        if host.get("error"):
+            self.host_act.setToolTip(str(host.get("error"))[:120])
 
 
 def log(msg: str) -> None:
@@ -292,7 +325,13 @@ def log(msg: str) -> None:
     print("[bubble] %s" % msg, file=sys.stderr, flush=True)
 
 
+_ACK_SINK = None
+
+
 def _ack(**fields) -> None:
+    if _ACK_SINK is not None:
+        _ACK_SINK({"ok": True, **fields})
+        return
     print(json.dumps({"ok": True, **fields}, ensure_ascii=False), flush=True)
 
 
@@ -325,6 +364,15 @@ def read_bubble_cfg(prev: dict) -> dict:
 # 桌宠的位置标记只有 **1Hz**（它是"定期存档"，不是实时位置），所以她走着的时候
 # 最坏会差一步（~60px）。试过用两次样本估速度外推，拐弯/停下时会过冲，反而更糟，
 # 所以现在只用"新样本一到就瞬间对齐"（不做预测）。
+
+
+def pet_stream_capture() -> bool:
+    """桌宠是否开了直播捕获兼容；开了它窗口上方会预留空间，气泡要跟着下移。"""
+    try:
+        data = json.loads(PET_CONFIG.read_text(encoding="utf-8-sig"))
+        return bool(data.get("stream_capture_mode"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def read_pet_rect() -> QRect | None:
@@ -458,7 +506,39 @@ def main() -> int:
             f.write(str(os.getpid()))
     except OSError:
         pass
+    # 全屏采集画布：OBS/直播姬用「窗口采集」抓这个窗口，气泡按桌面真实位置画。
+    # 窗口固定满屏、不跟着桌宠移动，采集源就不会在桌宠/气泡之间跳。
+    capture_overlay = os.environ.get("PAOPAO_BUBBLE_CAPTURE", "0") == "1"
+    overlay = None
+    screen = QApplication.primaryScreen()
+    screen_geo = screen.geometry() if screen is not None else QRect(0, 0, 1920, 1080)
+    CAPTURE_W, CAPTURE_H = screen_geo.width(), screen_geo.height()
+    if capture_overlay:
+        log("全屏采集画布 %dx%d（气泡按桌面位置画）" % (CAPTURE_W, CAPTURE_H))
+    if capture_overlay:
+        overlay = QWidget()
+        overlay.setWindowTitle("泡泡气泡（全屏）")
+        overlay.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        overlay.setGeometry(screen_geo)
+        overlay.show()
+        keep_top = QTimer(overlay)
+        keep_top.timeout.connect(lambda: force_topmost(overlay))
+        keep_top.start(800)
     bubble = PetSpeechBubble(None, style_id="classic_top")
+    if overlay is not None:
+        bubble.set_capture_compat(True, overlay)
+    else:
+        # 独立 Tool 窗口模式：OBS 窗口采集按这个标题找；气泡本身跟着桌宠位置走
+        bubble.setWindowTitle("泡泡气泡")
     state = {"style": "classic_top", "scale": 1.0, "duration_ms": 3200}
     cmds: "queue.Queue[dict]" = queue.Queue()
 
@@ -471,7 +551,8 @@ def main() -> int:
                 cmds.put(json.loads(line))
             except Exception:
                 continue
-        cmds.put({"cmd": "quit"})
+        # stdin EOF 不退出：网关重启后新网关会走本地 TCP 接回来，
+        # 这样 OBS/直播姬里的窗口句柄不会变，不会掉回桌宠窗口。
 
     def do_show(cmd: dict) -> None:
         nonlocal state
@@ -484,6 +565,9 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log("样式切换失败（保持原样）：%s" % exc)
         try:
+            # 单条指定字号优先（直播弹幕要更大，观众才看得清）
+            scale = float(cmd.get("scale") or state["scale"])
+            state["scale"] = max(0.5, min(3.0, scale))
             bubble.set_text_scale(state["scale"])
         except Exception:  # noqa: BLE001
             pass
@@ -495,6 +579,11 @@ def main() -> int:
             explicit = True
         if anchor is None:
             anchor = read_pet_rect()
+            if anchor is not None and pet_stream_capture():
+                # 桌宠开直播捕获兼容后，主窗上方留了气泡空间；我们的独立气泡
+                # 不跟着那个窗口走，但锚点也要跟着下移同样的量。
+                anchor = QRect(anchor.x(), anchor.y() + 80,
+                               anchor.width(), anchor.height())
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
             _ack(id=cmd.get("id"), shown=False, reason="no-pet")
@@ -513,7 +602,7 @@ def main() -> int:
         state["pet_scale"] = read_pet_scale(state.get("pet_scale", 1.0))
         # 完全照她 show_bubble 的写法：锚点用精灵包围盒，不额外挪
         bubble.show_text(text, anchor, duration_ms=duration, pet_scale=state["pet_scale"])
-        force_topmost(bubble)
+        force_topmost(overlay if overlay is not None else bubble)
         state["anchor"] = (anchor.x(), anchor.y(), anchor.width(), anchor.height())
         state["pid"] = pid
         shown = bool(bubble.isVisible())
@@ -526,18 +615,23 @@ def main() -> int:
              screen=[bubble.x(), bubble.y()])
 
     def poll() -> None:
+        global _ACK_SINK
         quit_now = False
         try:
             while True:
                 cmd = cmds.get_nowait()
-                kind = str(cmd.get("cmd") or "")
-                if kind == "show":
-                    do_show(cmd)
-                elif kind == "hide":
-                    bubble.dismiss()
-                    _ack(id=cmd.get("id"), hidden=True)
-                elif kind == "quit":
-                    quit_now = True
+                _ACK_SINK = cmd.get("_ack")
+                try:
+                    kind = str(cmd.get("cmd") or "")
+                    if kind == "show":
+                        do_show(cmd)
+                    elif kind == "hide":
+                        bubble.dismiss()
+                        _ack(id=cmd.get("id"), hidden=True)
+                    elif kind == "quit":
+                        quit_now = True
+                finally:
+                    _ACK_SINK = None
         except queue.Empty:
             pass
         if quit_now:
@@ -565,6 +659,40 @@ def main() -> int:
                 bubble.reflow(rect, pet_scale=scale)
         except Exception:  # noqa: BLE001
             pass
+
+    if "--demo" not in sys.argv:
+        class BubbleHandler(socketserver.StreamRequestHandler):
+            def handle(self) -> None:
+                for line in self.rfile:
+                    try:
+                        cmd = json.loads(line.decode("utf-8", "replace"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    done = threading.Event()
+                    box: dict = {}
+
+                    def reply(fields: dict, _box=box, _done=done) -> None:
+                        _box.update(fields)
+                        _done.set()
+
+                    cmd["_ack"] = reply
+                    cmds.put(cmd)
+                    if not done.wait(8.0):
+                        box = {"ok": False, "error": "timeout"}
+                    self.wfile.write(
+                        (json.dumps(box, ensure_ascii=False) + "\n").encode("utf-8"))
+                    self.wfile.flush()
+
+        class BubbleServer(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        try:
+            server = BubbleServer(("127.0.0.1", 9894), BubbleHandler)
+            threading.Thread(target=server.serve_forever, name="ipc", daemon=True).start()
+            log("气泡 IPC：127.0.0.1:9894（网关重启后窗口句柄保持不变）")
+        except OSError as exc:
+            log("气泡 IPC 端口被占用，保留已有实例：%s" % exc)
 
     if "--demo" not in sys.argv:
         tray = TrayMenu(bubble, lambda text: do_show({"text": text, "duration_ms": 3200}))
