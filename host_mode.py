@@ -11,7 +11,6 @@ B站直播 WebSocket 实现（protover=2，zlib）；房间号留空时先按账
 """
 from __future__ import annotations
 
-import collections
 import json
 import logging
 import os
@@ -120,13 +119,25 @@ def _room_live_status(room_id: int) -> int | None:
 class DanmakuClient(threading.Thread):
     """一条 B站直播弹幕连接；断了自动重连，host.enabled 关了就不连。"""
 
-    def __init__(self, host: "HostMode"):
+    def __init__(self, host: "HostMode", on_message=None):
         super().__init__(name="danmaku-client", daemon=True)
         self.host = host
+        # 收弹幕的去处：默认丢给 HostMode.push（回弹幕那条路）；
+        # 「看直播模式」那条会传自己的收集器进来（2026-11-19）。
+        self.on_message = on_message
         self.ws = None
         self.connected = False
         self.last_error = ""
         self._live_state: int | None = None   # 上次查到的开播状态，只用来少刷日志
+
+    def _emit(self, user: str, uid: str, text: str, priority: int) -> None:
+        if self.on_message is not None:
+            try:
+                self.on_message(user, uid, text, priority)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        self.host.push(user, uid, text, priority)
 
     def _connect(self, room_id: int) -> bool:
         _, cookie, uid = _credential()
@@ -240,25 +251,25 @@ class DanmakuClient(threading.Thread):
                     uid = str((info[2] or [])[0] or "")
                 except (IndexError, TypeError):
                     continue
-                self.host.push(user, uid, msg, 10)
+                self._emit(user, uid, msg, 10)
             elif cmd == "SUPER_CHAT_MESSAGE":
                 data = obj.get("data") or {}
                 user = str(((data.get("user_info") or {}).get("uname")) or "")
                 uid = str(data.get("uid") or "")
                 msg = str(data.get("message") or "").strip()
-                self.host.push(user, uid, msg, 100)
+                self._emit(user, uid, msg, 100)
             elif cmd == "SEND_GIFT":
                 data = obj.get("data") or {}
                 user = str(data.get("uname") or "")
                 uid = str(data.get("uid") or "")
                 gift = str(data.get("giftName") or "礼物")
                 num = int(data.get("num") or 1)
-                self.host.push(user, uid, "送出了 %s×%d" % (gift, num), 60)
+                self._emit(user, uid, "送出了 %s×%d" % (gift, num), 60)
 
     def run(self) -> None:
         backoff = 3.0
         while True:
-            if not self.host.wanted():
+            if not self.host.enabled:
                 self.connected = False
                 time.sleep(1.0)
                 continue
@@ -289,7 +300,7 @@ class DanmakuClient(threading.Thread):
                 self.host.last_error = ""
                 backoff = 3.0
                 beat = 0.0
-                while self.host.wanted():
+                while self.host.enabled:
                     try:
                         raw = self.ws.recv()
                     except Exception as exc:  # noqa: BLE001
@@ -330,10 +341,6 @@ class HostMode(threading.Thread):
         self.cfg = cfg
         self.gateway = gateway
         self.enabled = bool(conf.get("enabled", False))
-        # 2026-11-19：**只收不回**。enabled 是「要不要回弹幕」，context_only 是
-        # 「就算不回，也把观众在说什么收下来给她当参考」。两个都为 false 才彻底不连。
-        self.context_only = bool(conf.get("context_only", True))
-        self.recent: "collections.deque" = collections.deque(maxlen=200)
         self.speak = bool(conf.get("speak", False))
         self.room_id = int(conf.get("room_id") or 0)
         self.interval = max(10.0, float(conf.get("reply_interval_seconds", 25)))
@@ -351,10 +358,6 @@ class HostMode(threading.Thread):
         self._self_uid = ""
 
     # ---------------------------------------------------------- 开关
-    def wanted(self) -> bool:
-        """要不要连弹幕：回弹幕开着，或者只做参考，都要连。"""
-        return bool(self.enabled or self.context_only)
-
     def start_all(self) -> None:
         _, _, self._self_uid = _credential()
         self.start()
@@ -412,21 +415,11 @@ class HostMode(threading.Thread):
     def status(self) -> dict:
         return {"enabled": self.enabled, "speak": self.speak,
                 "room_id": self.room_id, "connected": self.connected,
-                "context_only": self.context_only, "recent": len(self.recent),
                 "queued": self.q.qsize(), "busy": self.busy,
                 "live_status": self.client._live_state,
                 "last": self.last_text[:80], "error": self.last_error}
 
     # ---------------------------------------------------------- 弹幕
-    def recent_block(self, limit: int = 12, seconds: float = 90.0) -> str:
-        """最近这段的弹幕，给识屏当「氛围参考」（只收不回的时候也算它）。"""
-        now = time.time()
-        with self.lock:
-            items = [x for x in self.recent if now - x[0] <= seconds][-limit:]
-        if not items:
-            return ""
-        return "\n".join("- %s：%s" % (u[:12], t) for _ts, u, t in items)
-
     def _clear(self) -> None:
         while True:
             try:
@@ -435,7 +428,7 @@ class HostMode(threading.Thread):
                 break
 
     def push(self, user: str, uid: str, text: str, priority: int) -> None:
-        if not self.wanted():
+        if not self.enabled:
             return
         text = (text or "").strip()
         if len(text) < 2 or len(text) > 120:
@@ -452,10 +445,6 @@ class HostMode(threading.Thread):
             self.seen[key] = now
             if len(self.seen) > 400:
                 self.seen = {k: v for k, v in self.seen.items() if now - v < 600}
-            # 参考用：不管回不回，观众最近在说什么都留一份（识屏时当氛围参考）
-            self.recent.append((now, user or "观众", text[:80]))
-        if not self.enabled:
-            return          # 只收不回：不进回复队列、不出声
         # 问题/点名/礼物优先
         score = priority
         if "?" in text or "？" in text:

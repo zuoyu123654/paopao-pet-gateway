@@ -420,7 +420,7 @@ class PlayerWatch(threading.Thread):
         self._subs[key] = items
         return items
 
-    def recent_danmaku(self, st: dict, window: float = 90.0, limit: int = 14) -> str:
+    def recent_danmaku(self, st: dict, window: float = 90.0, limit: int = 8) -> str:
         """当前这一段前后的弹幕，压成几行（给识屏当氛围参考）。"""
         bvid = st.get("bvid")
         cur = float(st.get("t") or 0)
