@@ -490,10 +490,12 @@ def main() -> int:
             f.write(str(os.getpid()))
     except OSError:
         pass
-    # 直播捕获兼容：整屏透明宿主。OBS/直播姬用「窗口采集」抓这个窗口，
-    # 气泡作为子控件画在桌宠上方；窗口本身固定满屏，所以采集源不会跟着气泡跑。
+    # 直播捕获兼容：固定大小的透明画布（不是满屏）。OBS/直播姬用「窗口采集」
+    # 抓这个窗口，气泡画在画布底部中央的“桌宠头顶”位置；采集源固定，
+    # 桌面上的画布跟着桌宠走，但源里内容位置不变。
     capture_overlay = os.environ.get("PAOPAO_BUBBLE_CAPTURE", "0") == "1"
     overlay = None
+    CAPTURE_W, CAPTURE_H = 760, 600
     if capture_overlay:
         overlay = QWidget()
         overlay.setWindowTitle("泡泡气泡")
@@ -507,11 +509,22 @@ def main() -> int:
         overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            overlay.setGeometry(screen.geometry())
+        overlay.setGeometry(0, 0, CAPTURE_W, CAPTURE_H)
         overlay.show()
-        # 桌宠自己也是 topmost，会把它盖住；定时把它重新压到最上层。
+
+        def _follow_pet() -> None:
+            r = read_pet_rect()
+            if r is None:
+                return
+            x = r.x() - (CAPTURE_W - r.width()) // 2
+            y = r.y() - (CAPTURE_H - r.height())
+            overlay.setGeometry(x, y, CAPTURE_W, CAPTURE_H)
+            force_topmost(overlay)
+
+        _follow_pet()
+        follow = QTimer(overlay)
+        follow.timeout.connect(_follow_pet)
+        follow.start(500)
         keep_top = QTimer(overlay)
         keep_top.timeout.connect(lambda: force_topmost(overlay))
         keep_top.start(800)
@@ -559,7 +572,14 @@ def main() -> int:
             anchor = QRect(*(int(v) for v in raw))
             explicit = True
         if anchor is None:
-            anchor = read_pet_rect()
+            if overlay is not None and not explicit:
+                # 采集画布里不跟随真实桌宠坐标：底部中央就是“头顶”锚点，
+                # OBS 里把画布底边对齐桌宠头顶即可。
+                g = overlay.geometry()
+                anchor = QRect(g.x() + g.width() // 2 - 40,
+                               g.y() + g.height() - 70, 80, 80)
+            else:
+                anchor = read_pet_rect()
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
             _ack(id=cmd.get("id"), shown=False, reason="no-pet")
