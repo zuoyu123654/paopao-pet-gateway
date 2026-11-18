@@ -47,6 +47,10 @@ GATEWAY_BASE = os.environ.get("PAOPAO_GATEWAY", "http://127.0.0.1:9888")
 
 PET_HOME = Path(os.environ.get("APPDATA", "")) / "dsh-pet-standalone-webm-chat"
 PET_CONFIG = PET_HOME / "config.json"
+# 桌宠开 stream_capture_mode 时，主窗上方给气泡留了空间：锚点往下挪多少（像素）。
+# 跟分辨率/缩放有关，本机 2560×1440@125% 是 70；换机器对不齐就改 config.json 的
+# bubble.capture_offset_px（网关通过环境变量传进来），别改代码。
+CAPTURE_OFFSET = int(os.environ.get("PAOPAO_CAPTURE_OFFSET", "70") or 70)
 ACK = {"ok": True}
 DEFAULT_STYLE = "classic_top"
 DEFAULT_DURATION_S = 3.2
@@ -478,7 +482,8 @@ def read_pet_rect() -> QRect | None:
                     rect = runtime
                 rect.pet_pid = pid  # type: ignore[attr-defined]
                 if pet_stream_capture():
-                    rect = QRect(rect.x(), rect.y() + 70, rect.width(), rect.height())
+                    rect = QRect(rect.x(), rect.y() + CAPTURE_OFFSET,
+                                 rect.width(), rect.height())
                     rect.pet_pid = pid  # type: ignore[attr-defined]
                 _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
                 return rect
