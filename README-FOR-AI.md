@@ -64,6 +64,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | 键 | 说明 |
 |---|---|
 | `api_key` | DeepSeek Key。也能用 Windows 凭据（`api_key_credential_target`），写这儿最省事 |
+| `vision.enabled` + `vision.profiles.qwen.api_key` | **识屏看图**：开 true 并填 Qwen（或任意 OpenAI 兼容多模态）Key；不开就走聊天模型，只有多模态模型才看得懂图 |
 | `upstream_base_url` / `model` | 上游。默认 DeepSeek；换别家 OpenAI 兼容也行 |
 | `tts.backend` | `gpt-sovits` / `doubao` / `edge` / `mimo` / `sapi`，见第 4 节 |
 | `tts.ref_audio_path` + `tts.prompt_text` | 只有 GPT-SoVITS 要：参考音频和它说的那句原话 |
