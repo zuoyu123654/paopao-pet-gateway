@@ -89,6 +89,7 @@ DEFAULTS = {
         "max_queue": 30,
         "bubble_scale": 2.0,
         "name_max_chars": 6,
+        "bubble_duration_seconds": 10,
     },
     "tts": {
         "enabled": True,
@@ -3426,6 +3427,22 @@ def build_watch_focus(mode: str) -> str:
             "能看到一串动作（连招、极限躲、反打、一波清完、开大爆发）才算精彩，真看到了就带着情绪喊一句，别泼冷水。",
             "4. 挑一个真有意思的点说，一两句就够；不报进度、不刷屏。",
         ])
+    if mode in ("live", "course"):
+        who = "主播" if mode == "live" else "网课老师"
+        scene = "看直播" if mode == "live" else "上网课"
+        return "\n".join([
+            "【此刻】老大正在**%s**（你陪着他一起看），不是在做别的事，也没在跟你闲聊。" % scene,
+            "【陪看/陪听的规矩】这一轮只聊%s说的内容：" % who,
+            "1. 不许提时间，也不许拐着弯提：不说几点、不说「这么晚」「这个点」「后半夜」「天都快亮了」，"
+            "不催他睡觉、不劝他歇会儿、不操心眼睛、不说「明天还要上班」。",
+            "2. 下面附的是**%s刚才说的话**（语音转写，可能有错字），不是剧情字幕："
+            "不要念原文、不要整句复述、不要说「字幕说」「上面写着」「台词里」。"
+            "可以用你自己的话接%s的话题。" % (who, who),
+            "3. **画面不动、%s只说话时，优先接%s刚说的内容，不要反复描述画面**；"
+            "画面真有大变化（换场景/换人/打起来了）才顺带说一句。" % (who, who),
+            "4. 挑一个值得接的点，一两句就够；不刷屏、不报进度、不总结。",
+            "5. 更早记录里带的时间只是给你判断新旧用的，不是话题。",
+        ])
     return "\n".join([
         "【此刻】老大正在**%s**（你陪着他一起看），不是在做别的事，也没在跟你闲聊。"
         % ("看番" if mode == "anime" else ("看视频" if mode == "video" else ("看直播" if mode == "live" else "上网课"))),
@@ -4201,9 +4218,11 @@ class Gateway:
         if reply:
             reply = reply[:120]
             try:
-                scale = float((self.cfg.get("host") or {}).get("bubble_scale", 2.0) or 2.0)
-                self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)),
-                                 scale=scale)
+                host_cfg = self.cfg.get("host") or {}
+                scale = float(host_cfg.get("bubble_scale", 2.0) or 2.0)
+                base_ms = int(float(host_cfg.get("bubble_duration_seconds", 10) or 10) * 1000)
+                duration = max(base_ms, min(15000, len(reply) * 180))
+                self.bubble.show(reply, duration, scale=scale)
             except Exception:  # noqa: BLE001
                 pass
             log.info("直播弹幕回复（%s）：%s", "出声" if speak else "只气泡", reply[:40])

@@ -3128,7 +3128,8 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
   "message_ttl_seconds": 20,    // 超过 20 秒的弹幕不回
   "max_queue": 30,
   "bubble_scale": 2.0,          // 回弹幕气泡字号 = 桌宠默认的 200%
-  "name_max_chars": 6           // 用户名太长只念前 6 个字，避免 TTS 念一长串
+  "name_max_chars": 6,          // 用户名太长只念前 6 个字，避免 TTS 念一长串
+  "bubble_duration_seconds": 10 // 回弹幕气泡至少停留 10 秒（按字数最多 15 秒）
 }
 ```
 

@@ -30,7 +30,8 @@
         "message_ttl_seconds": 20,
         "max_queue": 30,
         "bubble_scale": 2.0,
-        "name_max_chars": 6
+        "name_max_chars": 6,
+        "bubble_duration_seconds": 10
     },
     "tts": {
         "enabled": true,
