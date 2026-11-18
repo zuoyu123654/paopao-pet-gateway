@@ -55,15 +55,12 @@
         "timeout": 180,
         "volume": 1.0,
         "synth_workers": 3,
-        "pre_cue": [
-            "让我看看……",
-            "唔，我瞅瞅。"
-        ],
+        "pre_cue": [],
         "pre_cue_min_interval": 20,
         "retention_days": 3,
         "speed": 1.2,
         "speed_first": 1.0,
-        "cache_pre_cue": true,
+        "cache_pre_cue": false,
         "streaming_first": false,
         "streaming_mode": 3,
         "stream_min_chunk_length": 32,
