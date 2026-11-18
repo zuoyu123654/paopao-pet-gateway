@@ -577,7 +577,7 @@ def main() -> int:
                 # OBS 里把画布底边对齐桌宠头顶即可。
                 g = overlay.geometry()
                 anchor = QRect(g.x() + g.width() // 2 - 40,
-                               g.y() + g.height() - 70, 80, 80)
+                               g.y() + g.height() - 150, 80, 80)
             else:
                 anchor = read_pet_rect()
         if anchor is None:
