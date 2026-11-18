@@ -457,17 +457,11 @@ def read_pet_rect() -> QRect | None:
             w, h = int(data.get("w") or 0), int(data.get("h") or 0)
             if w > 0 and h > 0:
                 pid = int(data.get("pid") or 0)
-                # 直接跟真实窗口：桌宠拖动时 runtime json 不一定马上写，
-                # 只读 json 会停在旧位置，点一下它才刷新。
-                real = read_pet_window_rect(pid)
-                if real is not None:
-                    real.pet_pid = pid  # type: ignore[attr-defined]
-                    if pet_stream_capture():
-                        real = QRect(real.x(), real.y() + 30,
-                                     real.width(), real.height())
-                    return real
                 rect = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
                 rect.pet_pid = pid  # type: ignore[attr-defined]
+                if pet_stream_capture():
+                    rect = QRect(rect.x(), rect.y() + 70, rect.width(), rect.height())
+                    rect.pet_pid = pid  # type: ignore[attr-defined]
                 _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
                 return rect
         except Exception:
@@ -622,6 +616,26 @@ def main() -> int:
         # stdin EOF 不退出：网关重启后新网关会走本地 TCP 接回来，
         # 这样 OBS/直播姬里的窗口句柄不会变，不会掉回桌宠窗口。
 
+    def center_bubble(anchor: QRect) -> None:
+        """固定正上方居中；桌宠真实窗口的包围盒和气泡自动选位不一致时用这个。"""
+        anim = getattr(bubble, "_pos_anim", None)
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        w, h = bubble.width(), bubble.height()
+        x = anchor.center().x() - w // 2
+        y = anchor.top() - h - 12
+        if y < avail.top():
+            y = anchor.bottom() + 12
+        x = max(avail.left(), min(x, avail.right() - w + 1))
+        y = max(avail.top(), min(y, avail.bottom() - h + 1))
+        bubble.move(x, y)
+        state["manual_pos"] = True
+
     def do_show(cmd: dict) -> None:
         nonlocal state
         text = str(cmd.get("text") or "").strip()
@@ -720,7 +734,10 @@ def main() -> int:
         try:
             if cur != state.get("anchor"):
                 state["anchor"] = cur
-                bubble.reposition(rect)
+                if state.get("manual_pos"):
+                    center_bubble(rect)
+                else:
+                    bubble.reposition(rect)
                 now = time.time()
                 if now - state.get("last_follow_log", 0.0) >= 1.0:
                     state["last_follow_log"] = now
@@ -728,6 +745,8 @@ def main() -> int:
             if abs(scale - state.get("pet_scale", 1.0)) > 0.01:
                 state["pet_scale"] = scale
                 bubble.reflow(rect, pet_scale=scale)
+                if state.get("manual_pos"):
+                    center_bubble(rect)
         except Exception:  # noqa: BLE001
             pass
 
