@@ -418,7 +418,7 @@ ValueError: not enough values to unpack (expected 2, got 1)
    GPT-SoVITS 的流是**一阵一阵**吐的——实测第一阵只有 0.45 秒（差不多就是「哎，老大」），
    第二阵要再等 0.4 秒。原来读一块写一块，声卡 0.1 秒缓冲一空就断粮，听起来就是
    「哎」→ 卡一下 → 再往下念。现在读到队列、另一个线程按声卡节奏写，并且攒够
-   `tts.prebuffer_first_seconds`（首句 0.4s；其余 `prebuffer_seconds` 0.5s）再开声；
+   `tts.prebuffer_first_seconds`（首句 0.8s；其余 `prebuffer_seconds` 0.5s）再开声；
    同时**文件合成串行**（`synth_lock`），避免流式 + 两个文件一起抢 GPU 把流拖到比实时还慢
    （实测 1 文件 RTF 0.62，2 文件 1.34）。
    代价：开口约 1.0～1.5s。2026-11-18 日志里新增
@@ -502,7 +502,7 @@ ValueError: not enough values to unpack (expected 2, got 1)
 | `stream_min_chunk_length_first` | 8 | 第一小句的分块；越小开口越快（2026-11-18 从 16 调到 8，配合首句独占 GPU） |
 | `stream_min_chunk_length` | 32 | 其余句子（现在基本用不上，留着） |
 | `stream_overlap_length` | 2 | 实测 2 最好：第一阵 0.25s 就到；调到 4 会推迟到 0.46s |
-| `prebuffer_first_seconds` | 0.4 | 第一小句的垫底。2026-11-18 从 1.0 退回 0.4；首句不再被后面的合成抢，0.4 够 |
+| `prebuffer_first_seconds` | 0.8 | 第一小句的垫底。2026-11-18 从 0.4 提到 0.8，换 0.3~0.5s 开口延迟，减少首句流式断音 |
 | `stream_tail_trim_seconds` | 0.2 | 第二句已就绪时，剪掉首句尾巴最后 0.2 秒（尾巴本来有 0.3～0.4 秒静音），让第二句提前 0.2 秒接上；第二句没就绪就不剪 |
 | `prebuffer_seconds` | 0.5 | 其余 |
 | `speed` / `speed_first` | 1.2 / 1.0 | 语速：后面快、第一小句正常 |
