@@ -1071,57 +1071,47 @@ msedge.exe --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\paopao-ed
 - 历史兜底的 `progress` 只在网页播放器定期上报时更新，**拖进度条/刚打开时可能还是旧的**；
 - 同一个 Edge 窗口里开多个视频标签时，只认「URL 像视频页」的第一个，切标签可能认错——真遇到再说。
 
-### 4.2q 方案 A（浏览器扩展）也做好了，现在是第一优先（2026-11-17）
+### 4.2q 方案 A：浏览器上报进度（2026-11-17；现在是 **Tampermonkey 用户脚本**）
 
-老大试了 B 之后说「这方案好像不行，还不如 A」，于是 A 也做了。**两条并存，扩展优先。**
+旧 unpacked 扩展（`manifest.json` / `content.js` / `background.js`）**已经删掉**了。
+`browser_ext\` 现在只剩 `paopao-player.user.js` + `README.md`；网关
+`http://127.0.0.1:9888/ext/paopao-player.user.js` 直接提供安装地址。
 
-**扩展长什么样**：`D:\app1\paopao_pet_gateway\browser_ext\`（MV3，三个文件 + README）
+**装它**（不用开发者模式）：
 
-| 文件 | 干什么 |
-|---|---|
-| `manifest.json` | 只在视频站生效：bilibili / YouTube / 爱奇艺 / 优酷 / 芒果 / 腾讯视频 / 抖音；只授权 `http://127.0.0.1:9888/*` |
-| `content.js` | 每秒读一次页面里的 `<video>`：`url / title / currentTime / duration / paused / fullscreen / visible`，发给后台 |
-| `background.js` | service worker 把收到的 POST 给网关 `/player`（放在后台是为了绕开页面跨域） |
+1. Edge 加载项商店装 **Tampermonkey**；
+2. 打开 `http://127.0.0.1:9888/ext/paopao-player.user.js` → 安装；
+3. `edge://extensions` → Tampermonkey「详细信息」→ 打开 **允许用户脚本**。
 
-**装它**（三下，不用重启浏览器）：`edge://extensions` → 开发人员模式 → 加载解压缩的扩展 → 选 `browser_ext`。
-或者跑 `install-browser-ext.ps1`（帮你把扩展页和文件夹都打开）。
-本机任务栏那个 Edge 快捷方式已经把 `--load-extension=…\browser_ext` 加进去了（原始参数备份在
-`logs\edge-shortcuts-backup.json`），下次启动 Edge 自动带上；公共桌面那个因权限没改，不影响。
+或者跑 `install-browser-ext.ps1`（帮你把这两个页面都打开）。装好后 `/status.player.source`
+会是 `ext`（脚本上报，沿用旧名字），`connected: true`。
 
-**网关这边**：`POST /player` 收上报，`PlayerWatch.push_ext()` 存一份；`GET /player` 返回当前状态给扩展自检。
+> ⚠ **别再把 `browser_ext` 当扩展加载**：这个目录里没有 `manifest.json`，用
+> `--load-extension=…\browser_ext` 或「加载解压缩的扩展」去指它，Edge 会弹
+> **「扩展已失效 / 无法加载」**。2026-11-18 本机弹的就是这个：桌面快捷方式早清了，
+> **任务栏那个留着**。现在 `make-edge-shortcut.ps1` 会把桌面、任务栏、开始菜单三处一起清
+> （原始参数备份在 `logs\edge-shortcuts-backup.json`）。
+
+**网关这边**：`POST /player` 收上报，`PlayerWatch.push_ext()` 存一份；`GET /player` 返回当前状态给脚本自检。
 现在是**四层来源**，优先级从高到低：
 
 | 顺序 | 来源 | 精度 | 需要什么 |
 |---|---|---|---|
-| 1 | **浏览器扩展（A）** | 秒级 | 装一次扩展 |
+| 1 | **用户脚本（A）** | 秒级 | Tampermonkey + `paopao-player.user.js` |
 | 2 | CDP 调试端口（B） | 秒级 | Edge 带 `--remote-debugging-port=9222`（默认配置开不了，见 4.2p） |
 | 3 | B站历史进度 | 晚十几秒 | B站登录态（现成的） |
 | 4 | 环回转写 / 字幕 OCR | 8 秒 / 2 秒 | 系统声音能被环回录到 |
 
 拿到 bvid 之后的字幕流程跟 4.2p 一样（`bili video subtitle` + 90 秒窗口 + 本地缓存 24h）。
 
-**实测（2026-11-17 03:4x）**：用临时配置的 Edge 带 `--load-extension` 打开
-`bilibili.com/video/BV16cWd6pEBh`，2 秒内 `/status.player` 就变成：
-
-```
-source: ext | position: 0:11 | duration: 1:47 | bvid: BV16cWd6pEBh
-title: 『原神』7.3前瞻日期确定…
-```
-
-**隐私边界**：扩展只报「地址、标题、进度、暂停、全屏、可见」，不读 DOM、不改页面、只发到 127.0.0.1:9888；
+**隐私边界**：脚本只报「地址、标题、进度、暂停、全屏、可见」，不读 DOM、不改页面、只发到 127.0.0.1:9888；
 而且只在上面那七个视频站生效。
 
-**排障**：`/status.player.connected=false` → 扩展没启用/页面不是视频站/视频没播；
-扩展没装或关掉时会自动退到 CDP → B站历史 → 转写。
+**排障**：`/status.player.connected=false` → 脚本没装/没启用/页面不是视频站/视频没播；
+没装或关掉时会自动退到 CDP → B站历史 → 转写。
 
 
-#### 4.2q.1 桌面快捷方式 + 给别人的一键装法（2026-11-17 补）
-
-**为什么改的是「用户桌面」的快捷方式**：本机桌面那个 `Microsoft Edge.lnk` 实际在 **公共桌面**
-（`C:\Users\Public\Desktop`），属主是 `BUILTIN\Administrators`，普通权限存不进去（实测
-`Unable to save shortcut`）。所以做法是：**在用户桌面放一个同名 lnk**
-（`%USERPROFILE%\Desktop\Microsoft Edge.lnk`），资源管理器会优先用它，桌面上还是那一个图标，
-点下去就带 `--load-extension`。公共桌面那个原样不动，随时可还原（删用户桌面那个就行）。
+#### 4.2q.1 快捷方式清理 + 给别人的一键装法（2026-11-17 补，2026-11-18 改）
 
 **2026-11-17 起：旧的 unpacked 扩展已退役**（`manifest.json` / `content.js` / `background.js` 已删）。
 现在**不再用 `--load-extension`、不再改 Edge 快捷方式**，播放进度走：
@@ -1130,15 +1120,21 @@ title: 『原神』7.3前瞻日期确定…
 - **兜底**：`start-edge-watch.ps1` 开的独立配置「看片窗口」，靠 `--remote-debugging-port=9222` 读 URL/进度；
 - 需要永久免清可再走 Edge 企业策略 force-install（见 4.2q.3）。
 
+**2026-11-18：任务栏那个快捷方式还残留 `--load-extension`，Edge 每次启动弹「扩展已失效」。**
+桌面那个 11-17 就清了，但**任务栏固定项是另一份 lnk**，脚本没管：
+`%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Microsoft Edge.lnk`。
+已经手工清掉（备份追加进 `logs\edge-shortcuts-backup.json`），脚本也改成三处一起清。
+
 相关脚本现在的职责：
 
 | 脚本 | 现在干什么 |
 |---|---|
 | `install-browser-ext.ps1` | 打开 Tampermonkey 商店页 + `http://127.0.0.1:9888/ext/paopao-player.user.js`；`-DedicatedProfile` 开 CDP 看片窗口；`-RestartEdge` 已废弃（只提示） |
-| `make-edge-shortcut.ps1` | **只清理**：把桌面 Edge 快捷方式里旧的 `--load-extension=...\browser_ext` 删掉，不再往快捷方式里加东西 |
+| `make-edge-shortcut.ps1` | **只清理**：把**桌面 + 任务栏 + 开始菜单**三处 Edge 快捷方式里旧的 `--load-extension=...\browser_ext` 删掉，不再往快捷方式里加东西；幂等，改前备份 |
 | `start-edge-watch.ps1` | 独立配置目录 + 调试端口；**不再加载扩展** |
 
-安装步骤、验证和「允许用户脚本」开关见 **4.2q.3**。
+> 清完如果 Edge 还弹一次，是它缓存了启动参数：把 Edge 完全退出（任务管理器里没有 msedge.exe）
+> 再从快捷方式打开；还不行就右键任务栏图标「取消固定」→ 重新固定。
 
 
 #### 4.2q.2 实测：Edge 157 在默认配置下**不认** `--load-extension`（2026-11-17 04:0x）
@@ -1171,7 +1167,7 @@ title: 『原神』7.3前瞻日期确定…
 
 **别做的事**：别再往 Edge 快捷方式里加 `--load-extension`、别手改 `Preferences` 里的扩展状态；
 旧扩展如果还装在 Edge 里，到 `edge://extensions` 移除，并跑一次 `make-edge-shortcut.ps1`
-把快捷方式里的旧参数清掉。
+把**桌面 + 任务栏 + 开始菜单**里的旧参数清掉（2026-11-18 起三处都清）。
 
 #### 4.2q.3 播放进度上报：旧扩展已退役，现在用 Tampermonkey（2026-11-17）
 

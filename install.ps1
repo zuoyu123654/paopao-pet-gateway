@@ -1,7 +1,7 @@
 ﻿# 泡泡陪伴网关 · 一键安装（给 AI 用）
 # 用法：powershell -ExecutionPolicy Bypass -File .\install.ps1
 #      可选 -Python "C:\Python311\python.exe"
-#      可选 -EdgeShortcut  → 清理桌面 Edge 快捷方式里旧的 --load-extension 参数（旧扩展已退役）
+#      可选 -EdgeShortcut  → 清理 Edge 快捷方式（桌面/任务栏/开始菜单）里旧的 --load-extension 参数（旧扩展已退役）
 
 param(
     [string]$Python = "python",
@@ -50,7 +50,7 @@ Write-Host "  装 Tampermonkey（Edge 加载项商店搜索），然后打开：
 Write-Host "    http://127.0.0.1:9888/ext/paopao-player.user.js"
 Write-Host "  再到 edge://extensions → Tampermonkey「详细信息」→ 打开「允许用户脚本」。"
 if ($EdgeShortcut) {
-    # 兼容旧参数：现在只清理桌面 Edge 快捷方式里旧的 --load-extension
+    # 兼容旧参数：只清理 Edge 快捷方式里旧的 --load-extension（桌面/任务栏/开始菜单）
     & "$here\make-edge-shortcut.ps1"
 }
 

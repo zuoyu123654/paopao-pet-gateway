@@ -1,4 +1,4 @@
-# 泡泡桌宠 · 播放进度上报（Tampermonkey 用户脚本）
+﻿# 泡泡桌宠 · 播放进度上报（Tampermonkey 用户脚本）
 
 > 2026-11-17：旧的 unpacked 扩展（`manifest.json` / `content.js` / `background.js`）已退役并删除。
 > 原因是 Edge 更新/开发者模式策略会把它清掉；现在用商店扩展 **Tampermonkey** 当宿主，
@@ -51,3 +51,12 @@ POST 到 `http://127.0.0.1:9888/player`。只读进度，不碰页面内容，�
 - 页面没有 `<video>`（首页/专栏/动态）不会上报，这是故意的；
 - 只想用 CDP、不装脚本：跑 `start-edge-watch.ps1`（独立配置 + 调试端口），
   不依赖任何扩展。
+
+## 别再用 `--load-extension` 指这个目录
+
+`browser_ext\` 里已经没有 `manifest.json` 了。用
+`--load-extension=D:\...\browser_ext` 或 `edge://extensions` →「加载解压缩的扩展」指它，
+Edge 会弹 **「扩展已失效 / 无法加载」**（2026-11-18 本机弹过一次，是任务栏快捷方式里的残留参数）。
+
+清法：跑 `make-edge-shortcut.ps1`（桌面 / 任务栏 / 开始菜单三处一起清）；
+清完 Edge 还弹就完全退出 Edge 再开，或右键任务栏图标「取消固定」再重新固定。
