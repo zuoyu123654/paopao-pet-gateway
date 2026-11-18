@@ -53,7 +53,7 @@ DEFAULT_DURATION_S = 3.2
 # 位置缓存：30ms 一跟，靠 mtime 判断要不要重新解析，别每次都读 JSON
 _CAPTURE_CACHE: dict = {"pid": 0, "value": False, "ready_at": 0.0, "read": False}
 _RECT_CACHE: dict = {"path": "", "mtime": 0, "capture": None, "rect": None}
-_ACTUAL_CAL: dict = {"pid": 0, "dx": 0, "dy": 0}
+_MOVE_CACHE: dict = {"pid": 0, "runtime": None, "real": None, "dx": 0, "dy": 0}
 _SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
 
 # ---------------------------------------------------------------- 托盘菜单
@@ -457,24 +457,30 @@ def read_pet_rect() -> QRect | None:
                 runtime = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
                 real = read_pet_window_rect(pid)
                 if real is not None:
-                    # 真实窗口跟得快，但含透明边距；用 runtime 和它的固定差值
-                    # 校准回精灵坐标，再按实际窗口每 30ms 跟随。
-                    if _ACTUAL_CAL["pid"] != pid:
-                        _ACTUAL_CAL.update(pid=pid,
-                                           dx=real.x() - runtime.x(),
-                                           dy=real.y() - runtime.y())
-                    rect = QRect(real.x() - _ACTUAL_CAL["dx"],
-                                 real.y() - _ACTUAL_CAL["dy"],
-                                 real.width(), real.height())
+                    # runtime 是精灵的真实位置；真实窗口只用来算“拖动增量”。
+                    # runtime 没刷新时，把窗口移动量补到 runtime 上；runtime
+                    # 一刷新就回到 runtime 基准，避免透明边距造成固定偏移。
+                    if _MOVE_CACHE["pid"] != pid or _MOVE_CACHE["runtime"] is None:
+                        _MOVE_CACHE.update(pid=pid, runtime=runtime, real=real, dx=0, dy=0)
+                    else:
+                        old_rt = _MOVE_CACHE["runtime"]
+                        old_real = _MOVE_CACHE["real"]
+                        rt_moved = (runtime.x() != old_rt.x() or runtime.y() != old_rt.y())
+                        if rt_moved:
+                            _MOVE_CACHE.update(runtime=runtime, real=real, dx=0, dy=0)
+                        else:
+                            _MOVE_CACHE["dx"] += real.x() - old_real.x()
+                            _MOVE_CACHE["dy"] += real.y() - old_real.y()
+                            _MOVE_CACHE["real"] = real
+                    rect = QRect(runtime.x() + _MOVE_CACHE["dx"],
+                                 runtime.y() + _MOVE_CACHE["dy"],
+                                 runtime.width(), runtime.height())
                 else:
                     rect = runtime
                 rect.pet_pid = pid  # type: ignore[attr-defined]
                 if pet_stream_capture():
                     rect = QRect(rect.x(), rect.y() + 70, rect.width(), rect.height())
                     rect.pet_pid = pid  # type: ignore[attr-defined]
-                # 真实窗口校准后仍有透明边距造成的水平/垂直偏差，统一修一下
-                rect = QRect(rect.x() - 190, rect.y() - 40, rect.width(), rect.height())
-                rect.pet_pid = pid  # type: ignore[attr-defined]
                 _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
                 return rect
         except Exception:
