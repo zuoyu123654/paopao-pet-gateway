@@ -13,11 +13,9 @@ import json
 import logging
 import os
 import queue
-import socket
 import subprocess
 import sys
 import threading
-import time
 
 log = logging.getLogger("petgw")
 
@@ -31,14 +29,9 @@ class BubbleBridge:
         self.script = os.path.join(APP_DIR, "bubble_host.py")
         self.duration_ms = int(conf.get("duration_ms", 3200) or 3200)
         self.max_chars = int(conf.get("max_chars", 60) or 60)
-        self.capture_window = bool(conf.get("capture_window", False))
-        self.use_pet_window_rect = bool(conf.get("use_pet_window_rect", False))
-        self.offset_y = int(conf.get("offset_y", 0) or 0)
         self.ack_timeout = float(conf.get("ack_timeout", 3.0) or 3.0)
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
-        self.ipc: socket.socket | None = None
-        self.ipc_file = None
         self.acks: "queue.Queue[dict]" = queue.Queue()
         self._seq = 0
         self.last_error = ""
@@ -72,12 +65,6 @@ class BubbleBridge:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
-        if self.capture_window:
-            env["PAOPAO_BUBBLE_CAPTURE"] = "1"
-        if self.use_pet_window_rect:
-            env["PAOPAO_BUBBLE_USE_WINDOW_RECT"] = "1"
-        if self.offset_y:
-            env["PAOPAO_BUBBLE_OFFSET_Y"] = str(self.offset_y)
         log_path = os.path.join(APP_DIR, "logs", "bubble.log")
         try:
             stderr = open(log_path, "a", encoding="utf-8", buffering=1)
@@ -103,42 +90,16 @@ class BubbleBridge:
             except ValueError:
                 continue
 
-    def _connect_ipc(self) -> bool:
-        """先连已经活着的气泡小工；这样网关重启不会换窗口句柄。"""
-        if self.ipc is not None:
-            return True
-        try:
-            s = socket.create_connection(("127.0.0.1", 9894), timeout=0.4)
-            s.settimeout(max(1.0, self.ack_timeout))
-            self.ipc = s
-            self.ipc_file = s.makefile("rwb")
-            return True
-        except OSError:
-            self.ipc = None
-            self.ipc_file = None
-            return False
-
     def _ensure(self) -> bool:
-        if self._connect_ipc():
-            return True
         if self.proc is not None and self.proc.poll() is None:
-            return self._connect_ipc()
+            return True
         try:
             self._spawn()
-            for _ in range(20):
-                if self._connect_ipc():
-                    return True
-                time.sleep(0.1)
-            return False
+            return True
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             log.warning("气泡小工拉不起来：%s", exc)
             return False
-
-    def warm(self) -> None:
-        """启动时就把气泡窗口拉起来，OBS 一开始就能选到“泡泡气泡”。"""
-        if self.enabled:
-            self._ensure()
 
     def _request(self, payload: dict) -> dict | None:
         """发一条命令，等它自己那个 id 的 ack（超时返回 None）。"""
@@ -149,24 +110,6 @@ class BubbleBridge:
                 return None
             self._seq += 1
             payload = {**payload, "id": self._seq}
-            if self.ipc_file is not None:
-                try:
-                    self.ipc_file.write(
-                        (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-                    self.ipc_file.flush()
-                    line = self.ipc_file.readline()
-                    if line:
-                        return json.loads(line.decode("utf-8", "replace"))
-                except Exception as exc:  # noqa: BLE001
-                    self.last_error = str(exc)
-                    log.warning("气泡 IPC 断了（%s），下一句重连", exc)
-                    try:
-                        self.ipc_file.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self.ipc_file = None
-                    self.ipc = None
-                return None
             try:
                 assert self.proc is not None and self.proc.stdin is not None
                 self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -196,18 +139,14 @@ class BubbleBridge:
             return
         threading.Thread(target=self._ensure, name="bubble-spawn", daemon=True).start()
 
-    def show(self, text: str, duration_ms: int | None = None,
-             scale: float | None = None) -> dict:
+    def show(self, text: str, duration_ms: int | None = None) -> dict:
         text = str(text or "").strip()
         if not text:
             return {"shown": False, "reason": "empty"}
         if len(text) > self.max_chars:
             text = text[: self.max_chars]
-        req = {"cmd": "show", "text": text,
-               "duration_ms": int(duration_ms or self.duration_ms)}
-        if scale is not None:
-            req["scale"] = max(0.5, min(3.0, float(scale)))
-        ack = self._request(req)
+        ack = self._request({"cmd": "show", "text": text,
+                             "duration_ms": int(duration_ms or self.duration_ms)})
         if ack is None:
             self.last_reason = "no-ack"
             return {"shown": False, "reason": "no-ack"}
@@ -222,7 +161,6 @@ class BubbleBridge:
         return bool(ack)
 
     def status(self) -> dict:
-        alive = bool(self.ipc is not None
-                     or (self.proc is not None and self.proc.poll() is None))
+        alive = bool(self.proc is not None and self.proc.poll() is None)
         return {"enabled": self.enabled, "alive": alive, "shown": self.shown,
                 "error": self.last_error, "last_reason": self.last_reason}
