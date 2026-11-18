@@ -3107,3 +3107,38 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
 - 桌宠开关 false → `mode=off`、日志 `桌宠关掉主动识屏 → 关闭`、`帧缓冲：暂停`；
 - 桌宠开关 true（且当前 off）→ `mode=auto`、日志 `主动识屏是开的 → 模式回自动`；
 - 托盘点「B站看番」→ `config.json` 里 `proactive_screen.enabled` 变成 true，模式仍是 anime。
+
+## 19. 直播弹幕（2026-11-18 加，叠加层）
+
+**不是第七个模式**：`host.enabled` 独立开关，和 auto/game/video/anime/live 同时开。
+托盘里放在「语音电话」同一栏：
+
+- **直播弹幕**：勾上才连 B站直播间；不勾就断开、不占资源；
+- **回弹幕出声（Ctrl+Alt+B）**：勾上 = 回复走 TTS + 气泡；不勾 = 只气泡，不占语音管线。
+  系统级热键，游戏里也认。
+
+```jsonc
+"host": {
+  "enabled": false,
+  "speak": false,
+  "room_id": 0,                 // 0 = 按 bili-cli 账号/owner.json 自动找
+  "reply_interval_seconds": 25, // 每 25 秒开一个回复窗口
+  "message_ttl_seconds": 20,    // 超过 20 秒的弹幕不回
+  "max_queue": 30,
+  "bubble_scale": 2.0           // 回弹幕气泡字号 = 桌宠默认的 200%
+}
+```
+
+- 弹幕源：B站直播 WebSocket（`getDanmuInfo`，-352 风控时回退旧版 `Danmu/getConf`）；
+  `protover=2` + zlib，鉴权 op=8 成功才算 connected；
+- 只当输入源，不改 mode；回复时把「当前模式 + 前台标题/播放器 + 最近弹幕」拼进上下文；
+- 队列筛选：问句/@她/SC/礼物优先，广告/链接/`!命令`/自己发的跳过，60 秒内重复去重；
+- 时机：每 25 秒开窗，只挑一条；`speech.busy()`、`turn_active`、老大正在说话时都等；
+- 优先级：弹幕 tag 是 `danmaku`（默认 5），低于识屏/聊天；不打断正在说的句子；
+- 音频：TTS 输出钉虚拟声卡（VB-Cable/VoiceMeeter），OBS 收虚拟声卡，你戴耳机；
+- 调试：`POST /host/test {"user":"...","text":"..."}` 往队列塞一条，验证筛选/回复；
+- 接口：`GET/POST /host`，POST 体 `{"enabled":true,"speak":false,"room_id":24555729,"persist":true}`。
+
+**已知**：B站房间没开播也能连上，但没弹幕；`room_id` 自动找的是 `bili-cli` 账号 /
+`owner.json` 的 mid，换了账号要重填。
+

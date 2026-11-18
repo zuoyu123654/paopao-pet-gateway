@@ -52,11 +52,14 @@ class HotkeyThread(threading.Thread):
 
     HOTKEY_ID = 0x5056  # 'PV'
 
-    def __init__(self, on_hotkey, vk: int = 0x56, mods: int = 0x0001 | 0x0002 | 0x4000):
+    def __init__(self, on_hotkey, vk: int = 0x56, mods: int = 0x0001 | 0x0002 | 0x4000,
+                 hotkey_id: int = 0x5056, label: str = "语音"):
         super().__init__(name="voice-hotkey", daemon=True)
         self.on_hotkey = on_hotkey
         self.vk = vk                  # 0x56 = V
         self.mods = mods              # Alt | Ctrl | NoRepeat
+        self.hotkey_id = hotkey_id
+        self.label = label
         self.ready = threading.Event()
         self.ok = False
         self.error = ""
@@ -73,7 +76,7 @@ class HotkeyThread(threading.Thread):
         user32 = ctypes.windll.user32
         self.tid = int(ctypes.windll.kernel32.GetCurrentThreadId())
         try:
-            if not user32.RegisterHotKey(None, self.HOTKEY_ID, self.mods, self.vk):
+            if not user32.RegisterHotKey(None, self.hotkey_id, self.mods, self.vk):
                 self.error = "RegisterHotKey 失败（多半被别的程序占了这个组合）"
                 self.ready.set()
                 return
@@ -83,7 +86,7 @@ class HotkeyThread(threading.Thread):
             return
         self.ok = True
         self.ready.set()
-        log.info("语音热键：已注册 Ctrl+Alt+V（系统级，游戏里也认）")
+        log.info("%s热键：已注册（vk=%#x，系统级）", self.label, self.vk)
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == 0x0312:      # WM_HOTKEY
@@ -92,7 +95,7 @@ class HotkeyThread(threading.Thread):
                 except Exception as exc:  # noqa: BLE001
                     log.warning("热键回调出错：%s", exc)
         try:
-            user32.UnregisterHotKey(None, self.HOTKEY_ID)
+            user32.UnregisterHotKey(None, self.hotkey_id)
         except Exception:  # noqa: BLE001
             pass
 

@@ -183,6 +183,19 @@ class TrayMenu(QObject):
             act.triggered.connect(self._on_pick)
             self.voice_actions[key] = act
 
+        # 直播弹幕：跟语音同一栏，但**不是单选**，可以和任何模式/语音一起开
+        self.menu.addSeparator()
+        self.host_act = QAction("直播弹幕", self)
+        self.host_act.setCheckable(True)
+        self.host_act.setData(("host", "enabled"))
+        self.host_act.triggered.connect(self._on_pick)
+        self.menu.addAction(self.host_act)
+        self.host_speak_act = QAction("回弹幕出声（Ctrl+Alt+B）", self)
+        self.host_speak_act.setCheckable(True)
+        self.host_speak_act.setData(("host", "speak"))
+        self.host_speak_act.triggered.connect(self._on_pick)
+        self.menu.addAction(self.host_speak_act)
+
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("泡泡 · 模式")
         self.tray.setContextMenu(self.menu)
@@ -192,6 +205,8 @@ class TrayMenu(QObject):
         self.watch_actions["auto"].setChecked(True)
         self.lock_actions["5m"].setChecked(True)
         self.voice_actions["ptt"].setChecked(True)
+        self.host_act.setChecked(False)
+        self.host_speak_act.setChecked(False)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync)
@@ -220,6 +235,15 @@ class TrayMenu(QObject):
             forever = key == "forever"
             self._post("/mode-lock", {"forever": forever})
             self._feedback("lock_forever" if forever else "lock_5m")
+            return
+        if kind == "host":
+            on = bool(act.isChecked())
+            if key == "enabled":
+                self._post("/host", {"enabled": on})
+                self._feedback("host_on" if on else "host_off")
+            else:
+                self._post("/host", {"speak": on})
+                self._feedback("host_speak_on" if on else "host_speak_off")
             return
         self._post("/voice", {"action": "set_mode", "mode": key})
         self._feedback("voice_off" if key == "off" else key)
@@ -285,6 +309,14 @@ class TrayMenu(QObject):
             act.blockSignals(True)
             act.setChecked(key == voice)
             act.blockSignals(False)
+        host = data.get("host") or {}
+        for act, on in ((self.host_act, bool(host.get("enabled"))),
+                        (self.host_speak_act, bool(host.get("speak")))):
+            act.blockSignals(True)
+            act.setChecked(on)
+            act.blockSignals(False)
+        if host.get("error"):
+            self.host_act.setToolTip(str(host.get("error"))[:120])
 
 
 def log(msg: str) -> None:
@@ -484,6 +516,9 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log("样式切换失败（保持原样）：%s" % exc)
         try:
+            # 单条指定字号优先（直播弹幕要更大，观众才看得清）
+            scale = float(cmd.get("scale") or state["scale"])
+            state["scale"] = max(0.5, min(3.0, scale))
             bubble.set_text_scale(state["scale"])
         except Exception:  # noqa: BLE001
             pass

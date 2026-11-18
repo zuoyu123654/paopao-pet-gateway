@@ -23,6 +23,10 @@ TRAY_FEEDBACK = {
     "call": "语音电话开着呢。",
     "lock_5m": "手动锁改回 5 分钟。",
     "lock_forever": "手动锁一直保持。",
+    "host_on": "直播弹幕开了，我帮你看弹幕。",
+    "host_off": "直播弹幕关了。",
+    "host_speak_on": "回弹幕出声开了。",
+    "host_speak_off": "回弹幕只冒泡，不出声。",
 }
 
 MODE_TIMEOUT = "回自动了"

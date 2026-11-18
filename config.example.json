@@ -22,6 +22,15 @@
             }
         }
     },
+    "host": {
+        "enabled": false,
+        "speak": false,
+        "room_id": 0,
+        "reply_interval_seconds": 25,
+        "message_ttl_seconds": 20,
+        "max_queue": 30,
+        "bubble_scale": 2.0
+    },
     "tts": {
         "enabled": true,
         "backend": "gpt-sovits",
