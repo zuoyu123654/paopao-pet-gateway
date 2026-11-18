@@ -60,6 +60,7 @@
         "strip_stream_punct_max_chars": 24,
         "prebuffer_seconds": 0.5,
         "prebuffer_first_seconds": 0.4,
+        "stream_tail_trim_seconds": 0.2,
         "exclusive_gpu": false,
         "strip_stream_punct": true,
         "stream_split_method": "cut0",

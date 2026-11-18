@@ -94,6 +94,7 @@ DEFAULTS = {
         "early_sentences": 3,
         "early_min_chars": 8,
         "first_min_chars": 24,
+        "stream_tail_trim_seconds": 0.2,
         "reading_fixes": {},
         "guard": {
             "enabled": True,
@@ -1242,6 +1243,42 @@ class SpeechPipeline:
             pending = b""
             pause_state = [0]
             max_pause = float(tts.get("max_internal_pause", 0.28) or 0.0)
+            # 首句尾巴通常有 0.3～0.4 秒静音。第二句已经合成好时，剪掉最后 0.2 秒
+            # 让第二句提前 0.2 秒接上；第二句还没好就不剪，避免反而多出一段空。
+            tail_trim = (float(tts.get("stream_tail_trim_seconds", 0.0) or 0.0)
+                         if first else 0.0)
+            hold_bytes = max(0, int(rate * channels * 2 * min(tail_trim, 1.0)))
+            hold = b""
+
+            def _enqueue(raw: bytes) -> bool:
+                nonlocal hold, played
+                out = raw
+                if hold_bytes and start_evt.is_set():
+                    hold += raw
+                    if len(hold) <= hold_bytes:
+                        return True
+                    out = hold[:-hold_bytes]
+                    hold = hold[-hold_bytes:]
+                if not out:
+                    return True
+                played += len(out) / float(rate * channels * 2)
+                try:
+                    pcm_q.put(out, timeout=10)
+                except queue.Full:
+                    return False
+                if not start_evt.is_set() and played >= prebuffer:
+                    start_evt.set()
+                    first_audio = time.time() - started
+                    self.last_first_byte = first_audio
+                    self.first_byte_ewma = (
+                        first_audio if self.first_byte_ewma <= 0
+                        else 0.7 * self.first_byte_ewma + 0.3 * first_audio
+                    )
+                    self._mark_first_audio(gen)
+                    log.info("流式开播：%dHz %dch（垫 %.2fs，首字节 %.2fs）",
+                             rate, channels, prebuffer, first_audio)
+                return True
+
             while True:
                 with self.lock:
                     if gen != self.generation:
@@ -1263,20 +1300,8 @@ class SpeechPipeline:
                 raw = data.tobytes()
                 if max_pause > 0:
                     raw = shorten_pauses(raw, pause_state, rate, max_pause)
-                played += len(raw) / float(rate * channels * 2)
-                try:
-                    pcm_q.put(raw, timeout=10)
-                except queue.Full:
+                if not _enqueue(raw):
                     break
-                if not start_evt.is_set() and played >= prebuffer:
-                    start_evt.set()
-                    first = time.time() - started
-                    self.last_first_byte = first
-                    self.first_byte_ewma = (
-                        first if self.first_byte_ewma <= 0 else 0.7 * self.first_byte_ewma + 0.3 * first
-                    )
-                    self._mark_first_audio(gen)
-                    log.info("流式开播：%dHz %dch（垫 %.2fs，首字节 %.2fs）", rate, channels, prebuffer, first)
             start_evt.set()   # 短句：不等垫底，直接放
             if pending:
                 usable = len(pending) - (len(pending) % (2 * channels))
@@ -1287,9 +1312,15 @@ class SpeechPipeline:
                     raw = data.tobytes()
                     if max_pause > 0:
                         raw = shorten_pauses(raw, pause_state, rate, max_pause)
-                    played += len(raw) / float(rate * channels * 2)
+                    _enqueue(raw)
+            if hold:
+                with self.lock:
+                    next_ready = self.play_next in self.ready
+                if next_ready:
+                    log.info("首句尾巴剪掉 %.2fs（第二句已就绪，提前接上）", len(hold) / 2.0 / rate)
+                else:
                     try:
-                        pcm_q.put(raw, timeout=10)
+                        pcm_q.put(hold, timeout=0.5)
                     except queue.Full:
                         pass
             if not self.first_audio_started.is_set():

@@ -406,6 +406,10 @@ ValueError: not enough values to unpack (expected 2, got 1)
 3.1 **第一段不再按句号二次拆**：`first_min_chars` 切好的第一小句，直接 `split_long`
    限长送流式，不再 `split_sentences` 拆成「唔，还是老样子嘛。」这种 8 字碎片。
    碎片流式 2.8s 就念完，后面的整句还没合成好，听感就是一句一卡。
+3.2 **第二句提前 0.2 秒**（2026-11-18 加）：首句尾巴有 0.3～0.4 秒静音，播放时先扣住
+   最后 0.2 秒；如果第二句已经合成好，就把这 0.2 秒丢掉，第二句提前接上；如果第二句
+   还没好，就把这 0.2 秒放回去，避免反而多出一段空。配置
+   `tts.stream_tail_trim_seconds`，设 0 关闭。
 4. **提示音不再推迟**（回退）：试过按估算推迟到首句前，结果提示音和正片抢音频
    设备，整体反而更慢。现在请求一到就播，只保留「首句已开口就不播」的保护。
    **只给「让我看看」剪静音**：预存提示音尾巴原来有 0.33s / 0.50s 空白，剪到 0.12s；
@@ -499,6 +503,7 @@ ValueError: not enough values to unpack (expected 2, got 1)
 | `stream_min_chunk_length` | 32 | 其余句子（现在基本用不上，留着） |
 | `stream_overlap_length` | 2 | 实测 2 最好：第一阵 0.25s 就到；调到 4 会推迟到 0.46s |
 | `prebuffer_first_seconds` | 0.4 | 第一小句的垫底。2026-11-18 从 1.0 退回 0.4；首句不再被后面的合成抢，0.4 够 |
+| `stream_tail_trim_seconds` | 0.2 | 第二句已就绪时，剪掉首句尾巴最后 0.2 秒（尾巴本来有 0.3～0.4 秒静音），让第二句提前 0.2 秒接上；第二句没就绪就不剪 |
 | `prebuffer_seconds` | 0.5 | 其余 |
 | `speed` / `speed_first` | 1.2 / 1.0 | 语速：后面快、第一小句正常 |
 | `max_chars_per_sentence` | 32 | 一句切多长，见上 |
