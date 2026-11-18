@@ -644,17 +644,6 @@ def write_pet_proactive(on: bool) -> bool:
         return False
 
 
-def read_pet_pre_cue() -> bool:
-    """桌宠主动识屏的「让我看看」先兆提示当前开着没。"""
-    try:
-        with open(PET_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-        ps = data.get("proactive_screen") or {}
-        return bool(ps.get("pre_cue"))
-    except (OSError, ValueError):
-        return True
-
-
 def write_pet_pre_cue(on: bool) -> bool:
     """把桌宠「主动识屏」里的先兆提示 pre_cue 拨到 on/off。"""
     try:
@@ -2304,18 +2293,9 @@ class LookGuard(threading.Thread):
         self.last_pressed = 0.0
 
     def _active_look(self) -> None:
-        """走桌宠自己的“看看屏幕”，但临时关掉先兆气泡/声音。"""
+        """走桌宠自己的“看看屏幕”；不碰先兆提示开关，免得留下状态。"""
         before = int(self.gateway.stats.get("vision", 0))
-        old_pre = read_pet_pre_cue()
-        sent = False
-        write_pet_pre_cue(False)
-        try:
-            sent = press_look(self.port)
-        finally:
-            # 只在校验触发信号期间关先兆，立刻恢复；后面等识屏/回退
-            # 不再让配置一直停在 false（之前就是卡在这儿，主动识屏像坏了）。
-            write_pet_pre_cue(old_pre)
-        if sent:
+        if press_look(self.port):
             for _ in range(20):
                 time.sleep(0.3)
                 if int(self.gateway.stats.get("vision", 0)) > before:
