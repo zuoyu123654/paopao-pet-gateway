@@ -375,6 +375,40 @@ def pet_stream_capture() -> bool:
         return False
 
 
+def read_pet_window_rect(pid: int) -> QRect | None:
+    """桌宠真实可见窗口矩形（用来算直播捕获兼容在上方预留了多少）。"""
+    if not pid:
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        best = {"area": 0, "rect": None}
+        user32 = ctypes.windll.user32
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+        def cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            wpid = wt.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if int(wpid.value) != pid:
+                return True
+            rect = wt.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = int(rect.right - rect.left)
+            h = int(rect.bottom - rect.top)
+            if w >= 80 and h >= 80 and w * h > best["area"]:
+                best["area"] = w * h
+                best["rect"] = QRect(int(rect.left), int(rect.top), w, h)
+            return True
+
+        user32.EnumWindows(proc(cb), 0)
+        return best["rect"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def read_pet_rect() -> QRect | None:
     """返回桌宠精灵的全局矩形（桌宠自己写进 runtime json 的那个）。
 
@@ -580,9 +614,8 @@ def main() -> int:
         if anchor is None:
             anchor = read_pet_rect()
             if anchor is not None and pet_stream_capture():
-                # 桌宠开直播捕获兼容后，主窗上方留了气泡空间；我们的独立气泡
-                # 不跟着那个窗口走，但锚点也要跟着下移同样的量。
-                anchor = QRect(anchor.x(), anchor.y() + 80,
+                # 直播捕获兼容会在主窗上方预留空间；下移 40px（80 太多）。
+                anchor = QRect(anchor.x(), anchor.y() + 40,
                                anchor.width(), anchor.height())
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
