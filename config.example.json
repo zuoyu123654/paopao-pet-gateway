@@ -29,7 +29,8 @@
         "reply_interval_seconds": 25,
         "message_ttl_seconds": 20,
         "max_queue": 30,
-        "bubble_scale": 2.0
+        "bubble_scale": 2.0,
+        "name_max_chars": 6
     },
     "tts": {
         "enabled": true,

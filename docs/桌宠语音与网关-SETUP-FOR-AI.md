@@ -3125,7 +3125,8 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
   "reply_interval_seconds": 25, // 每 25 秒开一个回复窗口
   "message_ttl_seconds": 20,    // 超过 20 秒的弹幕不回
   "max_queue": 30,
-  "bubble_scale": 2.0           // 回弹幕气泡字号 = 桌宠默认的 200%
+  "bubble_scale": 2.0,          // 回弹幕气泡字号 = 桌宠默认的 200%
+  "name_max_chars": 6           // 用户名太长只念前 6 个字，避免 TTS 念一长串
 }
 ```
 
@@ -3133,6 +3134,8 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
   `protover=2` + zlib，鉴权 op=8 成功才算 connected；
 - 只当输入源，不改 mode；回复时把「当前模式 + 前台标题/播放器 + 最近弹幕」拼进上下文；
 - 队列筛选：问句/@她/SC/礼物优先，广告/链接/`!命令`/自己发的跳过，60 秒内重复去重；
+- 回复会叫对方名字/简称（观众知道在回谁）；名字先去掉 @/符号/表情，超过
+  `name_max_chars`（默认 6）只念前 6 个字，别让 TTS 念一长串乱码；
 - 时机：每 25 秒开窗，只挑一条；`speech.busy()`、`turn_active`、老大正在说话时都等；
 - 优先级：弹幕 tag 是 `danmaku`（默认 5），低于识屏/聊天；不打断正在说的句子；
 - 音频：TTS 输出钉虚拟声卡（VB-Cable/VoiceMeeter），OBS 收虚拟声卡，你戴耳机；
