@@ -280,12 +280,13 @@ _TITLE_VISUALS: dict[str, str] = {}
 _TITLE_VISUAL_AT: dict[str, str] = {}
 _TITLE_LATEST: dict[str, list] = {}
 _TITLE_VERSION: dict[str, str] = {}
+_TITLE_SHORT_NAMES: dict[str, dict[str, str]] = {}
 _TITLE_MTIME = 0.0
 
 
 def title_notes(refresh: bool = False) -> dict[str, str]:
     """读 titles.json（改了不用重启，按修改时间自动重载）。"""
-    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT, _TITLE_LATEST, _TITLE_VERSION, _TITLE_MTIME
+    global _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT, _TITLE_LATEST, _TITLE_VERSION, _TITLE_SHORT_NAMES, _TITLE_MTIME
     try:
         mtime = os.path.getmtime(TITLES_PATH)
     except OSError:
@@ -300,6 +301,7 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
             visual_at: dict[str, str] = {}
             latest: dict[str, list] = {}
             versions: dict[str, str] = {}
+            short_names: dict[str, dict[str, str]] = {}
             for k, v in (data or {}).items():
                 key = str(k).strip().lower()
                 if not key:
@@ -311,8 +313,9 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                     vat = str(v.get("visual_at") or "").strip()
                     lst = v.get("latest")
                     ver = str(v.get("version") or "").strip()
+                    shorts = v.get("short_names")
                 else:
-                    note, kind, visual, vat, lst, ver = str(v).strip(), "", "", "", None, ""
+                    note, kind, visual, vat, lst, ver, shorts = str(v).strip(), "", "", "", None, "", None
                 if note:
                     notes[key] = note
                     kinds[key] = kind
@@ -324,9 +327,16 @@ def title_notes(refresh: bool = False) -> dict[str, str]:
                         latest[key] = lst
                     if ver:
                         versions[key] = ver
+                    if isinstance(shorts, dict):
+                        short_names[key] = {
+                            str(n).strip(): str(s).strip()
+                            for n, s in shorts.items()
+                            if str(n).strip() and str(s).strip()
+                        }
             _TITLE_NOTES, _TITLE_KINDS, _TITLE_VISUALS, _TITLE_VISUAL_AT = (
                 notes, kinds, visuals, visual_at)
             _TITLE_LATEST, _TITLE_VERSION = latest, versions
+            _TITLE_SHORT_NAMES = short_names
             _TITLE_MTIME = mtime
         except Exception as exc:  # noqa: BLE001
             log.warning("titles.json 读不了（先不注入小抄）：%s", exc)
@@ -372,6 +382,10 @@ def title_visual_with_age(app: str = "", title: str = "") -> str:
     at = _TITLE_VISUAL_AT.get(key, "")
     latest = _TITLE_LATEST.get(key) or []
     parts: list[str] = []
+    shorts = _TITLE_SHORT_NAMES.get(key) or {}
+    if shorts:
+        parts.append("【角色简称】说的时候可以用这些短叫法，别每次念完整长名："
+                     + "；".join("%s→%s" % (n, s) for n, s in shorts.items()))
     for item in sorted(
             [x for x in latest if isinstance(x, dict)],
             key=lambda x: (-int(x.get("priority", 0) or 0), int(x.get("rounds", 0) or 0))):
