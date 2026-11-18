@@ -644,6 +644,30 @@ def write_pet_proactive(on: bool) -> bool:
         return False
 
 
+def write_pet_pre_cue(on: bool) -> bool:
+    """把桌宠「主动识屏」里的先兆提示 pre_cue 拨到 on/off。
+
+    只在模式切换时调用：auto/normal 开，看片/游戏类关；保底看屏不再碰它。
+    """
+    try:
+        with open(PET_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        ps = dict(data.get("proactive_screen") or {})
+        if bool(ps.get("pre_cue")) == bool(on):
+            return True
+        ps["pre_cue"] = bool(on)
+        data["proactive_screen"] = ps
+        tmp = PET_CONFIG_PATH + ".paopao-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PET_CONFIG_PATH)
+        log.info("先兆提示 → %s", "开" if on else "关")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("改先兆提示失败：%s", exc)
+        return False
+
+
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULTS, ensure_ascii=False))
     if os.path.exists(CONFIG_PATH):
@@ -3893,7 +3917,11 @@ class Gateway:
             pass
         # 每次模式真的变了，就播一句 + 冒个泡（两种都是预合成好的固定句子）
         self.mode.on_change = self._on_mode_change
-        # 先兆提示归桌宠自己管，网关不再按模式开关它
+        # 先兆提示：auto/normal 开；看片/游戏类关
+        try:
+            write_pet_pre_cue(self.mode.get() in ("auto", "normal"))
+        except Exception:  # noqa: BLE001
+            pass
         self.divination = DivinationWatcher(cfg, self.speech)
         self.last_vision_at = time.time()
         self.frames = FrameBuffer(cfg)
@@ -4724,7 +4752,11 @@ class Gateway:
             log.info("看番 10 秒判定没成（不影响模式）：%s", exc)
 
     def _on_mode_change(self, mode: str, source: str) -> None:
-        """模式变化：先兆提示不再由网关改，保留桌宠自己的设置。"""
+        """模式变化：auto/normal 开先兆；看片/游戏类关。"""
+        try:
+            write_pet_pre_cue(mode in ("auto", "normal"))
+        except Exception as exc:  # noqa: BLE001
+            log.info("同步先兆提示没成（不影响模式）：%s", exc)
         # 关闭 = 连自动截屏也停掉；重新开模式时再恢复
         try:
             frames = getattr(self, "frames", None)
