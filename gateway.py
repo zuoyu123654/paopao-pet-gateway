@@ -4482,7 +4482,7 @@ class Gateway:
             pass
         try:
             if not player_block or "B站字幕" not in player_block:
-                block = self.video.context_block()
+                block = self.video.context_block(self.mode.get())
                 if block:
                     parts.append(block)
         except Exception:  # noqa: BLE001
@@ -5241,7 +5241,7 @@ class Gateway:
             # 通用视频模式：把刚才的对白/字幕条喂进去，她才知道片子在讲什么。
             # 已经有了「按时间轴的字幕」就不再叠一份转写（重复且费 token）。
             if not player_block or "B站字幕" not in player_block:
-                block = self.video.context_block()
+                block = self.video.context_block(self.mode.get())
                 if block:
                     messages.insert(0, {"role": "system", "content": block})
                     log.info("视频模式：带上 %d 条对白/字幕", self.video.transcript_count())

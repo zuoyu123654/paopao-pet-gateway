@@ -137,7 +137,8 @@
     "bubble": {
         "enabled": true,
         "duration_ms": 3200,
-        "max_chars": 60
+        "max_chars": 60,
+        "capture_window": true
     },
     "voice": {
         "enabled": true,

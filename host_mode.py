@@ -139,7 +139,7 @@ class DanmakuClient(threading.Thread):
                 self.ws.settimeout(1.0)
                 auth = json.dumps({
                     "uid": int(uid or 0), "roomid": int(room_id),
-                    "protover": 2, "platform": "web", "type": 2, "key": token,
+                    "protover": 3, "platform": "web", "type": 2, "key": token,
                 }).encode("utf-8")
                 self.ws.send_binary(_Packet.pack(7, auth))
                 self.connected = False
@@ -167,8 +167,13 @@ class DanmakuClient(threading.Thread):
             except zlib.error:
                 return
         elif ver == 3:
-            # 我们 auth 的是 protover=2；真收到 3 就跳过，别把二进制当 JSON
-            return
+            try:
+                import brotli
+
+                body = brotli.decompress(body)
+            except Exception as exc:  # noqa: BLE001
+                log.info("直播弹幕：brotli 解包失败（%s）", exc)
+                return
         if op == 8:
             try:
                 obj = json.loads(body.decode("utf-8", "replace"))
@@ -189,13 +194,16 @@ class DanmakuClient(threading.Thread):
             return
         text = body.decode("utf-8", "replace")
         dec = json.JSONDecoder()
-        idx = 0
-        while idx < len(text):
+        # protover=3 的 op=5 body 前面常带一小段二进制帧头，不能从 0 直接
+        # raw_decode；从第一个 { 开始找，后面还可能跟多条 JSON。
+        idx = text.find("{")
+        while idx >= 0:
             try:
                 obj, end = dec.raw_decode(text, idx)
             except ValueError:
-                break
-            idx = end
+                idx = text.find("{", idx + 1)
+                continue
+            idx = text.find("{", end)
             cmd = str(obj.get("cmd") or "")
             if cmd.startswith("DANMU_MSG"):
                 info = obj.get("info") or []
@@ -326,8 +334,15 @@ class HostMode(threading.Thread):
             pass
 
     def set_room(self, room_id: int) -> None:
+        """换房间：断开旧连接，客户端下一轮按新 room_id 重连。"""
         self.room_id = int(room_id or 0)
         self.cfg.setdefault("host", {})["room_id"] = self.room_id
+        self.connected = False
+        try:
+            if self.client.ws:
+                self.client.ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "speak": self.speak,

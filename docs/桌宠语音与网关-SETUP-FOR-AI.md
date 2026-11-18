@@ -2761,7 +2761,9 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body $body `
 ```
 
 `config.json → bubble`：`enabled`（总开关）、`duration_ms`（默认 3200）、
-`max_chars`（默认 60，超了截断）。
+`max_chars`（默认 60，超了截断）、`capture_window`（默认 false；true 时给
+OBS/直播姬一个整屏透明宿主，窗口标题 **“泡泡气泡”**，用窗口采集抓它，
+气泡作为子控件跟着桌宠走，采集源固定满屏不会跟着气泡跑）。
 
 ### 15.3 跟她的设置同步（每次都读）
 
@@ -3133,8 +3135,10 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
 - 弹幕源：B站直播 WebSocket（`getDanmuInfo`，-352 风控时回退旧版 `Danmu/getConf`）；
   `protover=2` + zlib，鉴权 op=8 成功才算 connected；
 - **直播没有 B站字幕接口**：live 模式靠环回音频转写（9881），状态看 `video.lines/last`；
-  她自己的 TTS 也会经环回被录进去，2026-11-18 加了 gate：`speech.busy()` 期间的环回
-  直接丢，不然会转出她自己的话，误当主播说的；
+  转写块会按模式标来源：`live` = **主播说的**，`course` = **网课老师说的**，
+  `video/anime` = **剧情内容参考**；不再让直播转写去描述画面；
+  她自己的 TTS 也会经环回被录进去，2026-11-18 加了 gate：`speech._playing` 期间的
+  环回直接丢，不然会转出她自己的话，误当主播说的；
 - 如果 `video.lines` 一直 0：先看媒体输出是不是在蓝牙耳机/别的声卡——环回只录
   `video_watch.loopback_device` 或默认扬声器；把输出换到扬声器/HDMI，或在配置里
   钉一个端点；

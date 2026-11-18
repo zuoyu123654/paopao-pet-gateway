@@ -636,28 +636,43 @@ class VideoWatcher(threading.Thread):
         return ("【视频参考】标题：%s\n"
                 "只是参考：自然带上，不要逐字念标题，不确定的别编。" % title) + suffix
 
-    def context_block(self) -> str:
+    def context_block(self, mode: str = "") -> str:
         with self.lock:
             rows = list(self.transcript)
             app, title = self.app, self.title
             ocr_on = self.ocr_on
         if not rows:
             return ""
+        mode = str(mode or "").lower()
         lines = []
         for ts, source, text in rows[-self.keep:]:
             tag = "（OCR）" if source == "ocr" else ""
             lines.append("- [%s]%s %s" % (time.strftime("%H:%M:%S", time.localtime(ts)), tag, text[:120]))
-        head = "【你在陪老大看视频，下面是剧情参考，不是台词稿%s】" % (
-            "（字幕是 OCR 读的，可能有错字，别照着念）" if ocr_on else "")
+        source_note = "（字幕是 OCR 读的，可能有错字，别照着念）" if ocr_on else ""
+        if mode == "live":
+            head = "【你在陪老大看直播，下面是主播刚才说的话（语音转写）%s】" % source_note
+            body = ("这些行是**主播说的**，不是剧情字幕：可以顺着主播的话接，"
+                    "但不要念原文、不要整句复述、不要说「字幕说」「上面写着」「台词里」。"
+                    "主播只说话、画面不动时，就多接他的话，别硬描述画面。")
+            rule = "说话规矩：只在有值得接的点开口，一两句；不刷屏、不报在线人数、不提时间。"
+        elif mode == "course":
+            head = "【你在陪老大上网课，下面是网课老师刚才讲的（语音转写）%s】" % source_note
+            body = ("这些行是**网课老师说的**，不是剧情字幕：可以帮她记重点、解释没听清的地方，"
+                    "但不要念原文、不要逐字复述、不要说「字幕说」「上面写着」。")
+            rule = "说话规矩：安静陪听，老师讲到重点再简短提醒；不闲聊、不打断。"
+        else:
+            head = "【你在陪老大看视频，下面是剧情内容参考，不是台词稿%s】" % source_note
+            body = ("这些行是给你看懂剧情用的，**不是你该念的台词**：不要念字幕原文、不要整句复述台词、"
+                    "不要说「字幕说」「上面写着」「台词里」「旁白说」。用它判断剧情走到哪了，"
+                    "然后说你自己看到什么、怎么想、猜接下来会怎样。")
+            rule = "说话规矩：只在有值得说的点开口，一两句；不剧透、不报进度、不提时间、不催他睡觉。"
         return "\n".join([
             head,
             "窗口：%s｜%s" % (app, title[:60]),
             "最近听到/看到的（旧→新）：",
             *lines,
-            "这些行是给你看懂剧情用的，**不是你该念的台词**：不要念字幕原文、不要整句复述台词、"
-            "不要说「字幕说」「上面写着」「台词里」「旁白说」。用它判断剧情走到哪了，"
-            "然后说你自己看到什么、怎么想、猜接下来会怎样。",
-            "说话规矩：只在有值得说的点开口，一两句；不剧透、不报进度、不提时间、不催他睡觉。",
+            body,
+            rule,
         ])
 
     def status(self) -> dict:

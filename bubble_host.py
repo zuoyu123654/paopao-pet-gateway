@@ -36,7 +36,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bubble.speech_bubble import PetSpeechBubble  # noqa: E402
@@ -490,9 +490,32 @@ def main() -> int:
             f.write(str(os.getpid()))
     except OSError:
         pass
+    # 直播捕获兼容：整屏透明宿主。OBS/直播姬用「窗口采集」抓这个窗口，
+    # 气泡作为子控件画在桌宠上方；窗口本身固定满屏，所以采集源不会跟着气泡跑。
+    capture_overlay = os.environ.get("PAOPAO_BUBBLE_CAPTURE", "0") == "1"
+    overlay = None
+    if capture_overlay:
+        overlay = QWidget()
+        overlay.setWindowTitle("泡泡气泡")
+        overlay.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            overlay.setGeometry(screen.geometry())
+        overlay.show()
     bubble = PetSpeechBubble(None, style_id="classic_top")
-    # OBS/直播姬的窗口采集里按这个标题找；气泡本身已经跟着桌宠位置走
-    bubble.setWindowTitle("泡泡气泡")
+    if overlay is not None:
+        bubble.set_capture_compat(True, overlay)
+    else:
+        # 独立 Tool 窗口模式：OBS 窗口采集按这个标题找；气泡本身跟着桌宠位置走
+        bubble.setWindowTitle("泡泡气泡")
     state = {"style": "classic_top", "scale": 1.0, "duration_ms": 3200}
     cmds: "queue.Queue[dict]" = queue.Queue()
 
@@ -550,7 +573,7 @@ def main() -> int:
         state["pet_scale"] = read_pet_scale(state.get("pet_scale", 1.0))
         # 完全照她 show_bubble 的写法：锚点用精灵包围盒，不额外挪
         bubble.show_text(text, anchor, duration_ms=duration, pet_scale=state["pet_scale"])
-        force_topmost(bubble)
+        force_topmost(overlay if overlay is not None else bubble)
         state["anchor"] = (anchor.x(), anchor.y(), anchor.width(), anchor.height())
         state["pid"] = pid
         shown = bool(bubble.isVisible())
