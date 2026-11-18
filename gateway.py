@@ -2307,17 +2307,21 @@ class LookGuard(threading.Thread):
         """走桌宠自己的“看看屏幕”，但临时关掉先兆气泡/声音。"""
         before = int(self.gateway.stats.get("vision", 0))
         old_pre = read_pet_pre_cue()
+        sent = False
         write_pet_pre_cue(False)
         try:
-            if press_look(self.port):
-                for _ in range(20):
-                    time.sleep(0.3)
-                    if int(self.gateway.stats.get("vision", 0)) > before:
-                        return
-            # 热键没反应：回退到我们自己的静默识屏
-            self.gateway.own_look()
+            sent = press_look(self.port)
         finally:
+            # 只在校验触发信号期间关先兆，立刻恢复；后面等识屏/回退
+            # 不再让配置一直停在 false（之前就是卡在这儿，主动识屏像坏了）。
             write_pet_pre_cue(old_pre)
+        if sent:
+            for _ in range(20):
+                time.sleep(0.3)
+                if int(self.gateway.stats.get("vision", 0)) > before:
+                    return
+        # 热键没反应：回退到我们自己的静默识屏
+        self.gateway.own_look()
 
     def run(self) -> None:
         if not self.enabled:
