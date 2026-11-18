@@ -456,14 +456,18 @@ def read_pet_rect() -> QRect | None:
             data = json.loads(path.read_text(encoding="utf-8"))
             w, h = int(data.get("w") or 0), int(data.get("h") or 0)
             if w > 0 and h > 0:
+                pid = int(data.get("pid") or 0)
+                # 直接跟真实窗口：桌宠拖动时 runtime json 不一定马上写，
+                # 只读 json 会停在旧位置，点一下它才刷新。
+                real = read_pet_window_rect(pid)
+                if real is not None:
+                    real.pet_pid = pid  # type: ignore[attr-defined]
+                    if pet_stream_capture():
+                        real = QRect(real.x(), real.y() + 30,
+                                     real.width(), real.height())
+                    return real
                 rect = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
-                rect.pet_pid = int(data.get("pid") or 0)  # type: ignore[attr-defined]
-                if pet_stream_capture():
-                    # 桌宠开直播捕获兼容后主窗上方预留空间；所有定位（首次/跟随）
-                    # 都统一用这个下移后的锚点，避免只下移一下就弹回去。
-                    rect = QRect(rect.x(), rect.y() + 70,
-                                 rect.width(), rect.height())
-                    rect.pet_pid = int(data.get("pid") or 0)  # type: ignore[attr-defined]
+                rect.pet_pid = pid  # type: ignore[attr-defined]
                 _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
                 return rect
         except Exception:
