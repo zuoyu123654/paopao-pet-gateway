@@ -703,6 +703,14 @@ def main() -> int:
         state["pet_scale"] = read_pet_scale(state.get("pet_scale", 1.0))
         # 完全照她 show_bubble 的写法：锚点用精灵包围盒，不额外挪
         bubble.show_text(text, anchor, duration_ms=duration, pet_scale=state["pet_scale"])
+        # 首弹可能拿到桌宠还没刷新的 runtime；稍后再按最新锚点摆一次，
+        # 不用等用户点桌宠那一下。
+        def _refresh_pos() -> None:
+            r = read_pet_rect()
+            if r is not None:
+                bubble.reposition(r)
+
+        QTimer.singleShot(180, _refresh_pos)
         force_topmost(overlay if overlay is not None else bubble)
         state["anchor"] = (anchor.x(), anchor.y(), anchor.width(), anchor.height())
         state["pid"] = pid

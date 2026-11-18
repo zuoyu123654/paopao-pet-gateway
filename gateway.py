@@ -630,6 +630,17 @@ def write_pet_proactive(on: bool) -> bool:
         return False
 
 
+def read_pet_pre_cue() -> bool:
+    """桌宠主动识屏的「让我看看」先兆提示当前开着没。"""
+    try:
+        with open(PET_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        ps = data.get("proactive_screen") or {}
+        return bool(ps.get("pre_cue"))
+    except (OSError, ValueError):
+        return True
+
+
 def write_pet_pre_cue(on: bool) -> bool:
     """把桌宠「主动识屏」里的先兆提示 pre_cue 拨到 on/off。"""
     try:
@@ -2278,6 +2289,22 @@ class LookGuard(threading.Thread):
         self.port = int(conf.get("helper_port", 9893))
         self.last_pressed = 0.0
 
+    def _active_look(self) -> None:
+        """走桌宠自己的“看看屏幕”，但临时关掉先兆气泡/声音。"""
+        before = int(self.gateway.stats.get("vision", 0))
+        old_pre = read_pet_pre_cue()
+        write_pet_pre_cue(False)
+        try:
+            if press_look(self.port):
+                for _ in range(20):
+                    time.sleep(0.3)
+                    if int(self.gateway.stats.get("vision", 0)) > before:
+                        return
+            # 热键没反应：回退到我们自己的静默识屏
+            self.gateway.own_look()
+        finally:
+            write_pet_pre_cue(old_pre)
+
     def run(self) -> None:
         if not self.enabled:
             return
@@ -2297,10 +2324,10 @@ class LookGuard(threading.Thread):
                     continue
                 self.last_pressed = time.time()
                 log.info("保底看屏：%s 模式已 %.0f 秒没动静，自己看一眼", mode, idle_for)
-                # 不再按桌宠的「看看屏幕」：那条路会先冒一个「让我看看」的气泡，
-                # 看片时很打扰。网关自己走同一条识屏管线，只是不冒泡。
-                threading.Thread(target=self.gateway.own_look,
-                                 name="look-guard-own", daemon=True).start()
+                # 先按桌宠自己的“看看屏幕”（等价中键），但临时关掉先兆提示；
+                # 失败再回退到我们自己的静默 own_look。
+                threading.Thread(target=self._active_look,
+                                 name="look-guard-active", daemon=True).start()
             except Exception as exc:  # noqa: BLE001
                 log.warning("保底看屏出错：%s", exc)
 
