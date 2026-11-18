@@ -304,9 +304,10 @@ class Store:
     def __init__(self, base_dir: str, stale_days: float = 60.0, chunk_chars: int = 380):
         self.base = base_dir
         self.games_dir = os.path.join(base_dir, "games")
+        self.anime_dir = os.path.join(base_dir, "anime")
         self.progress_dir = os.path.join(base_dir, "progress")
         self.raw_dir = os.path.join(base_dir, "raw")
-        for d in (self.games_dir, self.progress_dir, self.raw_dir):
+        for d in (self.games_dir, self.anime_dir, self.progress_dir, self.raw_dir):
             os.makedirs(d, exist_ok=True)
         self.stale_days = max(1.0, float(stale_days))
         self.chunk_chars = max(120, int(chunk_chars))
@@ -320,13 +321,15 @@ class Store:
     # ---- 读
     def _files_sig(self) -> str:
         parts = []
-        try:
-            for fn in sorted(os.listdir(self.games_dir)):
-                if fn.endswith(".md"):
-                    p = os.path.join(self.games_dir, fn)
-                    parts.append("%s:%d" % (fn, int(os.path.getmtime(p))))
-        except OSError:
-            pass
+        for d in (self.games_dir, self.anime_dir):
+            try:
+                for fn in sorted(os.listdir(d)):
+                    if fn.endswith(".md"):
+                        p = os.path.join(d, fn)
+                        parts.append("%s:%s:%d" % (os.path.basename(d), fn,
+                                                    int(os.path.getmtime(p))))
+            except OSError:
+                pass
         return "|".join(parts)
 
     def ensure_fresh(self, max_age: float = 2.0) -> None:
@@ -343,21 +346,22 @@ class Store:
             sig = self._files_sig()
             entries: dict[str, dict] = {}
             chunks: list[dict] = []
-            for fn in sorted(os.listdir(self.games_dir)):
-                if not fn.endswith(".md"):
-                    continue
-                path = os.path.join(self.games_dir, fn)
-                try:
-                    with open(path, "r", encoding="utf-8-sig") as f:
-                        raw = f.read()
-                except OSError as exc:
-                    log.warning("手册读不了（%s）：%s", fn, exc)
-                    continue
-                slug = fn[:-3]
-                meta, body = self._parse(raw, slug)
-                body = self._filter_stale(body)
-                entries[slug] = meta
-                chunks.extend(self._chunk(slug, meta, body))
+            for d in (self.games_dir, self.anime_dir):
+                for fn in sorted(os.listdir(d)):
+                    if not fn.endswith(".md"):
+                        continue
+                    path = os.path.join(d, fn)
+                    try:
+                        with open(path, "r", encoding="utf-8-sig") as f:
+                            raw = f.read()
+                    except OSError as exc:
+                        log.warning("手册读不了（%s）：%s", fn, exc)
+                        continue
+                    slug = fn[:-3]
+                    meta, body = self._parse(raw, slug)
+                    body = self._filter_stale(body)
+                    entries[slug] = meta
+                    chunks.extend(self._chunk(slug, meta, body))
             self.entries = entries
             self.chunks = chunks
             self.searcher = Searcher(chunks)
@@ -520,7 +524,8 @@ class Store:
         }
         text = "<!-- paopao-lore %s -->\n%s\n" % (
             json.dumps(meta, ensure_ascii=False), markdown.strip())
-        path = os.path.join(self.games_dir, slug + ".md")
+        target_dir = self.anime_dir if (kind or "").lower() == "anime" else self.games_dir
+        path = os.path.join(target_dir, slug + ".md")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
@@ -1185,6 +1190,7 @@ class Lore:
             return {"ok": False, "error": "没有这本：%s" % name}
         removed = []
         for path in (os.path.join(self.store.games_dir, slug + ".md"),
+                     os.path.join(self.store.anime_dir, slug + ".md"),
                      os.path.join(self.store.progress_dir, slug + ".md")):
             try:
                 os.remove(path)
@@ -1511,7 +1517,9 @@ def main(argv: list[str] | None = None) -> int:
         if not slug:
             print("没有这本：%s" % args.name)
             return 1
-        path = os.path.join(lore.base, "games", slug + ".md")
+        meta = lore.store.entry(slug)
+        kind = (meta.get("kind") or "").lower()
+        path = os.path.join(lore.base, "anime" if kind == "anime" else "games", slug + ".md")
         with open(path, "r", encoding="utf-8-sig") as f:
             print(f.read())
         prog = lore.store.read_progress(slug, 3650)
