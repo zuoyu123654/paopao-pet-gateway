@@ -1,32 +1,25 @@
-"""本地语音识别服务（OpenAI Whisper 兼容），给 AstrBot / 网关当转写用（9881）。
+"""本地语音识别服务（OpenAI Whisper 兼容），给 AstrBot 当 STT 用。
 
-- 引擎：优先 faster-whisper（pip 装，CPU int8），没有就退回 GPT-SoVITS 自带的
-  funasr paraformer（中文，含 VAD + 标点），完全离线
+- 模型：GPT-SoVITS 自带的 funasr paraformer（中文，含 VAD + 标点），完全离线
 - 接口：POST /v1/audio/transcriptions（multipart，字段 file / model），返回 {"text": "..."}
 - 另有一个 GET /health 方便探活
 
-启动（哪个 python 装了依赖就用哪个）：
-    python tools/asr_server.py --port 9881 --engine auto
-    # 用 GPT-SoVITS 的 runtime python（自带 funasr 和模型）：
-    <GSV>\\runtime\\python.exe tools\\asr_server.py --port 9881 --models <GSV>\\tools\\asr\\models
-
-模型目录优先级：--models > 环境变量 AVSENSE_ASR_MODELS > 环境变量 PAOPAO_GSV 下的
-tools\\asr\\models。都没有就只用 faster-whisper。
+启动（用 GPT-SoVITS 的 runtime python，它装了 funasr）：
+    <GPT-SoVITS>/runtime/python.exe asr_server.py --port 9881
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-# 模型目录：--models > 环境变量 > 本机默认位置（没有就只走 faster-whisper）
-DEFAULT_GSV = Path(os.environ["PAOPAO_GSV"]) if os.environ.get("PAOPAO_GSV") else None
+# 模型目录：--models > 环境变量 > 本机默认位置
+DEFAULT_GSV = Path(r"D:\app1\GPT-SoVITS-v2pro-20250604-nvidia50\GPT-SoVITS-v2pro-20250604-nvidia50")
 ENGINE = "auto"
 WHISPER_MODEL = "small"
 MODELS: Path | None = None
@@ -43,14 +36,10 @@ def resolve_models(path: str | None = None) -> Path:
     """确定模型根目录，并找出三个子模型。"""
 
     global MODELS, ASR, VAD, PUNC
+    import os
 
     cand = path or os.environ.get("AVSENSE_ASR_MODELS") or ""
-    if cand:
-        root = Path(cand)
-    elif DEFAULT_GSV is not None:
-        root = DEFAULT_GSV / "tools" / "asr" / "models"
-    else:
-        raise SystemExit("[asr] 没给模型目录：用 --models 或 AVSENSE_ASR_MODELS/PAOPAO_GSV")
+    root = Path(cand) if cand else (DEFAULT_GSV / "tools" / "asr" / "models")
     if not root.is_dir():
         raise SystemExit(f"[asr] 模型目录不存在：{root}")
     asr = next(iter(root.glob("speech_paraformer-large*")), None)
@@ -107,10 +96,14 @@ def get_model():
         return _model
 
 
-def transcribe(path: Path) -> str:
+def transcribe(path: Path, language: str = "zh") -> str:
     model = get_model()
     if _engine == "faster-whisper":
-        segments, _info = model.transcribe(str(path), language="zh", vad_filter=True)
+        kwargs = {"vad_filter": True}
+        # language="auto" 就让 whisper 自己判（番剧是日语，硬按中文转出来是空耳）
+        if language and language not in ("auto", ""):
+            kwargs["language"] = language
+        segments, _info = model.transcribe(str(path), **kwargs)
         return "".join(seg.text for seg in segments).strip()
     res = model.generate(input=str(path), batch_size_s=300)
     if not res:
@@ -169,12 +162,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         audio = b""
+        lang = "zh"
         ctype = self.headers.get("Content-Type", "")
         if "multipart/form-data" in ctype:
             fields = parse_multipart(body, ctype)
             audio = fields.get("file") or next(
                 (v for k, v in fields.items() if k not in ("model", "language", "prompt")), b""
             )
+            try:
+                lang = (fields.get("language") or b"zh").decode("utf-8", "replace").strip() or "zh"
+            except Exception:  # noqa: BLE001
+                lang = "zh"
         else:
             audio = body
         if not audio:
@@ -186,8 +184,8 @@ class Handler(BaseHTTPRequestHandler):
             tmp.write(audio)
             tmp_path = Path(tmp.name)
         try:
-            text = transcribe(tmp_path)
-            print(f"[asr] {len(audio) // 1024} KB → {text!r}", flush=True)
+            text = transcribe(tmp_path, lang)
+            print(f"[asr] {len(audio) // 1024} KB（{lang}）→ {text!r}", flush=True)
             self._json(200, {"text": text})
         except Exception as exc:  # noqa: BLE001
             print("[asr] 识别失败:", exc, flush=True)

@@ -32,7 +32,18 @@ import wave
 log = logging.getLogger("petgw")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7afA-Za-z0-9]")
+# 上面这个数的是「像话的字符」：汉字 + 假名 + 谚文 + 拉丁字母 + 数字。
+# 2026-11-19：以前只数汉字，结果日语（假名多）和英语（全拉丁）都被当成噪音丢掉，
+# 而她自己看得懂日语和英语，没必要丢。判据从「像不像中文」改成「像不像话」。
+# 真正的噪音（纯音乐 ♪、纯符号、静音）这些字符比例还是很低，照样会被挡掉。
+HALLUCINATION_RE = re.compile(
+    r"字幕.{0,6}(由|by|提供|組)|请不吝|不吝.{0,4}(点赞|打赏)|点赞.{0,6}订阅|"
+    r"订阅.{0,6}转发|明镜|点点栏目|感谢观看|感谢收看|"
+    r"thank you for watching|subtitles? by|amara\.org|transcribed by|"
+    r"ご視聴ありがとうございました",
+    re.I,
+)
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 # 浏览器/播放器：进程名（小写、不带 .exe）
@@ -76,6 +87,30 @@ def foreground() -> tuple[str, str]:
     return _proc_name(int(pid.value)), buf.value.strip()
 
 
+def foreground_rect() -> tuple[int, int, int, int] | None:
+    """前台窗口矩形（**物理像素**，跟截图对齐）；拿不到返回 None。
+
+    2026-11-18 加：字幕 OCR 以前截「整屏下 1/3」，读回来一锅粥——B站侧边推荐、
+    任务栏时钟、搜索框全混进去。改成只截前台窗口的下三分之一。
+    进程不是 DPI 感知时 GetWindowRect 给的是逻辑像素，`OcrWorker._shot` 里
+    用「截图像素宽 / GetSystemMetrics(0)」换算回物理像素。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        rect = wt.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        w, h = int(rect.right - rect.left), int(rect.bottom - rect.top)
+        if w < 200 or h < 150:
+            return None
+        return int(rect.left), int(rect.top), w, h
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def input_idle_seconds() -> float:
     """键鼠已经安静多少秒。"""
     try:
@@ -94,7 +129,7 @@ def input_idle_seconds() -> float:
         return 0.0
 
 
-def _cjk_ratio(text: str) -> float:
+def _speech_ratio(text: str) -> float:
     body = re.sub(r"\s+", "", text or "")
     if not body:
         return 0.0
@@ -254,31 +289,44 @@ class AudioLoop(threading.Thread):
 
 
 # --------------------------------------------------------------------- 转写
+def asr_post(url: str, wav: bytes, language: str = "zh") -> str:
+    """把一段 wav 丢给认识接口（OpenAI 兼容），返回文字。环回和网页音轨共用。
+
+    `language`：zh / ja / auto（auto = 让 whisper 自己判）。
+    番剧是日语，硬按中文转会转出空耳（2026-11-19 发现的）。
+    """
+    boundary = "----paopao" + os.urandom(8).hex()
+    body = b""
+    body += ("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n" % boundary).encode()
+    if language:
+        body += ("--%s\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n%s\r\n"
+                 % (boundary, language)).encode()
+    body += ("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n"
+             "Content-Type: audio/wav\r\n\r\n" % boundary).encode()
+    body += wav + b"\r\n"
+    body += ("--%s--\r\n" % boundary).encode()
+    req = urllib.request.Request(  # noqa: F821
+        url, data=body,
+        headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
+    )
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "replace"))
+    return str(payload.get("text") or "").strip()
+
+
 class AsrWorker(threading.Thread):
-    def __init__(self, conf: dict, audio: AudioLoop, on_text):
+    def __init__(self, conf: dict, audio: AudioLoop, on_text, lang=None):
         super().__init__(name="video-asr", daemon=True)
         self.conf = conf
         self.audio = audio
         self.on_text = on_text
+        self.lang = lang or (lambda: "zh")
         self.url = str(conf.get("asr_url") or "http://127.0.0.1:9881/v1/audio/transcriptions")
         self.active = threading.Event()
         self.error = ""
 
     def _post(self, wav: bytes) -> str:
-        boundary = "----paopao" + os.urandom(8).hex()
-        body = b""
-        body += ("--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n" % boundary).encode()
-        body += ("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n"
-                 "Content-Type: audio/wav\r\n\r\n" % boundary).encode()
-        body += wav + b"\r\n"
-        body += ("--%s--\r\n" % boundary).encode()
-        req = urllib.request.Request(  # noqa: F821
-            self.url, data=body,
-            headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
-        )
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
-        return str(payload.get("text") or "").strip()
+        return asr_post(self.url, wav, self.lang())
 
     def run(self) -> None:
         while True:
@@ -296,14 +344,68 @@ class AsrWorker(threading.Thread):
                 log.warning("视频转写失败：%s", exc)
 
 
+class TabAsr(threading.Thread):
+    """网页音轨转写：用户脚本把 <video> 的音轨切成 6 秒一段推上来，这里跑 ASR。
+
+    为什么要有它：蓝牙耳机的 WASAPI 环回是哑的（驱动不给数据，实测 RMS 0.0004），
+    直播/网课就只能退回截屏 OCR。网页音轨是从播放器解码之后直接接出来的，
+    跟输出设备（有线/蓝牙/HDMI）无关，也不用装虚拟声卡。
+    """
+
+    def __init__(self, conf: dict, on_text, watch):
+        super().__init__(name="tab-asr", daemon=True)
+        self.conf = conf
+        self.on_text = on_text
+        self.watch = watch
+        self.url = str(conf.get("asr_url") or "http://127.0.0.1:9881/v1/audio/transcriptions")
+        self.q: "queue.Queue[bytes]" = queue.Queue(maxsize=8)
+        self.error = ""
+        self.done = 0
+        self.skipped = 0
+
+    def feed(self, wav: bytes) -> bool:
+        try:
+            self.q.put_nowait(wav)
+            return True
+        except queue.Full:
+            self.skipped += 1
+            return False
+
+    def drain(self) -> int:
+        """把还没转的段全倒掉（跳转/换页面时用，别拿旧位置的音轨去转）。"""
+        n = 0
+        while True:
+            try:
+                self.q.get_nowait()
+                n += 1
+            except queue.Empty:
+                break
+        return n
+
+    def run(self) -> None:
+        while True:
+            wav = self.q.get()
+            try:
+                lang = self.watch.asr_language() if self.watch is not None else "zh"
+                text = asr_post(self.url, wav, lang)
+                if text:
+                    self.done += 1
+                    self.on_text("tab", text)
+                    self.error = ""
+            except Exception as exc:  # noqa: BLE001
+                self.error = str(exc)
+                log.warning("网页音轨转写失败：%s", exc)
+
+
 # --------------------------------------------------------------------- 字幕 OCR
 class OcrWorker(threading.Thread):
     """常驻的 rapidocr 小工（独立 venv），每 2 秒读一次下三分之一的字幕条。"""
 
-    def __init__(self, conf: dict, on_text):
+    def __init__(self, conf: dict, on_text, gateway=None):
         super().__init__(name="video-ocr", daemon=True)
         self.conf = conf
         self.on_text = on_text
+        self.gateway = gateway
         self.python = str(conf.get("ocr_python") or "").strip()
         self.script = os.path.join(APP_DIR, "ocr_worker.py")
         self.bottom = float(conf.get("ocr_bottom_ratio", 0.34))
@@ -324,14 +426,79 @@ class OcrWorker(threading.Thread):
         )
 
     def _shot(self) -> str:
+        """截「前台窗口的下三分之一」；拿不到窗口矩形再退回整屏。
+
+        2026-11-18 改：以前整屏下 1/3，B站侧边推荐/任务栏/搜索框全混进去，
+        OCR 读回来一锅粥（实测：「上最贵的食物…鱼子酱 16:16 【2026全球总决赛】… 21:29 Q」）。
+        """
         from PIL import ImageGrab
 
         img = ImageGrab.grab()
-        w, h = img.size
-        crop = img.crop((0, int(h * (1 - self.bottom)), w, h))
-        path = os.path.join(tempfile.gettempdir(), "paopao_subtitle_%d.png" % int(time.time() * 1000))
+        W, H = img.size
+        box = None
+        # ① 最准：用户脚本报的 <video> 矩形（只截视频画面下 28%，字幕就在那儿）
+        try:
+            player = getattr(self.gateway, "player", None)
+            vrect = player.video_rect() if player is not None else None
+        except Exception:  # noqa: BLE001
+            vrect = None
+        if vrect:
+            vx, vy, vw, vh = vrect
+            if vw > 300 and vh > 160:
+                top = vy + int(vh * 0.72)
+                box = (max(0, vx), max(0, top), min(W, vx + vw), min(H, vy + vh))
+        # ② 退一步：前台窗口的下三分之一
+        if box is None:
+            try:
+                rect = foreground_rect()
+            except Exception:  # noqa: BLE001
+                rect = None
+            if rect:
+                x, y, w, h = rect
+                # 截图是物理像素；窗口矩形可能是逻辑像素（进程不 DPI 感知），按屏宽比换算
+                try:
+                    import ctypes
+                    logical_w = int(ctypes.windll.user32.GetSystemMetrics(0)) or W
+                except Exception:  # noqa: BLE001
+                    logical_w = W
+                scale = (W / logical_w) if logical_w else 1.0
+                x, y = int(x * scale), int(y * scale)
+                w, h = int(w * scale), int(h * scale)
+                if w > 200 and h > 150:
+                    top = y + int(h * (1.0 - self.bottom))
+                    box = (max(0, x), max(0, top), min(W, x + w), min(H, y + h))
+        # ③ 最后：整屏下三分之一
+        if box is None:
+            box = (0, int(H * (1.0 - self.bottom)), W, H)
+        crop = img.crop(box)
+        path = os.path.join(tempfile.gettempdir(),
+                            "paopao_subtitle_%d.png" % int(time.time() * 1000))
         crop.save(path)
         return path
+
+    #: 字幕条里绝不该出现的 UI 词（B站播放器/侧栏/任务栏）
+    OCR_NOISE = ("哔哩哔哩", "bilibili", "弹幕", "发个", "搜索", "礼仪", "举报", "笔记",
+                 "会员", "倍速", "全屏", "自动连播", "投币", "收藏", "分享", "关注",
+                 "人正在看", "推荐", "热门", "首页", "频道", "订阅", "字幕by", "字幕 by",
+                 "up主", "UP主", "视频选集", "分p", "分P", "播放", "已装填")
+
+    def _pick_line(self, lines: list) -> str:
+        """从 OCR 的每一行里挑一行最像「字幕」的：汉字多、不含 UI 词。"""
+        best, best_score = "", 0
+        for it in lines or []:
+            text = str(it.get("text") or "").strip()
+            if len(text) < 3 or len(text) > 40:
+                continue
+            if any(k in text for k in self.OCR_NOISE):
+                continue
+            if re.match(r"^[\d\s:./%+\-]+$", text):
+                continue
+            cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+            if cjk < 3:
+                continue
+            if cjk > best_score:
+                best, best_score = text, cjk
+        return best
 
     def run(self) -> None:
         while True:
@@ -362,7 +529,13 @@ class OcrWorker(threading.Thread):
                     self.proc = None
                     continue
                 data = json.loads(line)
-                text = str(data.get("text") or "").strip()
+                lines = data.get("lines")
+                if isinstance(lines, list):
+                    # 新版小工会给每行（带坐标），这里只挑最像字幕的那一行，
+                    # 别把侧栏推荐/任务栏一起塞进剧情参考
+                    text = self._pick_line(lines)
+                else:
+                    text = str(data.get("text") or "").strip()
                 if text and text != self._last_text:
                     self._last_text = text
                     self.on_text("ocr", text)
@@ -425,6 +598,14 @@ class VideoWatcher(threading.Thread):
         self.asr_bad = 0
         self.ocr_on = False
         self.last_asr_at = 0.0
+        # 网页音轨（用户脚本从 <video> 接出来推上来的）：优先级最高。
+        # 蓝牙耳机的环回是哑的，只有这条路能拿到直播/网课的声音。
+        self.tab_enabled = bool(self.conf.get("tab_audio_enabled", True))
+        self.last_tab_at = 0.0
+        self.tab_lines = 0
+        self.tab_url = ""
+        self.tab_last_t = None   # 上一段音轨结束时视频的播放位置（查跳转用）
+        self.tab_seek_at = 0.0   # 上次判跳转的时间（连着判的时候别抖）
         self.error = ""
         self._prev_idle = 99.0
         self._events: "collections.deque" = collections.deque()
@@ -432,9 +613,10 @@ class VideoWatcher(threading.Thread):
         self._target_title = ""
         self._target_since = 0.0
         self.audio = AudioLoop(self.conf)
-        self.audio.gate = self._self_speaking
-        self.asr = AsrWorker(self.conf, self.audio, self._on_text)
-        self.ocr = OcrWorker(self.conf, self._on_text)
+        self.audio.gate = self._skip_audio
+        self.asr = AsrWorker(self.conf, self.audio, self._on_text, self.asr_language)
+        self.ocr = OcrWorker(self.conf, self._on_text, self.gateway)
+        self.tab = TabAsr(self.conf, self._on_text, self)
 
     # ---------------------------------------------------------- 对外
     def start(self) -> None:
@@ -447,6 +629,9 @@ class VideoWatcher(threading.Thread):
             self.ocr.start()
         else:
             log.info("通用视频模式：字幕 OCR 关着（只靠环回转写，省一个常驻进程）")
+        if self.tab_enabled:
+            self.tab.start()
+            log.info("通用视频模式：网页音轨转写开着（用户脚本推 /tabaudio，蓝牙耳机也能用）")
         super().start()
         log.info("通用视频模式：已就绪（前台播放器 + 环回有声 + 键鼠低活跃 %ds 后自动进入）",
                  int(self.enter_seconds))
@@ -454,6 +639,92 @@ class VideoWatcher(threading.Thread):
     def transcript_count(self) -> int:
         with self.lock:
             return len(self.transcript)
+
+    def tab_fresh(self, seconds: float = 12.0) -> bool:
+        """网页音轨最近还在出词吗（比环回准，出词的时候环回那条就可以歇着）。"""
+        return bool(self.tab_enabled and self.last_tab_at
+                    and time.time() - self.last_tab_at < seconds)
+
+    def _cc_ready(self) -> bool:
+        """B站 这个视频拿得到 CC 字幕吗。拿得到就别走网页音轨（省一份 ASR 的 CPU）。"""
+        try:
+            player = getattr(self.gateway, "player", None)
+            if player is None:
+                return False
+            return bool(player.cc_available())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def asr_language(self) -> str:
+        """这段音轨按什么语言转。
+
+        番剧的音频基本是日语，以前服务端把语言写死成 zh，转出来全是空耳
+        （2026-11-19 老大问「番剧不是日语吗」才发现）。这里按模式给：
+        anime → auto（让 whisper 自己判，国配版也能认成中文），其它 → zh。
+        `video_watch.asr_language` 里写死一个值就会盖掉这套。
+        """
+        cfg_lang = str(self.conf.get("asr_language") or "").strip().lower()
+        if cfg_lang:
+            return cfg_lang
+        try:
+            mode = str(self.gateway.mode.get() or "").lower()
+        except Exception:  # noqa: BLE001
+            mode = ""
+        return "auto" if mode == "anime" else "zh"
+
+    def feed_tab(self, wav: bytes, meta: dict | None = None) -> str:
+        """网页音轨来了一段：排队转写。返回 queued / skip / reject。
+
+        - reject：她没在看片（聊天、玩别的），连队列都不进；
+        - skip：这个 B站 视频有 CC 字幕，用不着音轨（脚本收到会安静 45 秒）；
+        - queued：进 ASR 队列。
+
+        脚本那边每 5 秒一段 16k 单声道，大约 160KB。`meta.t` 是这一段结束时视频的
+        播放位置，用来发现**快进/快退/换集**：跳变就清掉旧台词、还没转的段也倒掉，
+        别让两段时间轴搅在一起。
+        """
+        if not self.enabled or not self.tab_enabled:
+            return "reject"
+        if not self.active or self.state not in ("active", "probe"):
+            return "reject"
+        if not wav or len(wav) < 2048:
+            return "reject"
+        if self._cc_ready():
+            return "skip"
+        meta = meta or {}
+        url = str(meta.get("url") or "")
+        if url:
+            self.tab_url = url
+        try:
+            t = float(meta.get("t"))
+        except (TypeError, ValueError):
+            t = None
+        if t is not None:
+            prev = self.tab_last_t
+            if prev is not None:
+                delta = t - prev
+                # 正常一段 8 秒（1.5 倍速看就是 12 秒、2 倍速 16 秒，都会有点抖动）；
+                # 负的、或者一下跳 22 秒以上 = 拖进度条/换集。
+                # 2026-11-18 23:0x：原来还按 URL 变化判「换页面」，结果 B站 直播页的
+                # location.href 每段都在变（query 里带 spm），每 2.5 秒清一次台词。
+                # 现在只认播放位置的跳变，换 URL 但 t 是接着的就当同一段。
+                if delta < 0.5 or delta > 22.0:
+                    if time.time() - self.tab_seek_at > 3.0:
+                        self._tab_seek(t, delta)
+            self.tab_last_t = t
+        return "queued" if self.tab.feed(wav) else "reject"
+
+    def _tab_seek(self, t: float, delta: float, reason: str = "") -> None:
+        """跳位置了：旧台词和还在排队的段都不再属于现在这一段。"""
+        self.tab_seek_at = time.time()
+        with self.lock:
+            n = len(self.transcript)
+            self.transcript.clear()
+            self.tab_lines = 0
+            self.asr_bad = 0
+        dropped = self.tab.drain()
+        log.info("网页音轨：%s位置跳到 %.0f 秒（差 %+.0f 秒），清掉旧台词 %d 条、待转 %d 段",
+                 reason or "", t, delta, n, dropped)
 
     def force(self) -> None:
         """托盘里手动选「通用视频」：不等 2 分钟的条件，直接进。"""
@@ -653,11 +924,19 @@ class VideoWatcher(threading.Thread):
         if not rows:
             return ""
         mode = str(mode or "").lower()
+        rows = rows[-self.keep:]
+        tab_rows = any(src == "tab" for _ts, src, _txt in rows)
         lines = []
-        for ts, source, text in rows[-self.keep:]:
+        for ts, source, text in rows:
             tag = "（OCR）" if source == "ocr" else ""
             lines.append("- [%s]%s %s" % (time.strftime("%H:%M:%S", time.localtime(ts)), tag, text[:120]))
-        source_note = "（字幕是 OCR 读的，可能有错字，别照着念）" if ocr_on else ""
+        if ocr_on:
+            source_note = "（字幕是 OCR 读的，可能有错字，别照着念）"
+        elif tab_rows:
+            # 网页音轨是从播放器里直接接出来的，比环回和 OCR 都准（2026-11-18 加的）
+            source_note = "（网页音轨转写，最准的一路）"
+        else:
+            source_note = ""
         if mode == "live":
             head = "【你在陪老大看直播，下面是主播刚才说的话（语音转写）%s】" % source_note
             body = ("这些行是**主播说的**，不是剧情字幕：可以顺着主播的话接，"
@@ -696,6 +975,14 @@ class VideoWatcher(threading.Thread):
                 "ocr": self.ocr_on,
                 "ocr_enabled": self.use_ocr,
                 "asr": bool(self.transcript),
+                "tab": {
+                    "enabled": self.tab_enabled,
+                    "lines": self.tab_lines,
+                    "ok": self.tab.done,
+                    "drop": self.tab.skipped,
+                    "last": round(self.last_tab_at, 1),
+                    "err": self.tab.error,
+                },
                 "loopback": list(getattr(self.audio, "names", []) or []),
                 "last": (self.transcript[-1][2][:60] if self.transcript else ""),
                 "audio": self.audio.has_signal(self.audio_window, self.audio_threshold),
@@ -715,19 +1002,36 @@ class VideoWatcher(threading.Thread):
         except Exception:  # noqa: BLE001
             return False
 
+    def _skip_audio(self) -> bool:
+        """这段环回要不要丢：① 她自己在说话；② 网页音轨正在出词。
+
+        ② 是 2026-11-18 加的：网页音轨又准又不走蓝牙，它在出词的时候环回那条
+        只会把同一句话再记一遍（还夹着系统提示音），顺便省掉一份 ASR 的 CPU。
+        """
+        if self.tab_fresh(12.0):
+            return True
+        return self._self_speaking()
+
     def _on_text(self, source: str, text: str) -> None:
         text = text.strip()
         if not text:
             return
-        if source == "asr":
-            ratio = _cjk_ratio(text)
+        if source == "asr" and self.tab_fresh(10.0):
+            # 网页音轨刚出过词：这条路更准，环回那份别记（否则同一句两遍）
+            return
+        if source in ("asr", "tab"):
+            if HALLUCINATION_RE.search(text):
+                # whisper 在静音/音乐上会「编」出这类固定句子，别当真台词喂给模型
+                return
+            ratio = _speech_ratio(text)
             if ratio < self.min_cjk:
-                # 外文片/噪音：转出来是一堆不像中文的东西，喂给模型只会添乱，直接丢
+                # 纯音乐/噪音/符号：转出来不是话，喂给模型只会添乱，直接丢。
+                # 日语、英语现在都算「话」，不会再被这里误伤。
                 with self.lock:
                     self.asr_bad += 1
                     bad = self.asr_bad
                 if bad == 3:
-                    log.info("视频模式：转写不像中文（%.0f%%），这几条丢掉%s",
+                    log.info("视频模式：转写不像说话（%.0f%%），这几条丢掉%s",
                              ratio * 100, "" if self.use_ocr else "（字幕 OCR 关着）")
                 return
         with self.lock:
@@ -735,6 +1039,9 @@ class VideoWatcher(threading.Thread):
             if source == "asr":
                 self.asr_bad = 0
                 self.last_asr_at = time.time()
+            elif source == "tab":
+                self.tab_lines += 1
+                self.last_tab_at = time.time()
 
     def _mode_locked(self) -> bool:
         """托盘选的模式还在锁里吗（锁住期间自动判定一律不动手）。"""
@@ -801,24 +1108,19 @@ class VideoWatcher(threading.Thread):
             return 0.0
 
     def _player_still_playing(self, mode: str) -> bool:
-        """播放器还在放这个模式的内容，就算前台切去聊天也别退。"""
+        """播放器还在放这个模式的内容，而且**页面是可见的**。
+
+        2026-11-18 晚：退出判断改成只看前台了（见 `_tick` 里那段注释），这个函数暂时没人调；
+        留着是因为「后台在放」和「人在看」本来就是两件事，以后要按内容判断时还用得上。
+        """
         try:
             snap = self.gateway.player.snapshot() if self.gateway.player else {}
         except Exception:  # noqa: BLE001
             return False
         if not snap or snap.get("paused"):
             return False
-        if snap.get("visible") is False:
+        if snap.get("visible") is False:      # 后台标签 ≠ 人在看
             return False
-        hay = ("%s %s %s" % (snap.get("url") or "", snap.get("referrer") or "",
-                             snap.get("title") or "")).lower()
-        if mode == "live":
-            return "live.bilibili" in hay
-        if mode == "anime":
-            return "bangumi" in hay
-        if mode == "course":
-            return bool(hay.strip())
-        return False
 
     def _video_source(self, app: str, title: str) -> str:
         return self._video_target(app, title)[1]
@@ -955,30 +1257,25 @@ class VideoWatcher(threading.Thread):
                 self.app, self.title = app, title
                 self.session_since = now
 
-        # 番剧/直播/网课：退出判断跟视频一样——没声音在响就算没在看。
-        # 托盘锁住的那几分钟不判；锁一放开（source=tray-released，since 重置）开始计时。
-        try:
-            m = self.gateway.mode
-            if m.get() in ("anime", "live", "course") and not self._mode_locked():
-                silent_for = now - max(m.since, self.last_audio_at or 0)
-                if (not playing and not self._player_still_playing(m.get())
-                        and silent_for > self.paused_away_grace):
-                    log.info("%s 模式：已经 %.0f 秒没声音，回自动", m.get(), silent_for)
-                    m.set("auto", source="video-leave")
-                    return
-        except Exception:  # noqa: BLE001
-            pass
+        # 番剧/直播/网课以前这里有一条「没声音在响就回自动」的判据。
+        # 2026-11-18 撤掉：蓝牙耳机的环回常年是哑的（`playing` 永远 False），
+        # 这条会把正在前台看的片子判成「没在看」。现在统一走下面的「前台离开」判断。
 
         # 字幕 OCR 只是兜底：转写一直没词（没声/外文/纯音乐）才打开，转写一回来就关掉。
+        # 2026-11-18：优先级的顺序改成「网页音轨 > 环回 > OCR」。
+        # 网页音轨是用户脚本从播放器里直接接出来的，蓝牙耳机（环回哑）也能拿到；
+        # 只要它最近还在出词，就绝不浪费一个 OCR 进程去读屏。
         if self.use_ocr and self.active:
-            no_asr = now - max(self.last_asr_at, self.session_since or 0)
+            last_voice_at = max(self.last_asr_at, self.last_tab_at,
+                                self.session_since or 0)
+            no_asr = now - last_voice_at
             want_ocr = no_asr > 60 and not self.ocr_on
             if want_ocr:
                 with self.lock:
                     self.ocr_on = True
                 self.ocr.active.set()
                 log.info("视频模式：%.0f 秒没转写出词，开字幕 OCR 兜底", no_asr)
-            elif self.ocr_on and now - self.last_asr_at < 10:
+            elif self.ocr_on and now - last_voice_at < 10:
                 with self.lock:
                     self.ocr_on = False
                 self.ocr.active.clear()
@@ -1009,19 +1306,21 @@ class VideoWatcher(threading.Thread):
                     self.app, self.title, self.session_since = "", "", 0.0
             return
 
-        # active / away
+        # 退出判断（2026-11-18 定稿）：**只看「前台还是不是它」**。
+        # - 不信环回有没有声音：蓝牙耳机的环回是哑的，拿它当判据会把正在看的片子判死；
+        # - 后台标签也不算在看：老大经常挂着直播/视频去干别的，切走 5 分钟就结算，
+        #   不管它还在不在放（「只是放着又不在看」）；
+        # - 停在播放器上（前台还是它）不退，可能只是暂停去倒水。
         if playing:
             self.last_audio_at = now
         if player:
             self.last_fore_at = now
-
-        self.state = "active" if (player or not playing) else "away"
-
-        still = playing or self._player_still_playing(self.gateway.mode.get())
-        if not still and not player and (now - self.last_audio_at) > self.paused_away_grace:
-            self._leave("停了又切走 2 分钟")
-        elif still and not player and (now - self.last_fore_at) > self.away_grace:
-            # 直播/番剧/网课只要播放器还在放，就算人在别的窗口打字也别退；
-            # 通用视频仍按老规矩，前台离开太久才退。
-            if self.gateway.mode.get() not in ("live", "course", "anime"):
-                self._leave("前台离开太久（片子还在放但人不在）")
+            self.state = "active"
+        else:
+            self.state = "away"
+            away_for = now - self.last_fore_at
+            # 每 30 秒打一行，方便对「到底还有多久退」——排障用，不吵
+            if away_for > 30 and int(away_for) % 30 < int(max(2.0, self.poll * 2)):
+                log.info("视频模式：前台切走 %.0f 秒（限 %.0f 秒）", away_for, self.away_grace)
+            if away_for > self.away_grace:
+                self._leave("前台切走 %.0f 分钟" % (away_for / 60.0))

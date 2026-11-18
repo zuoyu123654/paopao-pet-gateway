@@ -65,7 +65,11 @@ $markerGw = Join-Path $logDir '.gateway-started'
 if (-not (Test-Port $gwPort) -and -not (Test-RecentlyStarted $markerGw 2)) {
     Set-Content -LiteralPath $markerGw -Value (Get-Date -Format o)
     $py = Join-Path $here '.venv\Scripts\python.exe'
-    if (-not (Test-Path $py)) { $py = 'python' }
+    if (-not (Test-Path $py)) {
+        # 没有 .venv 时优先用 DSH 自带的 Python（PATH 上的 python 常常是空壳）
+        $dshPy = Join-Path $env:USERPROFILE '.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe'
+        if (Test-Path $dshPy) { $py = $dshPy } else { $py = 'python' }
+    }
     Start-Process -FilePath $py -ArgumentList @((Join-Path $here 'gateway.py')) `
         -WorkingDirectory $here -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $logDir 'stdout.log') `

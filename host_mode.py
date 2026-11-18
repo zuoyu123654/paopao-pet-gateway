@@ -32,6 +32,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CRED_PATH = os.path.join(os.environ.get("APPDATA", ""), "bili-cli", "credential.json")
 OWNER_PATH = os.path.join(os.environ.get("APPDATA", ""), "bili-cli", "owner.json")
 ROOM_API = "https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld?mid=%s"
+LIVE_INFO_API = "https://api.live.bilibili.com/room/v1/Room/get_info?room_id=%s"
 DANMU_API = ("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo"
              "?id=%s&type=0")
 CONF_API = ("https://api.live.bilibili.com/room/v1/Danmu/getConf"
@@ -92,6 +93,29 @@ class _Packet:
         return struct.pack(">IHHII", 16 + len(body), 16, 1, op, 1) + body
 
 
+def _room_live_status(room_id: int) -> int | None:
+    """直播间状态：0 没开播 / 1 直播中 / 2 轮播；查不到返回 None。
+
+    2026-11-18 加：没开播就别连弹幕。连上去也是一条空流（还会被服务端踢），
+    白占连接、白刷日志，老大也分不清「没开播」和「坏了」。
+    """
+    if int(room_id or 0) <= 0:
+        return None
+    try:
+        req = urllib.request.Request(
+            LIVE_INFO_API % room_id,
+            headers={"User-Agent": UA,
+                     "Referer": "https://live.bilibili.com/%d" % room_id},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        status = (data.get("data") or {}).get("live_status")
+        return int(status) if status is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log.info("直播弹幕：查开播状态失败（%s）", exc)
+        return None
+
+
 class DanmakuClient(threading.Thread):
     """一条 B站直播弹幕连接；断了自动重连，host.enabled 关了就不连。"""
 
@@ -101,6 +125,7 @@ class DanmakuClient(threading.Thread):
         self.ws = None
         self.connected = False
         self.last_error = ""
+        self._live_state: int | None = None   # 上次查到的开播状态，只用来少刷日志
 
     def _connect(self, room_id: int) -> bool:
         _, cookie, uid = _credential()
@@ -243,6 +268,21 @@ class DanmakuClient(threading.Thread):
                 time.sleep(5.0)
                 continue
             self.host.room_id = room_id
+            # 没开播就不连：连上去只有空流，还会被服务端踢来踢去。
+            # live_status：0 没开播、1 直播中、2 轮播（循环播放，不是真开播）。
+            live = _room_live_status(room_id)
+            if live is not None and live != 1:
+                self.connected = False
+                self.host.connected = False
+                self.host.last_error = "直播间没开播（状态 %s）" % live
+                if self._live_state != live:
+                    self._live_state = live
+                    log.info("直播弹幕：房间 %s 没开播（live_status=%s），先不连（60 秒后再看）",
+                             room_id, live)
+                time.sleep(60.0)
+                continue
+            if live is not None:
+                self._live_state = live
             try:
                 self._connect(room_id)
                 self.host.last_error = ""
@@ -318,6 +358,7 @@ class HostMode(threading.Thread):
         if not on:
             self._clear()
             self.connected = False
+            self.last_error = ""
             try:
                 if self.client.ws:
                     self.client.ws.close()
@@ -363,6 +404,7 @@ class HostMode(threading.Thread):
         return {"enabled": self.enabled, "speak": self.speak,
                 "room_id": self.room_id, "connected": self.connected,
                 "queued": self.q.qsize(), "busy": self.busy,
+                "live_status": self.client._live_state,
                 "last": self.last_text[:80], "error": self.last_error}
 
     # ---------------------------------------------------------- 弹幕

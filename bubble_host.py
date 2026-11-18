@@ -59,6 +59,8 @@ _CAPTURE_CACHE: dict = {"pid": 0, "value": False, "ready_at": 0.0, "read": False
 _RECT_CACHE: dict = {"path": "", "mtime": 0, "capture": None, "rect": None}
 _MOVE_CACHE: dict = {"pid": 0, "runtime": None, "real": None, "dx": 0, "dy": 0}
 _SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
+# 最近一次 read_pet_rect() 的锚点来源（只给日志看）
+_LAST_RECT: dict = {"runtime": None, "real": None, "real_ok": False, "delta": (0, 0)}
 
 # ---------------------------------------------------------------- 托盘菜单
 # 观看：单选；语音：单选。键是模式名，值是菜单上那行字。
@@ -145,6 +147,11 @@ class TrayMenu(QObject):
         self.nam = QNetworkAccessManager(self)
         self.syncing = False
         self._last_watch = ""
+        # 刚点过的开关：在服务器确认之前，别拿 /status 里的旧值把勾选盖回去。
+        # 2026-11-18 修：以前 1 秒一次的 sync 会在 POST 落地前把「直播弹幕」重新勾上，
+        # 老大再点一下就成了「开」——看着就像关掉之后自己又打开了。
+        self._pending_toggle: dict[str, tuple[bool, float]] = {}
+        self._pending_choice: dict[str, tuple[str, float]] = {}
 
         self.menu = QMenu()
         self.status_act = self.menu.addAction("当前：自动 · 按键说话")
@@ -235,24 +242,63 @@ class TrayMenu(QObject):
                 payload = {"mode": "off", "source": "tray"}
             else:
                 payload["source"] = "tray"
+            self._mark_choice("watch", key)
             self._post("/mode", payload)
             # 气泡交给网关：它要随机挑那句提示，跟语音保持一致（这里再冒一个就会打架）
             return
         if kind == "lock":
             forever = key == "forever"
+            self._mark_choice("lock", "forever" if forever else "5m")
             self._post("/mode-lock", {"forever": forever})
             self._feedback("lock_forever" if forever else "lock_5m")
             return
         if kind == "host":
             on = bool(act.isChecked())
             if key == "enabled":
+                self._mark_toggle("host", on)
                 self._post("/host", {"enabled": on, "persist": True})
             else:
+                self._mark_toggle("host_speak", on)
                 self._post("/host", {"speak": on, "persist": True})
             # 气泡和声音由网关统一出，这里不再重复冒一个
             return
+        self._mark_choice("voice", key)
         self._post("/voice", {"action": "set_mode", "mode": key})
         self._feedback("voice_off" if key == "off" else key)
+
+    # ------------------------------------------------------- 勾选防抖
+    def _mark_toggle(self, key: str, want: bool) -> None:
+        self._pending_toggle[key] = (bool(want), time.time() + 4.0)
+
+    def _mark_choice(self, key: str, want: str) -> None:
+        self._pending_choice[key] = (str(want), time.time() + 4.0)
+
+    def _toggle_blocks(self, key: str, server_on: bool) -> bool:
+        """服务器还没跟上自己刚点的值 → 先别用 /status 覆盖勾选。"""
+        pend = self._pending_toggle.get(key)
+        if not pend:
+            return False
+        want, deadline = pend
+        if bool(server_on) == want:
+            self._pending_toggle.pop(key, None)
+            return False
+        if time.time() > deadline:
+            self._pending_toggle.pop(key, None)
+            return False
+        return True
+
+    def _choice_blocks(self, key: str, server_choice: str) -> bool:
+        pend = self._pending_choice.get(key)
+        if not pend:
+            return False
+        want, deadline = pend
+        if server_choice == want:
+            self._pending_choice.pop(key, None)
+            return False
+        if time.time() > deadline:
+            self._pending_choice.pop(key, None)
+            return False
+        return True
 
     def _on_activated(self, reason) -> None:
         """左键单击：直接开关语音电话。"""
@@ -260,6 +306,7 @@ class TrayMenu(QObject):
             return
         current = self.voice_actions
         turn_on = not (current["call"].isChecked())
+        self._mark_choice("voice", "call" if turn_on else "ptt")
         self._post("/voice", {"action": "set_mode", "mode": "call" if turn_on else "ptt"})
         self._feedback("call" if turn_on else "ptt")
 
@@ -277,7 +324,19 @@ class TrayMenu(QObject):
         req.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         reply = self.nam.post(req, body)
-        reply.finished.connect(lambda: (reply.deleteLater(), QTimer.singleShot(150, self.sync)))
+
+        def _finished() -> None:
+            try:
+                code = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+                if code is not None and int(code) >= 400:
+                    log("POST %s 被网关拒了（HTTP %s）：%s"
+                        % (path, code, json.dumps(payload, ensure_ascii=False)))
+            except Exception:  # noqa: BLE001
+                pass
+            reply.deleteLater()
+            QTimer.singleShot(150, self.sync)
+
+        reply.finished.connect(_finished)
 
     def sync(self) -> None:
         reply = self.nam.get(QNetworkRequest(QUrl(GATEWAY_BASE + "/status")))
@@ -303,21 +362,28 @@ class TrayMenu(QObject):
             labels.get(watch, watch),
             dict(VOICE_ITEMS).get(voice, voice),
             "锁一直" if lock_forever else "锁5分钟"))
-        for key, act in self.watch_actions.items():
-            act.blockSignals(True)
-            act.setChecked(key == watch)
-            act.blockSignals(False)
-        for key, act in self.lock_actions.items():
-            act.blockSignals(True)
-            act.setChecked(key == ("forever" if lock_forever else "5m"))
-            act.blockSignals(False)
-        for key, act in self.voice_actions.items():
-            act.blockSignals(True)
-            act.setChecked(key == voice)
-            act.blockSignals(False)
+        # 每一项都先问一句「我刚点的那个生效了吗」：没生效就别拿旧状态盖回去
+        if not self._choice_blocks("watch", watch):
+            for key, act in self.watch_actions.items():
+                act.blockSignals(True)
+                act.setChecked(key == watch)
+                act.blockSignals(False)
+        lock_choice = "forever" if lock_forever else "5m"
+        if not self._choice_blocks("lock", lock_choice):
+            for key, act in self.lock_actions.items():
+                act.blockSignals(True)
+                act.setChecked(key == lock_choice)
+                act.blockSignals(False)
+        if not self._choice_blocks("voice", voice):
+            for key, act in self.voice_actions.items():
+                act.blockSignals(True)
+                act.setChecked(key == voice)
+                act.blockSignals(False)
         host = data.get("host") or {}
-        for act, on in ((self.host_act, bool(host.get("enabled"))),
-                        (self.host_speak_act, bool(host.get("speak")))):
+        for act, key, on in ((self.host_act, "host", bool(host.get("enabled"))),
+                             (self.host_speak_act, "host_speak", bool(host.get("speak")))):
+            if self._toggle_blocks(key, on):
+                continue
             act.blockSignals(True)
             act.setChecked(on)
             act.blockSignals(False)
@@ -434,6 +500,19 @@ def read_pet_window_rect(pid: int) -> QRect | None:
         return None
 
 
+def _same_order(real: QRect, runtime: QRect) -> bool:
+    """真实窗口跟精灵是不是一个量级（才可能是精灵窗，位移增量才有意义）。
+
+    桌宠「单合成窗」拓扑下，pid 最大的可见窗口是一整块全屏透明画布（2048×1152），
+    跟精灵（156×194）差了一个数量级。拿它的位移当「拖动增量」会出事：
+    画布随显示器/任务栏/窗口重建变一下，增量就被记进锚点、推到屏幕另一头，
+    而且 runtime 不动就一直错下去 —— 老大实测「气泡偏了，拖一下桌宠才对」。
+    """
+    def close(a: int, b: int) -> bool:
+        return abs(a - b) <= max(80, int(0.5 * max(a, b)))
+    return close(real.width(), runtime.width()) and close(real.height(), runtime.height())
+
+
 def read_pet_rect() -> QRect | None:
     """返回桌宠精灵的全局矩形（桌宠自己写进 runtime json 的那个）。
 
@@ -449,6 +528,14 @@ def read_pet_rect() -> QRect | None:
         )
     except OSError:
         return None
+    # 真实窗是物理像素、runtime 是逻辑像素，换算用；拿不到就当 1:1
+    try:
+        scr = QApplication.primaryScreen()
+        dpr = float(scr.devicePixelRatio()) if scr is not None else 1.0
+    except Exception:  # noqa: BLE001
+        dpr = 1.0
+    if not dpr or dpr <= 0:
+        dpr = 1.0
     for path in files[:3]:
         try:
             mtime = path.stat().st_mtime_ns
@@ -459,7 +546,7 @@ def read_pet_rect() -> QRect | None:
                 pid = int(data.get("pid") or 0)
                 runtime = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
                 real = read_pet_window_rect(pid)
-                if real is not None:
+                if real is not None and _same_order(real, runtime):
                     # runtime 是精灵的真实位置；真实窗口只用来算“拖动增量”。
                     # runtime 没刷新时，把窗口移动量补到 runtime 上；runtime
                     # 一刷新就回到 runtime 基准，避免透明边距造成固定偏移。
@@ -469,16 +556,28 @@ def read_pet_rect() -> QRect | None:
                         old_rt = _MOVE_CACHE["runtime"]
                         old_real = _MOVE_CACHE["real"]
                         rt_moved = (runtime.x() != old_rt.x() or runtime.y() != old_rt.y())
-                        if rt_moved:
+                        if rt_moved or old_real is None:
                             _MOVE_CACHE.update(runtime=runtime, real=real, dx=0, dy=0)
                         else:
-                            _MOVE_CACHE["dx"] += real.x() - old_real.x()
-                            _MOVE_CACHE["dy"] += real.y() - old_real.y()
-                            _MOVE_CACHE["real"] = real
+                            # GetWindowRect 是物理像素，runtime 是 Qt 逻辑像素（125% 缩放就
+                            # 差 1.25 倍）；不换算的话拖动增量会被放大，气泡拖完对不准。
+                            sx = (real.x() - old_real.x()) / dpr
+                            sy = (real.y() - old_real.y()) / dpr
+                            if abs(sx) > 400 or abs(sy) > 400:
+                                # 一步跳几百像素 = 换了个窗口/换了屏，不是拖动，别累加
+                                _MOVE_CACHE.update(runtime=runtime, real=real, dx=0, dy=0)
+                            else:
+                                # 增量夹在 ±400 以内：拖来拖去也不会越按越偏
+                                _MOVE_CACHE["dx"] = max(-400, min(400, _MOVE_CACHE["dx"] + int(sx)))
+                                _MOVE_CACHE["dy"] = max(-400, min(400, _MOVE_CACHE["dy"] + int(sy)))
+                                _MOVE_CACHE["real"] = real
                     rect = QRect(runtime.x() + _MOVE_CACHE["dx"],
                                  runtime.y() + _MOVE_CACHE["dy"],
                                  runtime.width(), runtime.height())
                 else:
+                    # 真实窗口不是精灵窗（单合成窗/全屏画布）：不用它的增量，
+                    # 锚点就取 runtime，别把一个全屏画布的位移算进去。
+                    _MOVE_CACHE.update(pid=pid, runtime=runtime, real=None, dx=0, dy=0)
                     rect = runtime
                 rect.pet_pid = pid  # type: ignore[attr-defined]
                 if pet_stream_capture():
@@ -486,6 +585,15 @@ def read_pet_rect() -> QRect | None:
                                  rect.width(), rect.height())
                     rect.pet_pid = pid  # type: ignore[attr-defined]
                 _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
+                # 留一份「这一拍锚点是怎么算出来的」给日志用：气泡要是偏了，
+                # logs\bubble.log 能直接看出是 runtime 过期、还是真实窗/增量掺了进来。
+                _LAST_RECT.update(
+                    runtime=(runtime.x(), runtime.y(), runtime.width(), runtime.height()),
+                    real=(None if real is None else
+                          (real.x(), real.y(), real.width(), real.height())),
+                    real_ok=bool(real is not None and _same_order(real, runtime)),
+                    delta=(_MOVE_CACHE["dx"], _MOVE_CACHE["dy"]),
+                )
                 return rect
         except Exception:
             continue
@@ -705,20 +813,34 @@ def main() -> int:
             return
         duration = int(cmd.get("duration_ms") or state["duration_ms"])
         state["pet_scale"] = read_pet_scale(state.get("pet_scale", 1.0))
+        if _MOVE_CACHE.get("dx") or _MOVE_CACHE.get("dy"):
+            log("锚点补了拖动增量：runtime 基准 +(%d,%d)" % (_MOVE_CACHE["dx"], _MOVE_CACHE["dy"]))
         # 完全照她 show_bubble 的写法：锚点用精灵包围盒，不额外挪
         bubble.show_text(text, anchor, duration_ms=duration, pet_scale=state["pet_scale"])
-        # 首弹可能拿到桌宠还没刷新的 runtime；稍后再按最新锚点摆一次，
-        # 不用等用户点桌宠那一下。
+        # 首弹可能拿到桌宠还没刷新的 runtime、或者字排完控件尺寸又动了一点；
+        # 隔几拍按最新锚点再摆一次（force 忽略位置去重），不用等用户拖桌宠。
         def _refresh_pos() -> None:
+            if not bubble.isVisible():
+                return
             r = read_pet_rect()
-            if r is not None:
-                bubble.reposition(r)
+            if r is None:
+                return
+            off = int(state.get("offset_y") or 0)
+            if off:
+                r = QRect(r.x(), r.y() + off, r.width(), r.height())
+            bubble.reposition(r, force=True)
 
-        QTimer.singleShot(180, _refresh_pos)
+        for delay in (120, 320, 700):
+            QTimer.singleShot(delay, _refresh_pos)
         force_topmost(overlay if overlay is not None else bubble)
         state["anchor"] = (anchor.x(), anchor.y(), anchor.width(), anchor.height())
         state["pid"] = pid
         shown = bool(bubble.isVisible())
+        if not explicit:
+            src = _LAST_RECT
+            log("锚点来源：runtime=%s 真实窗=%s 增量=%s（%s）"
+                % (src["runtime"], src["real"], src["delta"],
+                   "真实窗可用" if src["real_ok"] else "真实窗不是精灵窗，不用增量"))
         log("弹：%s（样式 %s，字号 %.2f，缩放 %.2f，%dms，锚点 (%d,%d)，气泡 (%d,%d)，%s）"
             % (text[:20], state["style"], state["scale"], state["pet_scale"], duration,
                anchor.x(), anchor.y(), bubble.x(), bubble.y(),
@@ -778,6 +900,18 @@ def main() -> int:
                 bubble.reflow(rect, pet_scale=scale)
                 if state.get("manual_pos"):
                     center_bubble(rect)
+            # 自愈：每 0.6 秒按当前锚点强制重算一次落点。首弹尺寸没 settle、
+            # 窗口被系统搬走、跟随拍被去重跳过、锚点补位移算歪——都在一拍内回正，
+            # 不用再靠「拖一下桌宠」把它拽回来。
+            now = time.time()
+            if now - state.get("last_force", 0.0) >= 0.6:
+                state["last_force"] = now
+                before = (bubble.x(), bubble.y())
+                bubble.reposition(rect, force=True)
+                after = (bubble.x(), bubble.y())
+                if before != after:
+                    log("自愈：气泡 (%d,%d) → (%d,%d)（锚点 (%d,%d)）"
+                        % (before[0], before[1], after[0], after[1], rect.x(), rect.y()))
         except Exception:  # noqa: BLE001
             pass
 

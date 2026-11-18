@@ -1336,7 +1336,7 @@ class PetSpeechBubble(QFrame):
         self.adjustSize()
         self._place(anchor_rect, animate=False)
 
-    def reposition(self, anchor_rect: QRect) -> None:
+    def reposition(self, anchor_rect: QRect, *, force: bool = False) -> None:
         # 鱼移动触发的跟随：直移零延迟（连续跟随走动画会拖尾滞后）。
         if not self.isVisible():
             return
@@ -1344,9 +1344,13 @@ class PetSpeechBubble(QFrame):
         # 整条放置链（可用区计算 + 目标矩形 + move + 几何重建）都可以跳过
         # ——气泡原地不动就不动窗、不重绘。慢速移动时锚点（body_rect 整数化）
         # 每拍都可能重复，这一跳省下的是每次一次整窗重绘。
+        #
+        # force=True：忽略去重、按当前锚点重算一次。给外部「自愈」用——
+        # 首弹尺寸没 settle / 窗口被系统搬走 / 锚点补位移算歪时，1 拍内回正，
+        # 不用等用户拖一下桌宠。
         anchor_rect = QRect(anchor_rect)
         key = (anchor_rect, QSize(self.size()))
-        if key == self._placed_follow_key:
+        if not force and key == self._placed_follow_key:
             return
         self._place(anchor_rect, animate=False)
 

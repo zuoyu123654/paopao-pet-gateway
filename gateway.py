@@ -985,6 +985,8 @@ class SpeechPipeline:
         self.stream_first = (
             bool(cfg["tts"].get("streaming_first", True)) and self.tts_backend.streams
         )
+        # 第二句也走流式（见 `_synth_loop` 里的注释）：它是预取对象，接缝几乎为 0
+        self.stream_second = bool(cfg["tts"].get("stream_second_sentence", True))
         self.stream_mode = int(cfg["tts"].get("streaming_mode", 3))
         # 流式分块大小：16 太小（每 ~2 秒就在接缝处漏一段 0.4~0.7 秒的静音，
         # 听感「念两三个词、停一下」），32 实测没有接缝停顿，首字节只慢 0.3 秒。
@@ -1516,10 +1518,17 @@ class SpeechPipeline:
             self.synth_gate.notify_all()
 
     def _synth_slot(self, gen: int) -> None:
-        """领一个合成额度：这一代的流还没吐完时只有 1 个，之后 synth_parallel 个。"""
+        """领一个合成额度：这一代的流还没吐完时**一个都不给**，之后给 synth_parallel 个。
+
+        2026-11-18 实测：首句那条流还在吐的时候，只要放开 1 条整句合成，流就会
+        断成「念两三个词、卡 0.4～1.2 秒」——单个 api_v2 进程在 GPU 上是串行的，
+        一条整句合成能把流饿到实时以下（6 字的句子当时合了 4.93 秒）。
+        所以首句流式期间整句合成一律等着；`_mark_stream_done` 一放闸，后面两条
+        并行合成正好落在首句还在播的那几秒里。
+        """
         with self.synth_gate:
             while True:
-                cap = self.synth_parallel if self.stream_done_gen >= gen else 1
+                cap = self.synth_parallel if self.stream_done_gen >= gen else 0
                 if self.synth_busy < cap:
                     self.synth_busy += 1
                     return
@@ -1863,8 +1872,16 @@ class SpeechPipeline:
             # 以前短句会退到整句合成，结果就是「文字都出来了，声音还要再等一两秒」。
             # 后面攒好的段落也跟着走流式：整句合成要等它全部合成完才出声（一条 25 字
             # 的句子要 4 秒多），流式 0.8 秒就能接着念，句间停顿短得多。
+            #
+            # 2026-11-18 23:2x：**第二句也走流式**（`stream_second_sentence`）。
+            # 实测那一轮：首句 5.83s 音频，第二句 17 字整句合成要 2.95s、第三句 16 字 3.57s，
+            # 两句并发还各自慢 30%，结果首句念完了它俩才好 → 中间空 1.61s。
+            # 第二句改流式后它是「预取」的对象（`_prefetch_next` 在首句还在播时就开请求），
+            # 而且 ≤22 字的句子在 min_chunk 32 下只产生一个 chunk，等于边收边播、接缝为 0。
             if self.stream_first and (
-                idx == self._gen_first_idx(gen) or idx in self._force_stream
+                idx == self._gen_first_idx(gen)
+                or idx in self._force_stream
+                or (self.stream_second and idx == self._gen_first_idx(gen) + 1)
             ):
                 with self.cond:
                     if gen == self.generation:
@@ -4874,9 +4891,14 @@ class Gateway:
                     early_min = int(self.cfg["tts"].get("early_min_chars", 8) or 8)
                     first_min = int(self.cfg["tts"].get("first_min_chars", 7) or 7)
                     first_max = int(self.cfg["tts"].get("first_max_chars", 16) or 16)
+                    # 第二段单独一个上限：它不走流式（要整句合成），太长就会「首句念完了
+                    # 它还没合好」——实测 18 字要 2.5～3 秒，首句才播 3.8～4.4 秒，
+                    # 中间空 0.5～0.8 秒。想更紧就把这值按到 14 上下（合成约 2 秒）。
+                    second_max = int(self.cfg["tts"].get("second_max_chars", first_max) or first_max)
                     if fed_count < early:
                         need = max(early_min, first_min) if fed_count == 0 else early_min
-                        sentence, rest = take_first_sentence(buf, need, first_max)
+                        cap = first_max if fed_count == 0 else second_max
+                        sentence, rest = take_first_sentence(buf, need, cap)
                     else:
                         sentence, rest = take_ready_sentence(buf, 6)
                     if not sentence:
@@ -5456,6 +5478,26 @@ class Gateway:
 
         payload["messages"] = messages
         payload["stream"] = True
+        if scenario == "vision":
+            # 一眼看清「这一轮她手里到底有什么」：几条消息、system 合计多少字、
+            # 有没有台词/字幕。老大问「她拿到字幕了吗」时直接看这行（2026-11-18 加）。
+            try:
+                sys_chars = sum(len(str(m.get("content") or ""))
+                                for m in messages if m.get("role") == "system")
+                joined = "\n".join(str(m.get("content") or "")
+                                   for m in messages if m.get("role") == "system")
+                if "B站字幕" in joined:
+                    kind = "带 B站字幕（按时间轴）"
+                elif "网页音轨转写" in joined:
+                    kind = "带网页音轨转写（最准的一路）"
+                elif ("剧情内容参考" in joined) or ("主播刚才说的话" in joined):
+                    kind = "带转写/OCR 台词"
+                else:
+                    kind = "没有台词/字幕"
+                log.info("识屏 payload：%d 条消息，system 合计 %d 字，%s",
+                         len(messages), sys_chars, kind)
+            except Exception:  # noqa: BLE001
+                pass
         return payload, scenario, user_text
 
 
@@ -5561,6 +5603,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_look()
         elif path.endswith("/player"):
             self._handle_player()
+        elif path.endswith("/tabaudio"):
+            self._handle_tabaudio()
         elif path.endswith("/divination"):
             self._handle_divination()
         elif path.endswith("/visuals/refresh"):
@@ -6190,6 +6234,35 @@ class Handler(BaseHTTPRequestHandler):
                          "reason": ack.get("reason", ""), "text": text[:60],
                          "anchor": ack.get("anchor"), "screen": ack.get("screen"),
                          "status": GATEWAY.bubble.status()})
+
+    def _handle_tabaudio(self):
+        """用户脚本推来的一段网页音轨（16k 单声道 wav，base64 塞在 JSON 里）。
+
+        为什么要有这条路：蓝牙耳机的 WASAPI 环回是哑的（驱动不给数据），
+        直播/网课的转写就只剩截屏 OCR。网页音轨是从播放器解码后直接接出来的，
+        跟输出设备无关。转写在 TabAsr 线程里异步跑，这里立刻回话。
+        """
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"error": "bad json"}, 400)
+            return
+        b64 = str(req.get("b64") or "")
+        if not b64:
+            self._send_json({"ok": False, "error": "empty"}, 400)
+            return
+        try:
+            wav = base64.b64decode(b64)
+        except Exception:  # noqa: BLE001
+            self._send_json({"ok": False, "error": "bad base64"}, 400)
+            return
+        if wav[:4] != b"RIFF":
+            self._send_json({"ok": False, "error": "not wav"}, 400)
+            return
+        video = getattr(GATEWAY, "video", None)
+        state = video.feed_tab(wav, req) if video is not None else "reject"
+        # state: queued（进队列转写）/ skip（有 CC 字幕，音轨用不上，脚本会安静一会儿）/ reject
+        self._send_json({"ok": state != "reject", "state": state, "bytes": len(wav)})
 
     def _handle_say(self):
         try:

@@ -31,6 +31,12 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 BV_RE = re.compile(r"/(?:video|bangumi/play)/(BV[0-9A-Za-z]{8,12})")
 PAGE_RE = re.compile(r"[?&]p=(\d+)")
+# 番剧页是 /bangumi/play/ep5737 这种，没有 BV 号 —— 要问一次 pgc 接口换 bvid，
+# 否则看番永远拿不到字幕（2026-11-18 加）。
+EP_RE = re.compile(r"/bangumi/play/ep(\d+)", re.I)
+EP_API = "https://api.bilibili.com/pgc/view/web/season?ep_id=%s"
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 # 只有这些页面算「在看 B 站视频」，别的网页不掺和
 VIDEO_URL_HINTS = ("bilibili.com/video/", "bilibili.com/bangumi/play/",
                    "bilibili.com/list/", "youtube.com/watch")
@@ -79,6 +85,11 @@ class PlayerWatch(threading.Thread):
         self.ws = None
         self.ws_target = ""
         self._subs: dict[str, list] = {}
+        # 「这个视频有没有 CC」的缓存：(key, at, bool)。没有它每 5 秒问一次接口
+        self._cc_memo: tuple = ()
+        # 番剧 ep → bvid（后台查一次，查不到就记空串，别每轮都打接口）
+        self._ep_bv: dict[str, str] = {}
+        self._ep_busy: set[str] = set()
 
     # ---------------------------------------------------------------- CDP
     def _targets(self) -> list:
@@ -327,6 +338,90 @@ class PlayerWatch(threading.Thread):
         return items
 
     # ------------------------------------------------------------ 对外
+    def _ep_to_bv(self, ep: str) -> str:
+        """番剧 ep5737 → bvid：后台查，查过的记下来（空串也算记过，别反复问）。"""
+        ep = str(ep or "").strip()
+        if not ep:
+            return ""
+        if ep in self._ep_bv:
+            return self._ep_bv[ep]
+        if ep not in self._ep_busy:
+            self._ep_busy.add(ep)
+            threading.Thread(target=self._fetch_ep_bv, args=(ep,),
+                             name="ep-bv", daemon=True).start()
+        return ""
+
+    def _fetch_ep_bv(self, ep: str) -> None:
+        try:
+            req = urllib.request.Request(
+                EP_API % ep,
+                headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            bv = ""
+            for e in ((data.get("result") or {}).get("episodes") or []):
+                if str(e.get("ep_id")) == str(ep):
+                    bv = str(e.get("bvid") or "")
+                    break
+            self._ep_bv[ep] = bv
+            if bv:
+                log.info("番剧：ep%s → %s（可以按这个 bvid 拉字幕）", ep, bv)
+            else:
+                log.info("番剧：ep%s 没换到 bvid，这一集拿不到字幕", ep)
+        except Exception as exc:  # noqa: BLE001
+            self._ep_bv[ep] = ""
+            log.info("番剧：ep%s 换 bvid 失败（%s）", ep, exc)
+
+    @staticmethod
+    def _video_rect_from(data: dict) -> list[int]:
+        """用户脚本报的 <video> 矩形 → 屏幕物理像素 [x,y,w,h]；缺字段就返回空。
+
+        CSS 像素 → 屏幕：视口原点 = 窗口原点 + 边框/标题栏差值
+        （`(ow-iw)/2` 左右边框、`oh-ih` 顶部浏览器界面），再乘 dpr。
+        """
+        try:
+            dpr = float(data.get("dpr") or 1) or 1.0
+            vx, vy = float(data.get("vx") or -1), float(data.get("vy") or -1)
+            vw, vh = float(data.get("vw") or 0), float(data.get("vh") or 0)
+            if vw < 200 or vh < 120 or vx < -50 or vy < -50:
+                return []
+            sx, sy = float(data.get("sx") or 0), float(data.get("sy") or 0)
+            iw, ih = float(data.get("iw") or 0), float(data.get("ih") or 0)
+            ow, oh = float(data.get("ow") or 0), float(data.get("oh") or 0)
+            ox = sx + max(0.0, (ow - iw) / 2.0)
+            oy = sy + max(0.0, oh - ih)
+            return [int((ox + vx) * dpr), int((oy + vy) * dpr),
+                    int(vw * dpr), int(vh * dpr)]
+        except (TypeError, ValueError):
+            return []
+
+    def video_rect(self) -> tuple[int, int, int, int] | None:
+        """<video> 现在在屏幕上的物理像素矩形（超过 5 秒没上报就作废）。"""
+        try:
+            st = self.snapshot()
+        except Exception:  # noqa: BLE001
+            return None
+        if not st:
+            return None
+        rect = st.get("vrect")
+        if not rect or len(rect) != 4:
+            return None
+        if time.time() - float(st.get("at") or 0) > 5:
+            return None
+        try:
+            import ctypes
+            sw = int(ctypes.windll.user32.GetSystemMetrics(0)) or 0
+            sh = int(ctypes.windll.user32.GetSystemMetrics(1)) or 0
+        except Exception:  # noqa: BLE001
+            sw, sh = 0, 0
+        x, y, w, h = (int(v) for v in rect)
+        # 光靠视口换算可能算歪（缩放/多屏），明显跑出屏幕就别用，让上层退回窗口裁切
+        if w < 300 or h < 160 or x < -50 or y < -50:
+            return None
+        if sw and sh and (x > sw or y > sh or x + w < 0 or y + h < 0):
+            return None
+        return x, y, w, h
+
     def push_ext(self, data: dict) -> None:
         """浏览器扩展（方案 A）推上来的一条状态。"""
         try:
@@ -344,6 +439,8 @@ class PlayerWatch(threading.Thread):
                 return
             bv = BV_RE.search(url)
             page = PAGE_RE.search(url)
+            ep = EP_RE.search(url)
+            bvid = bv.group(1) if bv else (self._ep_to_bv(ep.group(1)) if ep else "")
             state = {
                 "url": url,
                 "title": str(data.get("title") or "")[:100],
@@ -353,11 +450,15 @@ class PlayerWatch(threading.Thread):
                 "paused": data.get("paused"),
                 "fullscreen": bool(data.get("fullscreen")),
                 "visible": bool(data.get("visible", True)),
-                "bvid": bv.group(1) if bv else "",
+                "bvid": bvid,
                 "page": int(page.group(1)) if page else 1,
                 "source": "ext",
                 "at": time.time(),
             }
+            # <video> 在屏幕上的物理像素矩形（用户脚本 1.1.0 起会报）——字幕 OCR 拿它裁条
+            vrect = self._video_rect_from(data)
+            if vrect:
+                state["vrect"] = vrect
             # 同一个地址的旧状态先清掉：标签页切到后台时它会带着 visible=False 再报一次，
             # 不能被当成「还在前台」继续用。
             with self.lock:
@@ -405,6 +506,30 @@ class PlayerWatch(threading.Thread):
             return True
         return (not app) or any(app.startswith(b) or b in app for b in self.BROWSERS)
 
+    def cc_available(self) -> bool:
+        """这个视频拿得到 B站 自己的字幕（CC）吗。
+
+        2026-11-18 加：有 CC 的时候网页音轨那条就不用转了（省一份 ASR 的 CPU），
+        优先级本来就是「CC > 网页音轨 > 环回 > OCR」。
+        """
+        st = self.snapshot()
+        if not st or st.get("visible") is False:
+            return False
+        bvid = st.get("bvid")
+        if not bvid:
+            return False
+        now = time.time()
+        key = "%s|%s" % (bvid, st.get("page") or 1)
+        memo = self._cc_memo
+        if memo and memo[0] == key and now - memo[1] < 60:
+            return bool(memo[2])
+        try:
+            ok = bool(self.subtitles(bvid, int(st.get("page") or 1)))
+        except Exception:  # noqa: BLE001
+            ok = False
+        self._cc_memo = (key, now, ok)
+        return ok
+
     def context_block(self) -> str:
         """识屏时插进 system 的那段：现在在看什么、放到哪、前 N 秒台词。"""
         st = self.snapshot()
@@ -443,9 +568,13 @@ class PlayerWatch(threading.Thread):
             return head + "\n（刚开始，还没到有字幕的地方）"
         return "\n".join([
             head,
-            "【B站字幕（按时间轴，最近 %d 秒，旧→新）】这些是给你看懂剧情的原文，" % int(window),
+            "【B站字幕（按时间轴，最近 %d 秒，旧→新）】这些是这一段里真实的台词/旁白：" % int(window),
             *lines[-30:],
-            "用它判断剧情走到哪了；**不要念字幕原文**，用自己的话讲你看到了什么、怎么想。",
+            # 2026-11-18：以前只写「用它判断剧情」，结果她张嘴还是描述画面（老大原话
+            # 「怎么感觉没有（字幕）」）。这里把「先接剧情」写成硬要求，画面降成补充。
+            "怎么用：**先用一句接住剧情**——谁在干什么、说到哪了、这一段在讲什么，"
+            "然后再说你自己的反应。这些台词就是你「听懂了」的东西，"
+            "别逐字念、别报时间，也**别只描述画面里有什么**（画面只是补细节）。",
         ])
 
     def status(self) -> dict:
@@ -462,4 +591,5 @@ class PlayerWatch(threading.Thread):
             "duration": _fmt(st.get("d")) if st and st.get("d") else "",
             "paused": st.get("paused"),
             "bvid": st.get("bvid", ""),
+            "vrect": st.get("vrect") or [],
         }

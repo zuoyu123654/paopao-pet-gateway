@@ -53,7 +53,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 | 脚本 | 适合 | 行为 |
 |---|---|---|
-| `follow_pet.ps1` | 平时就在用桌宠 | 桌宠开→网关开，桌宠关→网关关 |
+| `follow_pet.ps1` | 平时就在用桌宠 | 桌宠开→网关开，桌宠关→网关关；顺带每 60 秒查一次桌宠的主动识屏「当日熔断」，上游恢复了就清熔断 + 重启桌宠（日志 `logs\pet_guard.log`） |
 | `watchdog.ps1` | 想让网关一直活着 | 每 5 分钟 `ensure_running.ps1`，缺谁补谁 |
 
 `ensure_running.ps1` 起 TTS 认 `config.json → tts.guard.launch`（和网关自愈同一份），

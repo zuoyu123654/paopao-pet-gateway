@@ -189,6 +189,10 @@ class VoiceMode(threading.Thread):
         self.barge_in = bool(conf.get("barge_in", False))
         self.no_speech_timeout = float(conf.get("no_speech_timeout", 3.0))
         self.device = conf.get("device", "")      # "" = 自动挑；也可以写设备序号或名字片段
+        # 候选设备顺序（默认输入 → 像麦克风/耳机的 → 其它）。录音时一块数据都没有
+        # 就往后换一个，不用等下一次按键（2026-11-18 修：设备序号变了会一直录 0 块）
+        self._device_candidates: list[int] = []
+        self._device_names: dict[int, str] = {}
         self.state = "idle"          # idle / listening / thinking / speaking
         self.hotkey_ok = False
         self.lock = threading.Lock()
@@ -239,6 +243,11 @@ class VoiceMode(threading.Thread):
     def status(self) -> dict:
         return {"enabled": self.enabled, "mode": self.mode, "state": self.state,
                 "hotkey": self.hotkey, "hotkey_ok": self.hotkey_ok, "turns": self.turns,
+                "device": getattr(self, "_device_name", ""),
+                "device_index": getattr(self, "_device_index", -1),
+                "rms": round(float(getattr(self, "_last_rms", 0.0)), 4),
+                "threshold": round(float(getattr(self, "_last_thr", self.threshold)), 4),
+                "last_blocks": int(getattr(self, "_last_blocks", 0)),
                 "last_text": self.last_text[:80], "error": self.last_error}
 
     def is_speaking(self) -> bool:
@@ -326,21 +335,7 @@ class VoiceMode(threading.Thread):
                 pass
             if not self.recording.is_set():
                 continue
-            pcm = self._record_once(sd, np)
-            if pcm is None and not self.device and getattr(self, "_last_blocks", 0) == 0:
-                # 启动时选的设备可能已经拔掉/序号变了：这一句 0 块就换系统默认输入重录
-                try:
-                    default_idx = sd.default.device[0]
-                    if default_idx is not None and int(default_idx) >= 0 \
-                            and int(default_idx) != self._device_index:
-                        old_idx = self._device_index
-                        self._device_index = int(default_idx)
-                        self._device_name = str(sd.query_devices(self._device_index)["name"])
-                        log.info("语音：设备 #%s 没数据，换默认输入 #%s %s 重录",
-                                 old_idx, self._device_index, self._device_name)
-                        pcm = self._record_once(sd, np)
-                except Exception as exc:  # noqa: BLE001
-                    log.info("语音：换默认输入失败：%s", exc)
+            pcm = self._record_any(sd, np)
             self.recording.clear()
             too_short_voice = (self.mode == "call"
                                and getattr(self, "_last_voiced", 0.0) < self.call_min_voiced)
@@ -428,68 +423,80 @@ class VoiceMode(threading.Thread):
                 continue
         return 0
 
-    def _pick_device(self, sd):
-        """挑一个真能出声的麦克风。
+    BAD_INPUT = ("立体声混音", "stereo mix", "line input", "线路输入", "what u hear")
+    GOOD_INPUT = ("麦克风", "microphone", "mic", "耳机", "headset", "airpods")
 
-        别选「立体声混音/线路输入」（那是系统声音，不是人说话）。顺序：
-        配置指定 → 名字像麦克风/耳机的 → 其它 → 最后才是不出声的那个。
-        挑的时候顺手试 0.35 秒，能收到数据才算数（插孔没插麦的设备会一块都不给）。
-        """
-        want = self.device
+    def _device_order(self, sd) -> list[int]:
+        """候选顺序：系统默认输入 → 名字像麦克风/耳机的 → 其它；混音/线路输入排最后。"""
+        try:
+            default_idx = int(sd.default.device[0])
+        except Exception:  # noqa: BLE001
+            default_idx = -1
         inputs = [(i, d) for i, d in enumerate(sd.query_devices())
                   if d.get("max_input_channels", 0) > 0]
         if not inputs:
-            raise RuntimeError("系统里没有输入设备")
-        if want not in ("", None):
-            if str(want).isdigit():
-                idx = int(want)
-                for i, d in inputs:
-                    if i == idx:
-                        return idx, d["name"]
-                raise RuntimeError("配置的输入设备 #%d 不存在" % idx)
-            text = str(want).lower()
-            for i, d in inputs:
-                if text in str(d["name"]).lower():
-                    return i, d["name"]
-        # 优先跟系统默认输入：换耳机/拔插后设备序号会变，死守启动时的序号会录到 0 块
-        try:
-            default_idx = sd.default.device[0]
-            if default_idx is not None and int(default_idx) >= 0:
-                for i, d in inputs:
-                    if i == int(default_idx):
-                        got = self._probe_device(sd, i)
-                        log.info("  试默认输入 #%d %s → %d 采样", i, d["name"], got)
-                        if got > 0:
-                            return i, d["name"]
-                        break
-        except Exception:  # noqa: BLE001
-            pass
-        bad = ("立体声混音", "stereo mix", "line input", "线路输入", "what u hear")
-        good = ("麦克风", "microphone", "mic", "耳机", "headset", "airpods")
+            return []
+        self._device_names = {i: str(d["name"]) for i, d in inputs}
 
         def rank(item):
             i, d = item
             name = str(d["name"]).lower()
-            if any(b in name for b in bad):
-                return 2
-            if any(g in name for g in good):
+            if any(b in name for b in self.BAD_INPUT):
+                return 3
+            if i == default_idx:
                 return 0
-            return 1
+            if any(g in name for g in self.GOOD_INPUT):
+                return 1
+            return 2
 
-        for i, d in sorted(inputs, key=rank):
-            if rank((i, d)) == 2:
+        return [i for i, _d in sorted(inputs, key=rank)]
+
+    def _pick_device(self, sd):
+        """挑一个真能出声的麦克风，并把候选顺序排好。
+
+        别选「立体声混音/线路输入」（那是系统声音，不是人说话）。挑的时候顺手试
+        0.35 秒，能收到数据才算数（插孔没插麦 / 蓝牙耳机不在通话模式会一块都不给）。
+        全都没数据时不报错停下 —— 按默认输入先顶着，录音那一刻还会往后再换。
+        """
+        want = self.device
+        order = self._device_order(sd)
+        if not order:
+            raise RuntimeError("系统里没有输入设备")
+        if want not in ("", None):
+            if str(want).isdigit():
+                idx = int(want)
+                if idx not in order:
+                    raise RuntimeError("配置的输入设备 #%d 不存在（或不是输入）" % idx)
+                self._device_candidates = [idx] + [i for i in order if i != idx]
+                return idx, self._device_names[idx]
+            text = str(want).lower()
+            for i in order:
+                if text in self._device_names[i].lower():
+                    self._device_candidates = [i] + [j for j in order if j != i]
+                    return i, self._device_names[i]
+            log.warning("语音：配置的麦克风「%s」没找到，按默认挑", want)
+        for i in order:
+            if any(b in self._device_names[i].lower() for b in self.BAD_INPUT):
                 continue
             got = self._probe_device(sd, i)
-            log.info("  试设备 #%d %s → %d 采样", i, d["name"], got)
+            log.info("  试设备 #%d %s → %d 采样", i, self._device_names[i], got)
             if got > 0:
-                return i, d["name"]
-        # 全都没数据：退到名字最像的那个，至少别选混音
-        for i, d in sorted(inputs, key=rank):
-            return i, d["name"]
-        return inputs[0][0], inputs[0][1]
+                self._device_candidates = [i] + [j for j in order if j != i]
+                return i, self._device_names[i]
+        log.warning(
+            "语音：%d 个输入设备全都没数据——先看 Windows「设置→隐私→麦克风」有没有允许"
+            "桌面应用，再看蓝牙耳机是不是在通话模式；现在按默认输入 #%d %s 顶着，"
+            "录音时还会自动往后换", len(order), order[0], self._device_names.get(order[0], "?"))
+        self._device_candidates = order
+        return order[0], self._device_names[order[0]]
 
-    def _record_once(self, sd, np):
-        """录到「静音够久 / 到上限 / 被取消」为止，返回 float32 单声道。"""
+    def _record_once(self, sd, np, device: int | None = None):
+        """录到「静音够久 / 到上限 / 被取消」为止，返回 float32 单声道。
+
+        ``device`` 不传就用当前设备；一块数据都收不到时 0.8 秒就收工，
+        让上层（`_record_any`）换下一台候选设备。
+        """
+        dev = self._device_index if device is None else int(device)
         blocks: "queue.Queue" = queue.Queue()
         self._last_blocks = 0
         self._last_voiced = 0.0
@@ -505,20 +512,25 @@ class VoiceMode(threading.Thread):
         silence = 0.0
         started = time.time()
         rate = SAMPLE_RATE
+        calib: list[float] = []
+        peak_rms = 0.0
+        # 校准前先宽松一点（按配置的一半，最低 0.004），免得第一句话被卡掉
+        thr = max(0.004, self.threshold * 0.4)
+        self._last_thr = thr
         try:
             # 有些设备不吃 16k（WASAPI 会直接拒），那就按它的默认采样率录，事后再降
             def _open(r):
                 return sd.InputStream(samplerate=r, channels=1, dtype="float32",
                                       blocksize=int(r * BLOCK_SECONDS), callback=cb,
-                                      device=self._device_index)
+                                      device=dev)
 
             try:
                 stream = _open(SAMPLE_RATE)
-                stream.start()
             except Exception:
-                info = sd.query_devices(self._device_index)
+                info = sd.query_devices(dev)
                 rate = int(info.get("default_samplerate") or 48000)
                 stream = _open(rate)
+            if not stream.active:
                 stream.start()
             try:
                 while True:
@@ -529,6 +541,11 @@ class VoiceMode(threading.Thread):
                     except queue.Empty:
                         if time.time() - started > self.max_record:
                             break
+                        # 一块都没有：多半是这台设备不出数据，早点收工换下一台
+                        if not frames and time.time() - started > 0.8:
+                            log.info("语音：设备 #%s 一块数据都没有，收工", dev)
+                            self._last_blocks = 0
+                            return None
                         # 设备根本不出数据时也要收工，别干等 30 秒
                         if not heard and time.time() - started > (
                                 self.call_window if self.mode == "call" else self.no_speech_timeout):
@@ -538,7 +555,20 @@ class VoiceMode(threading.Thread):
                         continue
                     rms = float(np.sqrt((block ** 2).mean()))
                     self._last_rms = rms
-                    if rms >= self.threshold:
+                    if rms > peak_rms:
+                        peak_rms = rms
+                    # 开头的几块先估环境噪声：蓝牙耳麦增益常常很低（实测静音 RMS 0.0002），
+                    # 固定 0.012 的阈值会「一直听不到人声」。自适应阈值 = 噪声×6，
+                    # 夹在 [0.003, 配置值] 之间——吵的麦还是按配置走，安静的就放低。
+                    if not heard and len(calib) < 8:
+                        calib.append(rms)
+                        if len(calib) == 8:
+                            noise = min(calib) if calib else 0.0
+                            thr = max(0.003, min(self.threshold, noise * 6.0))
+                            self._last_thr = thr
+                            log.info("语音：环境噪声 %.4f → 判定阈值 %.4f（配置 %.4f）",
+                                     noise, thr, self.threshold)
+                    if rms >= thr:
                         self._last_voiced += BLOCK_SECONDS
                         self._last_voiced_at = time.time()
                         if not heard:
@@ -560,7 +590,8 @@ class VoiceMode(threading.Thread):
                     # 一直没人说话：别干等到 30 秒（电话模式给 call_window，按键模式给 3 秒）
                     if not heard and time.time() - started > (
                             self.call_window if self.mode == "call" else self.no_speech_timeout):
-                        log.info("语音：没听到人声，收工")
+                        log.info("语音：没听到人声（收到 %d 块，最大 rms %.4f，阈值 %.4f）",
+                                 len(frames), peak_rms, thr)
                         self._last_blocks = len(frames)
                         return None
             finally:
@@ -589,6 +620,38 @@ class VoiceMode(threading.Thread):
             ).astype("float32")
             log.info("语音：设备 %dHz → 16000Hz", rate)
         return pcm
+
+    def _record_any(self, sd, np):
+        """按候选顺序录：当前设备一块数据都不给就立刻换下一台，不用再按一次键。
+
+        2026-11-18 修：设备序号会随耳机插拔/蓝牙切换变，启动时挑中的那台可能已经
+        死了（Windows 里还留着名字，开流却一块数据都不给）。以前只在「0 块 + 没配
+        设备 + 默认输入跟当前不一样」时才换一次，实际经常换不动；现在无条件往后试，
+        一次按键内就能落到真能出声的那台。
+        """
+        order = list(self._device_candidates) or [self._device_index]
+        for n, idx in enumerate(order):
+            if self.cancel.is_set():
+                return None
+            try:
+                pcm = self._record_once(sd, np, device=idx)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("语音：设备 #%s 录音出错（%s）", idx, exc)
+                continue
+            if pcm is not None and len(pcm):
+                if idx != self._device_index:
+                    self._device_index = idx
+                    self._device_name = self._device_names.get(idx, str(idx))
+                    log.info("语音：改用设备 #%s %s 录", idx, self._device_name)
+                return pcm
+            if getattr(self, "_last_blocks", 0) > 0:
+                # 有数据，只是没听到人声/太短 —— 不用再换设备
+                return pcm
+            if n + 1 < len(order):
+                log.info("语音：换下一台输入设备试试")
+        if order:
+            self.last_error = "所有输入设备都没数据（%d 台）" % len(order)
+        return None
 
     def _transcribe(self, pcm) -> str:
         wav = _to_wav_bytes(pcm)
