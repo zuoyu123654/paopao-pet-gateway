@@ -51,6 +51,7 @@ ACK = {"ok": True}
 DEFAULT_STYLE = "classic_top"
 DEFAULT_DURATION_S = 3.2
 # 位置缓存：30ms 一跟，靠 mtime 判断要不要重新解析，别每次都读 JSON
+_CAPTURE_CACHE: dict = {"pid": 0, "value": False, "ready_at": 0.0, "read": False}
 _RECT_CACHE: dict = {"path": "", "mtime": 0, "capture": None, "rect": None}
 _SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
 
@@ -366,13 +367,33 @@ def read_bubble_cfg(prev: dict) -> dict:
 # 所以现在只用"新样本一到就瞬间对齐"（不做预测）。
 
 
-def pet_stream_capture() -> bool:
-    """桌宠是否开了直播捕获兼容；开了它窗口上方会预留空间，气泡要跟着下移。"""
+def current_pet_pid() -> int:
     try:
-        data = json.loads(PET_CONFIG.read_text(encoding="utf-8-sig"))
-        return bool(data.get("stream_capture_mode"))
+        files = sorted(PET_HOME.glob("pet-runtime-v2-*-slot-*.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        return int(data.get("pid") or 0)
     except Exception:  # noqa: BLE001
+        return 0
+
+
+def pet_stream_capture() -> bool:
+    """桌宠启动几秒后读一次捕获兼容开关；之后按这个 pid 缓存，不再连续读文件。"""
+    pid = current_pet_pid()
+    now = time.time()
+    if pid != _CAPTURE_CACHE["pid"]:
+        _CAPTURE_CACHE.update(pid=pid, value=False, ready_at=now + 3.0, read=False)
         return False
+    if now < _CAPTURE_CACHE["ready_at"]:
+        return False
+    if not _CAPTURE_CACHE["read"]:
+        try:
+            data = json.loads(PET_CONFIG.read_text(encoding="utf-8-sig"))
+            _CAPTURE_CACHE["value"] = bool(data.get("stream_capture_mode"))
+        except Exception:  # noqa: BLE001
+            _CAPTURE_CACHE["value"] = False
+        _CAPTURE_CACHE["read"] = True
+    return bool(_CAPTURE_CACHE["value"])
 
 
 def read_pet_window_rect(pid: int) -> QRect | None:
