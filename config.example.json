@@ -45,7 +45,8 @@
         "text_lang": "zh",
         "max_sentences": 40,
         "max_chars_per_sentence": 32,
-        "first_min_chars": 10,
+        "first_min_chars": 7,
+        "first_max_chars": 16,
         "second_min_chars": 5,
         "early_sentences": 3,
         "early_min_chars": 8,
@@ -200,7 +201,7 @@
     },
     "look_guard": {
         "enabled": true,
-        "idle_minutes": 2,
+        "idle_minutes": 5,
         "check_seconds": 30,
         "helper_port": 9893
     },

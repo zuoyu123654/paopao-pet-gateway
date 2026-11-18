@@ -106,7 +106,8 @@ DEFAULTS = {
         "synth_parallel": 2,
         "early_sentences": 3,
         "early_min_chars": 8,
-        "first_min_chars": 24,
+        "first_min_chars": 7,
+        "first_max_chars": 16,
         "stream_tail_trim_seconds": 0.2,
         "reading_fixes": {},
         "guard": {
@@ -849,14 +850,13 @@ def split_sentences(text: str, max_chars: int) -> list[str]:
     return [s for s in out if re.search(r"[0-9A-Za-z\u4e00-\u9fff]", s)]
 
 
-def take_first_sentence(buf: str, min_chars: int = 8) -> tuple[str, str]:
-    """第一句：逗号/分号也算断点，够 8 个字（大于 7）就切走，剩下的正常合成。
-
-    这样第一句至少是「哎，老大你在看」这种长度，不会单独蹦一个「哎」。
-    """
+def take_first_sentence(buf: str, min_chars: int = 8, max_chars: int = 16) -> tuple[str, str]:
+    """第一句：逗号/分号也算断点；大于 min_chars 后遇断点就切，最长 max_chars。"""
     for i, ch in enumerate(buf):
         if ch in _FIRST_BREAK and i + 1 >= min_chars:
             return buf[: i + 1], buf[i + 1:]
+        if i + 1 >= max_chars:
+            return buf[:max_chars], buf[max_chars:]
     return "", buf
 
 
@@ -4872,10 +4872,11 @@ class Gateway:
                     # 中间就空一下——「后面几句卡」最早那一空就是这么来的。
                     early = int(self.cfg["tts"].get("early_sentences", 3) or 3)
                     early_min = int(self.cfg["tts"].get("early_min_chars", 8) or 8)
-                    first_min = int(self.cfg["tts"].get("first_min_chars", 24) or 24)
+                    first_min = int(self.cfg["tts"].get("first_min_chars", 7) or 7)
+                    first_max = int(self.cfg["tts"].get("first_max_chars", 16) or 16)
                     if fed_count < early:
                         need = max(early_min, first_min) if fed_count == 0 else early_min
-                        sentence, rest = take_first_sentence(buf, need)
+                        sentence, rest = take_first_sentence(buf, need, first_max)
                     else:
                         sentence, rest = take_ready_sentence(buf, 6)
                     if not sentence:
