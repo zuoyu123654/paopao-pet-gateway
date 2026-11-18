@@ -24,6 +24,7 @@ import urllib.request
 import zlib
 
 from voice_mode import HotkeyThread
+import phrases
 
 log = logging.getLogger("petgw")
 
@@ -323,13 +324,27 @@ class HostMode(threading.Thread):
             except Exception:  # noqa: BLE001
                 pass
         log.info("直播弹幕：%s", "开" if self.enabled else "关")
+        text = phrases.TRAY_FEEDBACK["host_on" if self.enabled else "host_off"]
+        try:
+            self.gateway.bubble.show(text, 3200)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.gateway.speech.say(text, tag="mode")
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_speak(self, on: bool) -> None:
         self.speak = bool(on)
         self.cfg.setdefault("host", {})["speak"] = self.speak
         log.info("回弹幕出声：%s", "开" if self.speak else "关")
+        text = phrases.TRAY_FEEDBACK["host_speak_on" if self.speak else "host_speak_off"]
         try:
-            self.gateway.bubble.show("回弹幕出声：%s" % ("开" if self.speak else "关"), 2200)
+            self.gateway.bubble.show(text, 3200)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.gateway.speech.say(text, tag="mode")
         except Exception:  # noqa: BLE001
             pass
 

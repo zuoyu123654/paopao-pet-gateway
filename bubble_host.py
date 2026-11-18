@@ -242,11 +242,10 @@ class TrayMenu(QObject):
         if kind == "host":
             on = bool(act.isChecked())
             if key == "enabled":
-                self._post("/host", {"enabled": on})
-                self._feedback("host_on" if on else "host_off")
+                self._post("/host", {"enabled": on, "persist": True})
             else:
-                self._post("/host", {"speak": on})
-                self._feedback("host_speak_on" if on else "host_speak_off")
+                self._post("/host", {"speak": on, "persist": True})
+            # 气泡和声音由网关统一出，这里不再重复冒一个
             return
         self._post("/voice", {"action": "set_mode", "mode": key})
         self._feedback("voice_off" if key == "off" else key)
