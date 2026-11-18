@@ -33,7 +33,8 @@
                  "max_queue":  30,
                  "bubble_scale":  2.0,
                  "name_max_chars":  6,
-                 "bubble_duration_seconds":  10
+                 "bubble_duration_seconds":  10,
+                 "context_only":  true
              },
     "tts":  {
                 "enabled":  true,

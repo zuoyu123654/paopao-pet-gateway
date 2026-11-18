@@ -762,6 +762,14 @@ class VideoWatcher(threading.Thread):
         room = self._live_room()
         if not room:
             return
+        # 弹幕跟着当前直播间走：不然她读的是别的房间的弹幕（2026-11-19 补）
+        try:
+            host = getattr(self.gateway, "host", None)
+            if host is not None and int(room or 0) != int(getattr(host, "room_id", 0) or 0):
+                host.set_room(int(room))
+                log.info("直播弹幕：跟着当前直播间切到 %s", room)
+        except Exception:  # noqa: BLE001
+            pass
         if room == self._live_room_id and time.time() - self._live_meta_at < 120:
             return
         self._live_fetching = True
