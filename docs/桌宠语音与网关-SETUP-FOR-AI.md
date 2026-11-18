@@ -57,7 +57,7 @@ AI 负责找到用户机器上的路径。顺序：
 | 1 | 桌宠发行版（PyInstaller onedir） | 确认 `%LOCALAPPDATA%\Programs\dsh-pet-*` 和 `%APPDATA%\dsh-pet-*\config.json` 存在 |
 | 2 | Python 3.10+ | `python --version`；别用带 `python3xx.zip` 的精简版 |
 | 3 | GPT-SoVITS v2pro（想用我们音色）**或** 任一云 TTS / SAPI | 见 13.1；音色包见 1.2 |
-| 4 | （可选）本地转写 9881、OCR venv、ffmpeg、yt-dlp | 只用看视频/直播才要 |
+| 4 | （可选）本地转写 9881、OCR venv、ffmpeg、`bili` 命令 | 只用看视频/直播才要 |
 | 5 | 把《泡泡陪伴-网关包》解压到任意目录 | 跑 `install.ps1`、改 `config.json`、`start.ps1` |
 | 6 | 桌宠 provider 的 `base_url` 改成 `http://127.0.0.1:9888` | 关掉桌宠自己的聊天语音，验 `/doctor` |
 
@@ -84,6 +84,7 @@ powershell -ExecutionPolicy Bypass -File .\update.ps1   # git pull + 补依赖�
 > `ledger.jsonl` 都不在包里，不会被覆盖。`.ps1` 若被浏览器存成 `.txt` 记得改回来。
 
 仓库里带：全部代码、`bubble/`（附上游 MIT 声明）、`assets/`、`config.example.json`、
+`gsv_patches/`（GPT-SoVITS 必须打的两个补丁）、`tools/asr_server.py`（9881 转写）、
 `install.ps1` / `start.ps1` / `ensure_running.ps1` / `watchdog.ps1` / `follow_pet.ps1`（自启用）
 / `update.ps1`、`README-FOR-AI.md`、`docs/`。
 `.gitignore` 已经把 `config.json`、`logs/`、`audio/`、`ledger.jsonl` 挡在外面——**更新不会覆盖用户数据**。
@@ -2266,7 +2267,7 @@ print(json.loads(r.read())['text'][:300])"
 | 输入 | 作用 |
 |---|---|
 | `陪伴` | 模式 + 今日识屏次数 + 帧缓冲 + 摘要字数 |
-| `陪伴 医生` | 逐项体检（Key / TTS 9882 / 转写 9881 / OCR / yt-dlp / ffmpeg / 帧缓冲 / 提示音 / 账本） |
+| `陪伴 医生` | 逐项体检（Key / TTS 9882 / 转写 9881 / OCR / bili / ffmpeg / 帧缓冲 / 提示音 / 弹幕 / 账本） |
 | `陪伴 模式 <名>` | `auto normal video anime live course off` |
 | `陪伴 说 <一句话>` | 立刻送 TTS 播出来 |
 | `陪伴 摘要` | 立刻整理一次识屏摘要 |
@@ -2353,7 +2354,7 @@ Gemini 3 Pro；豆包 Seed 1.6 Vision 适合已有火山引擎额度的场景。
 
 - **插件自己**：插件目录里的 `README-FOR-AI.md` —— 只管「装插件 → 填四个配置项 →
   重载 → 按命令验证 → 插件侧排障」，别的一概不碰。
-- **插件之外的一切**（网关、GPT-SoVITS、转写、OCR venv、yt-dlp、端口、模型）：
+- **插件之外的一切**（网关、GPT-SoVITS、转写、OCR venv、bili、端口、模型）：
   就在本文档，装法见 **第 13 节**。
 
 用法一句话：把插件目录给人，然后说
@@ -2638,11 +2639,11 @@ foreach ($p in 9881,9882) { "$p = " + (Test-NetConnection 127.0.0.1 -Port $p -In
 | 依赖 | 干什么 | 怎么补 |
 |---|---|---|
 | DeepSeek Key | 聊天 / 识屏 / 摘要 | 网关启动时自己读（`api_key` 项）；缺了看 `key_helper.py` |
-| GPT-SoVITS（9882） | 把话念出来 | 见下面 13.1 |
-| 本地转写（9881） | 直播/网课转文字 | 见 13.2 |
+| GPT-SoVITS（9882） | 把话念出来 | 见下面 13.1（**两个补丁必须打**） |
+| 本地转写（9881） | 直播/网课转文字 | 见 13.2（仓库 `tools/asr_server.py` 就是现成的） |
 | rapidocr | 番剧/视频字幕 OCR | 见 13.3 |
-| yt-dlp | 抓普通投稿的 CC 字幕 | 见 13.4 |
-| ffmpeg | 抽音频（只有转写那条需要） | `shutil.which("ffmpeg")` 有就行 |
+| `bili` 命令 | B站视频字幕、直播间自动找房间号 | 装 bili-cli 并登录（`/doctor` 的 `bili_cli` 项） |
+| ffmpeg | 非 GPT-SoVITS 后端转 wav、部分素材处理 | `shutil.which("ffmpeg")` 有就行 |
 
 ### 13.1 GPT-SoVITS（9882）
 
@@ -2654,15 +2655,38 @@ Start-Process -FilePath "$root\runtime\python.exe" `
   -WorkingDirectory $root -WindowStyle Hidden
 ```
 
-首次加载模型 60～90 秒。这个仓库上有**两个必须保留的补丁**，升级会被覆盖：
+首次加载模型 60～90 秒。**装完 GPT-SoVITS 先打仓库 `gsv_patches/` 里的两个补丁**，
+不打会：第一句念到一半卡住、并发时 9882 崩。补丁说明和回滚都在
+`gsv_patches/README-FOR-AI.md`，一句话版：
 
-- `GPT_SoVITS/TTS_infer_pack/TTS.py` —— 并发下方法写回共享属性导致的崩溃（4.2c），
-  备份 `TTS.py.bak-racesafe-20261115`；
-- `api_v2.py` —— 整句合成堵事件循环（4.2f），备份 `api_v2.py.bak-cudastream-20261116`。
+```powershell
+cd $root
+Copy-Item <网关目录>\gsv_patches\*.patch .
+git -c core.autocrlf=false apply api_v2.py.patch
+git -c core.autocrlf=false apply TTS.py.patch
+```
+
+- `GPT_SoVITS/TTS_infer_pack/TTS.py` —— 并发下方法写回共享属性导致的崩溃（4.2c）；
+- `api_v2.py` —— 整句合成堵事件循环（4.2f）。
 
 ### 13.2 本地转写（9881）
 
-OpenAI 兼容的 `/v1/audio/transcriptions` 就行，现成脚本 `D:\app1\asr\asr_server.py --port 9881`。
+仓库里带现成脚本 `tools/asr_server.py`（OpenAI 兼容的 `/v1/audio/transcriptions`，
+`GET /health` 探活）：
+
+```powershell
+# 用装了 faster-whisper 的 python（CPU 就能跑）
+& $py -m pip install faster-whisper
+Start-Process -FilePath $py -ArgumentList @("<网关目录>\tools\asr_server.py",'--port','9881')
+
+# 想用它自带的 funasr 中文模型：换成 GPT-SoVITS 的 runtime python + 模型目录
+Start-Process -FilePath "$root\runtime\python.exe" -ArgumentList @(
+  "<网关目录>\tools\asr_server.py",'--port','9881',
+  '--models',"$root\tools\asr\models")
+```
+
+`/health` 返回 `{"status":"ok","engine":"..."}` 就通了。`--engine funasr` 可以强制走
+paraformer；都不装就起不来，网关的 `asr_9881` 会一直 ❌。
 
 ### 13.3 OCR（一次）
 
@@ -2678,13 +2702,17 @@ if (-not (Test-Path "$root\Scripts\python.exe")) {
 > 坑：**别用带 `python312.zip` 的精简 Python 建 venv**（会遮住 stdlib 的 `dis`，
 > numpy 导入直接失败）。用系统装的官方 Python。
 
-### 13.4 yt-dlp（一次）
+### 13.4 B站字幕：`bili` 命令（不是 yt-dlp）
+
+**yt-dlp 那条已经退役**（2026-11-17 换成 bili-cli，见 `player_watch.py`）。现在要的是：
 
 ```powershell
-$t = "$env:LOCALAPPDATA\paopao\ytdlp"
-py -3.12 -m pip install -q --target $t yt-dlp
-py -3.12 -c "import sys; sys.path.insert(0,'$t'); import yt_dlp; print('ytdlp', yt_dlp.version.__version__)"
+# 装 bili-cli（仓库：paopao 的 bili-cli；装完 `bili login` 一次）
+bili --version
 ```
+
+`/doctor` 的 `bili_cli` 是 ✅ 就通；没有它只影响：B站视频拿不到 CC/AI 字幕、
+`host.room_id=0` 时没法按账号自动找直播间。
 
 ### 13.5 可选：换别的语音后端（2026-11-16 加）
 
@@ -2696,7 +2724,7 @@ py -3.12 -c "import sys; sys.path.insert(0,'$t'); import yt_dlp; print('ytdlp', 
 换之前把依赖装进网关那个 Python：
 
 ```powershell
-$py = "C:\Users\zuo'yu\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+$py = "<网关目录>\.venv\Scripts\python.exe"
 & $py -m pip install edge-tts comtypes keyring
 ```
 
@@ -3328,9 +3356,9 @@ Invoke-WebRequest http://127.0.0.1:9888/warm -Method POST -Body '{"all":true}' -
 
 | 缺的 | 影响 | 怎么补 |
 |---|---|---|
-| GPT-SoVITS 本体 + CUDA | 没它就没 dafeiyu 声音（会退回只出文字） | 官方 v2pro 包，见 13.1 |
-| 转写 9881（faster-whisper 之类） | 直播/网课/看片的「说的内容」没有 | 见 13 节 |
-| OCR venv（rapidocr） | 番剧/外文字幕读不到 | 见 13 节，装完填 `video_watch.ocr_python` |
+| GPT-SoVITS 本体 + CUDA | 没它就没 dafeiyu 声音（会退回只出文字） | 官方 v2pro 包，装完**打 `gsv_patches/` 两个补丁**，见 13.1 |
+| 转写 9881 | 直播/网课/看片的「说的内容」没有 | 跑仓库 `tools/asr_server.py`，见 13.2 |
+| OCR venv（rapidocr） | 番剧/外文字幕读不到 | 见 13.3，装完填 `video_watch.ocr_python` |
 | `bili` 命令 | B站视频拿不到字幕、直播间不能自动找房间号 | 装 bili-cli 并登录 |
 | ffmpeg | 非 GPT-SoVITS 后端转 wav、部分素材处理 | `winget install ffmpeg` |
 | DeepSeek / Qwen Key | 聊天、识屏、手册总结全停 | 填 `api_key` / `vision.profiles.*.api_key` |

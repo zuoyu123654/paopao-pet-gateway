@@ -1,0 +1,67 @@
+--- a/api_v2.py
++++ b/api_v2.py
+@@ -118,6 +118,7 @@
+ import soundfile as sf
+ from fastapi import FastAPI, Response
+ from fastapi.responses import StreamingResponse, JSONResponse
++from starlette.concurrency import run_in_threadpool
+ import uvicorn
+ from io import BytesIO
+ from tools.i18n.i18n import I18nAuto
+@@ -129,6 +130,33 @@
+ # print(sys.path)
+ i18n = I18nAuto()
+ cut_method_names = get_cut_method_names()
++
++
++# —— 让「整句合成」走自己的一条 CUDA 流 ——
++# 一个进程里所有推理默认都排在同一条 CUDA 流上：只要有一条整句合成在跑，
++# 正在说出口的流式请求就被整段饿死（实测停 5 秒）。给整句合成单独一条流，
++# 两边就能在 GPU 上交错推进，不用再让整句合成排队等流式念完。
++_CUDA_STREAMS: list = []
++_STREAM_TURN = [0]
++_STREAM_LOCK = threading.Lock()
++
++
++def _pick_cuda_stream():
++    try:
++        import torch
++
++        if not torch.cuda.is_available():
++            return None
++        with _STREAM_LOCK:
++            if not _CUDA_STREAMS:
++                torch.cuda.synchronize()          # 模型权重在主流程上，先对齐
++                _CUDA_STREAMS.extend(torch.cuda.Stream() for _ in range(4))
++            _STREAM_TURN[0] = (_STREAM_TURN[0] + 1) % len(_CUDA_STREAMS)
++            return _CUDA_STREAMS[_STREAM_TURN[0]]
++    except Exception as exc:  # noqa: BLE001
++        print(f"[stream] 拿不到 CUDA 流，退回默认流：{exc}")
++        return None
++
+ 
+ parser = argparse.ArgumentParser(description="GPT-SoVITS api")
+ parser.add_argument("-c", "--tts_config", type=str, default="GPT_SoVITS/configs/tts_infer.yaml", help="tts_infer路径")
+@@ -438,7 +466,21 @@
+             )
+ 
+         else:
+-            sr, audio_data = next(tts_generator)
++            # 整句合成必须挪到线程池里跑：以前是直接在事件循环里 next()，
++            # 这一条合成会把整个服务堵住，正在说出口的那句流式连一个字节都发不出去
++            # （实测冻 5 秒）。线程池 + 独立 CUDA 流，两边才能真正同时推进。
++            def _synth_blocking():
++                _s = _pick_cuda_stream()
++                if _s is None:
++                    return next(tts_generator)
++                import torch
++
++                with torch.cuda.stream(_s):
++                    out = next(tts_generator)
++                _s.synchronize()
++                return out
++
++            sr, audio_data = await run_in_threadpool(_synth_blocking)
+             audio_data = pack_audio(BytesIO(), audio_data, sr, media_type).getvalue()
+             return Response(audio_data, media_type=f"audio/{media_type}")
+     except Exception as e:

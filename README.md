@@ -41,6 +41,9 @@ Invoke-WebRequest http://127.0.0.1:9888/doctor -UseBasicParsing
 
 然后把桌宠的 provider `base_url` 改成 `http://127.0.0.1:9888`，并关掉桌宠自带的聊天语音。
 
+用本地 GPT-SoVITS 的话，**先打 `gsv_patches/` 里两个补丁**（不打会第一句卡、并发崩），
+步骤见 [`gsv_patches/README-FOR-AI.md`](gsv_patches/README-FOR-AI.md)。
+
 **开机自启，二选一**（配个启动文件夹 vbs 隐藏拉起）：
 
 | 脚本 | 行为 |
@@ -72,6 +75,8 @@ powershell -ExecutionPolicy Bypass -File .\update.ps1
 | `phrases.py` | 固定文案（预合成用） |
 | `ocr_worker.py` | 字幕 OCR 小工（RapidOCR） |
 | `install.ps1` / `start.ps1` / `ensure_running.ps1` / `watchdog.ps1` / `follow_pet.ps1` | 安装、启动、自启 |
+| `gsv_patches/` | GPT-SoVITS 必须打的两个补丁（第一句卡、并发崩） |
+| `tools/asr_server.py` | 9881 本地转写服务（OpenAI 兼容，faster-whisper / funasr 二选一） |
 | `config.example.json` | 配置模板 |
 | `docs/` | 施工单（含为什么这么调、踩过哪些坑） |
 

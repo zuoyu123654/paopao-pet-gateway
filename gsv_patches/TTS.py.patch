@@ -1,0 +1,61 @@
+--- a/GPT_SoVITS/TTS_infer_pack/TTS.py
++++ b/GPT_SoVITS/TTS_infer_pack/TTS.py
+@@ -1062,28 +1062,33 @@
+         fixed_length_chunk = inputs.get("fixed_length_chunk", False)
+         chunk_split_thershold = 0.0 # 该值代表语义token与mute token的余弦相似度阈值，若大于该阈值，则视为可切分点。
+ 
++        # 注意：不要把选中的方法写回 self.t2s_model.model.infer_panel。
++        # api_v2 是单进程多线程，并发请求共用同一个模型对象：流式请求刚绑好
++        # infer_panel_naive，另一个非流式请求就会把它改成 batch_infer，等流式请求
++        # 走到下面调用时拿到的是普通函数，迭代 (y, idx) 就崩在
++        # "not enough values to unpack (expected 2, got 1)"，HTTP 连接随之中断。
++        # 所以只在本次 run 里用局部变量，绝不改共享属性。
+         if parallel_infer and not streaming_mode:
+             print(i18n("并行推理模式已开启"))
+-            self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_batch_infer
++            infer_panel_fn = self.t2s_model.model.infer_panel_batch_infer
+         elif not parallel_infer and streaming_mode and not self.configs.use_vocoder:
+             print(i18n("流式推理模式已开启"))
+-            self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_naive
++            infer_panel_fn = self.t2s_model.model.infer_panel_naive
+         elif streaming_mode and self.configs.use_vocoder:
+             print(i18n("SoVits V3/4模型不支持流式推理模式，已自动回退到分段返回模式"))
+             streaming_mode = False
+             return_fragment = True
+             if parallel_infer:
+-                self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_batch_infer
++                infer_panel_fn = self.t2s_model.model.infer_panel_batch_infer
+             else:
+-                self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_naive_batched
+-            # self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_naive
++                infer_panel_fn = self.t2s_model.model.infer_panel_naive_batched
+         elif parallel_infer and streaming_mode:
+             print(i18n("不支持同时开启并行推理和流式推理模式，已自动关闭并行推理模式"))
+             parallel_infer = False
+-            self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_naive
++            infer_panel_fn = self.t2s_model.model.infer_panel_naive
+         else:
+             print(i18n("朴素推理模式已开启"))
+-            self.t2s_model.model.infer_panel = self.t2s_model.model.infer_panel_naive_batched
++            infer_panel_fn = self.t2s_model.model.infer_panel_naive_batched
+ 
+         if return_fragment and streaming_mode:
+             print(i18n("流式推理模式不支持分段返回，已自动关闭分段返回"))
+@@ -1265,7 +1270,7 @@
+ 
+                 if not streaming_mode:
+                     print(f"############ {i18n('预测语义Token')} ############")
+-                    pred_semantic_list, idx_list = self.t2s_model.model.infer_panel(
++                    pred_semantic_list, idx_list = infer_panel_fn(
+                         all_phoneme_ids,
+                         all_phoneme_lens,
+                         prompt,
+@@ -1356,7 +1361,7 @@
+                     #     item.to(dtype=self.precision, device=self.configs.device)
+                     #     for item in self.prompt_cache["refer_spec"]
+                     # ]
+-                    semantic_token_generator =self.t2s_model.model.infer_panel(
++                    semantic_token_generator =infer_panel_fn(
+                         all_phoneme_ids[0].unsqueeze(0),
+                         all_phoneme_lens,
+                         prompt,

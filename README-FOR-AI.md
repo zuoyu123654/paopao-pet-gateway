@@ -32,8 +32,8 @@
 |---|---|---|
 | 桌宠 | dsh-pet-indesktop 的发行版（PyInstaller onedir） | `%LOCALAPPDATA%\Programs\dsh-pet-standalone-webm-chat\` 存在，`%APPDATA%\dsh-pet-standalone-webm-chat\config.json` 存在 |
 | Python 3.10+ | python.org 或系统自带 | `python --version` 跑得通；**别用带 `python3xx.zip` 的精简版**（venv 里会缺 `dis`） |
-| TTS（三选一） | ① 本地 GPT-SoVITS（想要自定义音色）② 豆包/edge/MiMo 云 TTS ③ Windows SAPI | 见第 4 节；**没有也能先跑，网关会退回"只出文字"** |
-| 转写 9881（可选） | 只想看视频/直播才要 | `http://127.0.0.1:9881` 活着 |
+| TTS（三选一） | ① 本地 GPT-SoVITS（想要自定义音色）② 豆包/edge/MiMo 云 TTS ③ Windows SAPI | 见第 4 节；**没有也能先跑，网关会退回"只出文字"**；选 ① 必须打 `gsv_patches/` 两个补丁 |
+| 转写 9881（可选） | 只想看视频/直播才要 | `http://127.0.0.1:9881` 活着；仓库 `tools/asr_server.py` 就是现成的 |
 | OCR venv（可选） | `rapidocr_onnxruntime`，建议独立 venv | config 里 `video_watch.ocr_python` 指向它 |
 
 ## 2. 安装
@@ -93,6 +93,17 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 启动 GPT-SoVITS 时**必须带自己的推理配置**（`-c tts_infer_xxx.yaml`），否则会加载成默认音色。
 随包的《泡泡音色包-dafeiyu》里有现成的权重 + 参考音频 + 配置 + 放置说明。
 
+**装完 GPT-SoVITS 先打 `gsv_patches/` 里的两个补丁**（不然第一句卡、并发崩）：
+
+```powershell
+cd <GSV>
+Copy-Item <网关目录>\gsv_patches\*.patch .
+git -c core.autocrlf=false apply api_v2.py.patch
+git -c core.autocrlf=false apply TTS.py.patch
+```
+
+细节、版本不匹配怎么办、回滚：`gsv_patches/README-FOR-AI.md`。
+
 ### 4.2 云 TTS / 系统 TTS
 
 - `doubao`：豆包语音 2.0，读桌宠配置里的 `voice_chime_doubao_*`，Key 从 Windows 凭据 `tts/doubao_api_key`
@@ -139,6 +150,7 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body '{"text":"看�
 |---|---|---|
 | 识屏账本 / 摘要 | 识屏带前情、按时间说"刚才/之前" | 无（默认开） |
 | 看视频（通用） | 环回听声 + 字幕 OCR，自动进模式 | `soundcard`；OCR 可选 |
+| 直播/网课转写 | 「主播说的 / 网课老师说的」从 9881 来 | 跑 `tools/asr_server.py`（见第 13 节） |
 | 头顶气泡 | 我们生成的话用她那套气泡显示 | `PySide6-Essentials` |
 | 语音模式 | 热键 `Ctrl+Alt+V` 说话、三句气泡、电话模式 | 麦克风；`sounddevice` |
 | 托盘模式菜单 | 自动/B站视频/看番/通用/关闭 + 语音开关 | `PySide6`（跟着气泡小工） |
@@ -185,6 +197,8 @@ QQ/AstrBot 人格、插件角色设定），把「称呼、自称、禁区、说
 - **手册生成在后台**：第一次启动/遇到新游戏时一本一本补（十几秒到一分钟一本），
   日志 `资料：给《…》做了本手册` 出现之前她确实“还不认识”。
 - **改配置**不用换代码，但改完要重启网关（除非该键是每次现读的）。
+- **第一句念到一半卡住 / 并发时 9882 崩**：GPT-SoVITS 没打补丁。打 `gsv_patches/` 两个，
+  重启 9882（`gsv_patches/README-FOR-AI.md`）。
 - **Python 3.13 报 `No module named audioop`**：新标准库删了它，`pip install audioop-lts`。
 - **直播弹幕连上但没内容**：房间没开播 / `host.room_id` 还是 0 又没 `bili` 账号
   （`/doctor` 的 `host`、`bili_cli` 两项会说明）；弹幕只读不发，测试用 `POST /host/test`。
