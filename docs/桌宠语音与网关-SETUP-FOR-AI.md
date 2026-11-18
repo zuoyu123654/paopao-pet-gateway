@@ -161,8 +161,8 @@ Test-Path "C:\Users\<你>\Music\ai语音\dafeiyu\主.wav"       # 参考音频�
 | `numpy` `Pillow` `sounddevice` `soundcard` | 播放 / 截图 / 环回采集 | 没声音、识屏截不到图 | `& $pyGW -m pip install numpy Pillow sounddevice soundcard` |
 | `websocket-client` `brotli` | 直播弹幕（B站 WS 是 brotli 压的） | 弹幕连不上，日志刷 `no module named brotli` | `& $pyGW -m pip install websocket-client brotli` |
 | `PySide6-Essentials`（可选） | 头顶气泡（`bubble_host.py`） | 只出声、没气泡 | `& $pyGW -m pip install PySide6-Essentials` |
-| **GPT-SoVITS v2pro** + `api_v2.py` + 参考音频 | 她的声音 | 没声音 | 见 §2；权重/参考音频**不随仓库分发** |
-| `gsv_patches/` 两个补丁 | 修「第一句卡」「并发崩」 | 首句卡、并发时进程崩 | 照 `gsv_patches/README-FOR-AI.md` 打 |
+| **GPT-SoVITS v2pro** + `api_v2.py` | 她的声音 | 没声音 | 见 §2 |
+| **泡泡音色包**（权重 + 参考音频 + 推理配置） | 她那把嗓子 | 只能用默认音色 | 从 Release 下：`https://github.com/zuoyu123654/paopao-pet-gateway/releases/tag/voice-v1` （5 个附件，277MB），按里面 `VOICE-README-FOR-AI.md` 放 |\n| `gsv_patches/` 两个补丁 | 修「第一句卡」「并发崩」 | 首句卡、并发时进程崩 | 照 `gsv_patches/README-FOR-AI.md` 打 |
 | `faster-whisper`（装在 GSV runtime） | 看片转写 | 只能靠 OCR，蓝牙耳机下基本没字幕 | `& $pyGSV -m pip install faster-whisper`；国内先 `$env:HF_ENDPOINT="https://hf-mirror.com"`（首次会自动下 `small` 模型） |
 | `D:\app1\asr\asr_server.py` | 9881 转写服务 | 同上 | 把本仓库 `tools/asr_server.py` 复制过去，`& $pyGSV asr_server.py --port 9881` |
 | `rapidocr_onnxruntime`（独立 venv，可选） | 字幕 OCR 兜底 | 没字幕的片只能靠转写 | `python -m venv D:\app1\tools\ocrvenv` → `& $pyOCR -m pip install rapidocr_onnxruntime` |
@@ -261,7 +261,7 @@ dsh3 里的 `泡泡陪伴-网关包\` 是这份仓库的**导出快照**（给�
 | 包 | 内容 | 怎么用 |
 |---|---|---|
 | 网关仓库（上面那个） | 代码 + 脚本 + 手册 + docs | `git clone` → `install.ps1` → 改 `config.json` → `start.ps1` |
-| `泡泡音色包-dafeiyu\` | GPT 权重（148 MB）+ SoVITS 权重（129 MB）+ 参考音频 + `tts_infer_dafeiyu.yaml` + README | 丢进 GPT-SoVITS 根目录（yaml 里是**相对路径**，按目录放好就不用改），带 `-c` 启动；参考音频路径填到网关 `config.json` |
+| `泡泡音色包-dafeiyu\` | GPT 权重（148 MB）+ SoVITS 权重（129 MB）+ 参考音频 + `tts_infer_dafeiyu.yaml` + README | **挂在 Release 上**（仓库单文件 100MB 上限，权重进不去）：`https://github.com/zuoyu123654/paopao-pet-gateway/releases/tag/voice-v1` 下 5 个附件；丢进 GPT-SoVITS 根目录（yaml 里是**相对路径**，按目录放好就不用改），带 `-c` 启动；参考音频路径填到网关 `config.json` |
 
 网关包里**不包含**：GPT-SoVITS 本体（只给音色权重包）、ASR/OCR 运行环境、`ledger` 历史、
 `config.json`（只给模板）、凭据、`lore/` 里已有的手册（每台机器第一次用会自己学，见 4.2v）。

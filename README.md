@@ -49,6 +49,18 @@ Invoke-WebRequest http://127.0.0.1:9888/doctor -UseBasicParsing
 用本地 GPT-SoVITS 的话，**先打 `gsv_patches/` 里两个补丁**（不打会第一句卡、并发崩），
 步骤见 [`gsv_patches/README-FOR-AI.md`](gsv_patches/README-FOR-AI.md)。
 
+**音色（她那把嗓子）**：训练好的 GPT-SoVITS v2Pro 权重不放在仓库里（单个文件 155MB / 135MB，
+超过 GitHub 仓库 100MB 的单文件上限），挂在 Release：
+
+```text
+https://github.com/zuoyu123654/paopao-pet-gateway/releases/tag/voice-v1
+```
+
+下载 5 个附件 → 按里面的 `VOICE-README-FOR-AI.md` 放进 GPT-SoVITS 目录 → 改
+`config.json → tts.ref_audio_path / prompt_text`（参考文本逐字是
+「今天2月11日，路过了一整条街的黑屏幕」）→ 启动时**必须带 `-c ...tts_infer_dafeiyu.yaml`**。
+自己练了新音色也一样：权重进 Release，仓库里只留说明。
+
 **浏览器那边**（看片字幕要用）：装 Tampermonkey，然后打开
 `http://127.0.0.1:9888/ext/paopao-player.user.js` 安装。
 脚本头里有 `@updateURL`，从这条地址装过一次之后会自动跟着仓库版本更新。
