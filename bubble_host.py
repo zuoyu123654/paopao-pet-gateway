@@ -498,7 +498,7 @@ def main() -> int:
         overlay = QWidget()
         overlay.setWindowTitle("泡泡气泡")
         overlay.setWindowFlags(
-            Qt.WindowType.Tool
+            Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.WindowTransparentForInput
@@ -506,10 +506,15 @@ def main() -> int:
         )
         overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         screen = QApplication.primaryScreen()
         if screen is not None:
             overlay.setGeometry(screen.geometry())
         overlay.show()
+        # 桌宠自己也是 topmost，会把它盖住；定时把它重新压到最上层。
+        keep_top = QTimer(overlay)
+        keep_top.timeout.connect(lambda: force_topmost(overlay))
+        keep_top.start(800)
     bubble = PetSpeechBubble(None, style_id="classic_top")
     if overlay is not None:
         bubble.set_capture_compat(True, overlay)
