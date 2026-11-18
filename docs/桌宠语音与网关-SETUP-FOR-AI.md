@@ -41,6 +41,8 @@
 
 ## 0.1 一页复现清单（2026-11-19 这一轮）
 
+> 🧰 **开工前先看 §0.2 前置依赖**：先查本机有没有，缺了再装，别整套 `pip install -r`。
+
 **要达到的效果**：她开口 **1.0～1.5 秒**（首句流式）、**第二句空档 0～0.8 秒**、首句内部不卡；
 看片/番剧/直播/网课 **蓝牙耳机也能拿到台词**（网页音轨）；B站 有 CC 时优先 CC；
 气泡挂 **10 秒**。
@@ -110,6 +112,74 @@
    播放位置 `t` 的跳变（`<0.5s` 或 `>22s`），别用 URL。
 5. **有 CC 时不要转音轨**：`/tabaudio` 回 `state:"skip"`，脚本安静 45 秒，省一份 ASR（持续转约 1.7～2.2 个核）。
 6. **whisper 会幻觉**：静音/音乐上会编「字幕由 Amara.org 社区提供」这类，黑名单里已经挡掉，别删。
+
+## 0.2 前置依赖（**先查本机有没有，缺了再装**）
+
+> 🚨 **给 AI 的硬规矩**：**别一上来就 `pip install -r requirements.txt`**。
+> 先跑下面的检测脚本，把「已装 / 缺失」列出来，**只装缺的**。
+> 整体装会把 `numpy`、`soundcard` 这类升级到新版本，把本来能跑的环境搞坏——
+> 2026-11 实测过：升级 numpy 之后 soundcard 采集直接报 dtype 错。
+
+### 先记住：这套有**三个** Python，别装混了
+
+| 用途 | 解释器 | 装什么 |
+|---|---|---|
+| 网关 + 气泡 + 环回采集 | 跑 `gateway.py` 那个（DSH 自带 runtime 或自己装的 3.12） | `numpy / Pillow / sounddevice / soundcard / websocket-client / brotli`（+ 可选 `PySide6-Essentials`） |
+| 转写（ASR） | **GPT-SoVITS 目录里的 `runtime\python.exe`** | `faster-whisper` |
+| 字幕 OCR（可选） | 单独的 `D:\app1\tools\ocrvenv` | `rapidocr_onnxruntime` |
+
+装包一定要用**对应那个** python 的 `-m pip`，否则装到别处、跑起来还是说找不到。
+
+### 检测脚本（复制就跑，全绿就不用装）
+
+```powershell
+$pyGW  = "C:\Users\<你>\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+$pyGSV = "C:\...\GPT-SoVITS-...\runtime\python.exe"
+$pyOCR = "D:\app1\tools\ocrvenv\Scripts\python.exe"
+
+"== 网关侧（必须）=="
+& $pyGW -c "import numpy,PIL,sounddevice,soundcard,websocket,brotli; print('core OK')"
+& $pyGW -c "import PySide6; print('bubble OK')"            # 没它：只出声，没头顶气泡
+"== 转写（必须）=="
+& $pyGSV -c "import faster_whisper; print('whisper OK')"
+Test-Path "D:\app1\asr\asr_server.py"
+"== 字幕 OCR（可选）=="
+& $pyOCR -c "import rapidocr_onnxruntime; print('ocr OK')"
+"== 声音（必须）=="
+Test-Path "C:\...\GPT-SoVITS-...\api_v2.py"
+Test-Path "C:\Users\<你>\Music\ai语音\dafeiyu\主.wav"       # 参考音频，权重不随仓库发
+"== 其它 =="
+(Get-Command bili   -ErrorAction SilentlyContinue).Source  # 拉 B站 字幕
+(Get-Command ffmpeg -ErrorAction SilentlyContinue).Source  # 可选
+```
+
+### 依赖表（缺哪个装哪个）
+
+| 依赖 | 用途 | 没有会怎样 | 缺了怎么装 |
+|---|---|---|---|
+| Python **3.11～3.12** | 跑网关 | 什么都起不来 | 用 DSH 自带 runtime，或 python.org 装 3.12 |
+| `numpy` `Pillow` `sounddevice` `soundcard` | 播放 / 截图 / 环回采集 | 没声音、识屏截不到图 | `& $pyGW -m pip install numpy Pillow sounddevice soundcard` |
+| `websocket-client` `brotli` | 直播弹幕（B站 WS 是 brotli 压的） | 弹幕连不上，日志刷 `no module named brotli` | `& $pyGW -m pip install websocket-client brotli` |
+| `PySide6-Essentials`（可选） | 头顶气泡（`bubble_host.py`） | 只出声、没气泡 | `& $pyGW -m pip install PySide6-Essentials` |
+| **GPT-SoVITS v2pro** + `api_v2.py` + 参考音频 | 她的声音 | 没声音 | 见 §2；权重/参考音频**不随仓库分发** |
+| `gsv_patches/` 两个补丁 | 修「第一句卡」「并发崩」 | 首句卡、并发时进程崩 | 照 `gsv_patches/README-FOR-AI.md` 打 |
+| `faster-whisper`（装在 GSV runtime） | 看片转写 | 只能靠 OCR，蓝牙耳机下基本没字幕 | `& $pyGSV -m pip install faster-whisper`；国内先 `$env:HF_ENDPOINT="https://hf-mirror.com"`（首次会自动下 `small` 模型） |
+| `D:\app1\asr\asr_server.py` | 9881 转写服务 | 同上 | 把本仓库 `tools/asr_server.py` 复制过去，`& $pyGSV asr_server.py --port 9881` |
+| `rapidocr_onnxruntime`（独立 venv，可选） | 字幕 OCR 兜底 | 没字幕的片只能靠转写 | `python -m venv D:\app1\tools\ocrvenv` → `& $pyOCR -m pip install rapidocr_onnxruntime` |
+| `bili` CLI（`bili-agent` 包，要登录） | 拉 B站 CC 字幕 | 番剧退回「网页音轨 / OCR」 | `& $pyGW -m pip install bili-agent` → `bili login` |
+| **Edge + Tampermonkey** + 用户脚本 1.2.2 | 播放进度 + 网页音轨 | 看片没字幕（尤其蓝牙耳机） | 打开 `http://127.0.0.1:9888/ext/paopao-player.user.js` 装（见 4.2j） |
+| `ffmpeg`（可选） | bili CLI 偶尔要 | 个别字幕抽不出来 | `winget install Gyan.FFmpeg` |
+| 显卡显存 **6～7G**（TTS） | 合成 | 显存不够 TTS 起不来 | 换模型或降 `batch_size` |
+
+### 装完怎么算「好了」
+
+1. `http://127.0.0.1:9888/health` 回 `"ok": true`；
+2. `http://127.0.0.1:9888/doctor` 里 `tts` / `asr` / `video_watch` 都正常（不是 `error`）；
+3. `POST /say {"text":"测试一下"}` → 听得到声音；
+4. 看片时日志出现 `带网页音轨转写` 或 `B站字幕` 其中之一；
+5. 直播时日志出现 `看直播：带上直播间弹幕 8 条`。
+
+**装完别重复装**：`pip install` 同名包会把版本动来动去，检测脚本说 `core OK` 就别再动它。
 
 ## 0. 一句话结论
 
