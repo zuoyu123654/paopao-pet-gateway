@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import socketserver
 import sys
 import threading
 import time
@@ -324,7 +325,13 @@ def log(msg: str) -> None:
     print("[bubble] %s" % msg, file=sys.stderr, flush=True)
 
 
+_ACK_SINK = None
+
+
 def _ack(**fields) -> None:
+    if _ACK_SINK is not None:
+        _ACK_SINK({"ok": True, **fields})
+        return
     print(json.dumps({"ok": True, **fields}, ensure_ascii=False), flush=True)
 
 
@@ -490,19 +497,18 @@ def main() -> int:
             f.write(str(os.getpid()))
     except OSError:
         pass
-    # 直播捕获兼容：固定大小的透明画布（不是满屏）。OBS/直播姬用「窗口采集」
-    # 抓这个窗口，气泡画在画布底部中央的“桌宠头顶”位置；采集源固定，
-    # 桌面上的画布跟着桌宠走，但源里内容位置不变。
+    # 全屏采集画布：OBS/直播姬用「窗口采集」抓这个窗口，气泡按桌面真实位置画。
+    # 窗口固定满屏、不跟着桌宠移动，采集源就不会在桌宠/气泡之间跳。
     capture_overlay = os.environ.get("PAOPAO_BUBBLE_CAPTURE", "0") == "1"
     overlay = None
-    CAPTURE_W, CAPTURE_H = 760, 600
-    anchor_bottom = int(os.environ.get("PAOPAO_BUBBLE_ANCHOR_BOTTOM", "150") or 150)
-    anchor_bottom = max(40, min(CAPTURE_H - 80, anchor_bottom))
+    screen = QApplication.primaryScreen()
+    screen_geo = screen.geometry() if screen is not None else QRect(0, 0, 1920, 1080)
+    CAPTURE_W, CAPTURE_H = screen_geo.width(), screen_geo.height()
     if capture_overlay:
-        log("采集画布 %dx%d，头顶锚点离底边 %dpx" % (CAPTURE_W, CAPTURE_H, anchor_bottom))
+        log("全屏采集画布 %dx%d（气泡按桌面位置画）" % (CAPTURE_W, CAPTURE_H))
     if capture_overlay:
         overlay = QWidget()
-        overlay.setWindowTitle("泡泡气泡")
+        overlay.setWindowTitle("泡泡气泡（全屏）")
         overlay.setWindowFlags(
             Qt.WindowType.Window
             | Qt.WindowType.FramelessWindowHint
@@ -513,22 +519,8 @@ def main() -> int:
         overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        overlay.setGeometry(0, 0, CAPTURE_W, CAPTURE_H)
+        overlay.setGeometry(screen_geo)
         overlay.show()
-
-        def _follow_pet() -> None:
-            r = read_pet_rect()
-            if r is None:
-                return
-            x = r.x() - (CAPTURE_W - r.width()) // 2
-            y = r.y() - (CAPTURE_H - r.height())
-            overlay.setGeometry(x, y, CAPTURE_W, CAPTURE_H)
-            force_topmost(overlay)
-
-        _follow_pet()
-        follow = QTimer(overlay)
-        follow.timeout.connect(_follow_pet)
-        follow.start(500)
         keep_top = QTimer(overlay)
         keep_top.timeout.connect(lambda: force_topmost(overlay))
         keep_top.start(800)
@@ -550,7 +542,8 @@ def main() -> int:
                 cmds.put(json.loads(line))
             except Exception:
                 continue
-        cmds.put({"cmd": "quit"})
+        # stdin EOF 不退出：网关重启后新网关会走本地 TCP 接回来，
+        # 这样 OBS/直播姬里的窗口句柄不会变，不会掉回桌宠窗口。
 
     def do_show(cmd: dict) -> None:
         nonlocal state
@@ -576,14 +569,7 @@ def main() -> int:
             anchor = QRect(*(int(v) for v in raw))
             explicit = True
         if anchor is None:
-            if overlay is not None and not explicit:
-                # 采集画布里不跟随真实桌宠坐标：底部中央就是“头顶”锚点，
-                # OBS 里把画布底边对齐桌宠头顶即可。
-                g = overlay.geometry()
-                anchor = QRect(g.x() + g.width() // 2 - 40,
-                               g.y() + g.height() - anchor_bottom, 80, 80)
-            else:
-                anchor = read_pet_rect()
+            anchor = read_pet_rect()
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
             _ack(id=cmd.get("id"), shown=False, reason="no-pet")
@@ -615,18 +601,23 @@ def main() -> int:
              screen=[bubble.x(), bubble.y()])
 
     def poll() -> None:
+        global _ACK_SINK
         quit_now = False
         try:
             while True:
                 cmd = cmds.get_nowait()
-                kind = str(cmd.get("cmd") or "")
-                if kind == "show":
-                    do_show(cmd)
-                elif kind == "hide":
-                    bubble.dismiss()
-                    _ack(id=cmd.get("id"), hidden=True)
-                elif kind == "quit":
-                    quit_now = True
+                _ACK_SINK = cmd.get("_ack")
+                try:
+                    kind = str(cmd.get("cmd") or "")
+                    if kind == "show":
+                        do_show(cmd)
+                    elif kind == "hide":
+                        bubble.dismiss()
+                        _ack(id=cmd.get("id"), hidden=True)
+                    elif kind == "quit":
+                        quit_now = True
+                finally:
+                    _ACK_SINK = None
         except queue.Empty:
             pass
         if quit_now:
@@ -654,6 +645,40 @@ def main() -> int:
                 bubble.reflow(rect, pet_scale=scale)
         except Exception:  # noqa: BLE001
             pass
+
+    if "--demo" not in sys.argv:
+        class BubbleHandler(socketserver.StreamRequestHandler):
+            def handle(self) -> None:
+                for line in self.rfile:
+                    try:
+                        cmd = json.loads(line.decode("utf-8", "replace"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    done = threading.Event()
+                    box: dict = {}
+
+                    def reply(fields: dict, _box=box, _done=done) -> None:
+                        _box.update(fields)
+                        _done.set()
+
+                    cmd["_ack"] = reply
+                    cmds.put(cmd)
+                    if not done.wait(8.0):
+                        box = {"ok": False, "error": "timeout"}
+                    self.wfile.write(
+                        (json.dumps(box, ensure_ascii=False) + "\n").encode("utf-8"))
+                    self.wfile.flush()
+
+        class BubbleServer(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        try:
+            server = BubbleServer(("127.0.0.1", 9894), BubbleHandler)
+            threading.Thread(target=server.serve_forever, name="ipc", daemon=True).start()
+            log("气泡 IPC：127.0.0.1:9894（网关重启后窗口句柄保持不变）")
+        except OSError as exc:
+            log("气泡 IPC 端口被占用，保留已有实例：%s" % exc)
 
     if "--demo" not in sys.argv:
         tray = TrayMenu(bubble, lambda text: do_show({"text": text, "duration_ms": 3200}))

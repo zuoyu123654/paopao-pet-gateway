@@ -13,9 +13,11 @@ import json
 import logging
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
+import time
 
 log = logging.getLogger("petgw")
 
@@ -30,10 +32,11 @@ class BubbleBridge:
         self.duration_ms = int(conf.get("duration_ms", 3200) or 3200)
         self.max_chars = int(conf.get("max_chars", 60) or 60)
         self.capture_window = bool(conf.get("capture_window", False))
-        self.capture_anchor_bottom = int(conf.get("capture_anchor_bottom", 150) or 150)
         self.ack_timeout = float(conf.get("ack_timeout", 3.0) or 3.0)
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
+        self.ipc: socket.socket | None = None
+        self.ipc_file = None
         self.acks: "queue.Queue[dict]" = queue.Queue()
         self._seq = 0
         self.last_error = ""
@@ -69,7 +72,6 @@ class BubbleBridge:
         env["PYTHONIOENCODING"] = "utf-8"
         if self.capture_window:
             env["PAOPAO_BUBBLE_CAPTURE"] = "1"
-            env["PAOPAO_BUBBLE_ANCHOR_BOTTOM"] = str(self.capture_anchor_bottom)
         log_path = os.path.join(APP_DIR, "logs", "bubble.log")
         try:
             stderr = open(log_path, "a", encoding="utf-8", buffering=1)
@@ -95,12 +97,33 @@ class BubbleBridge:
             except ValueError:
                 continue
 
-    def _ensure(self) -> bool:
-        if self.proc is not None and self.proc.poll() is None:
+    def _connect_ipc(self) -> bool:
+        """先连已经活着的气泡小工；这样网关重启不会换窗口句柄。"""
+        if self.ipc is not None:
             return True
         try:
-            self._spawn()
+            s = socket.create_connection(("127.0.0.1", 9894), timeout=0.4)
+            s.settimeout(max(1.0, self.ack_timeout))
+            self.ipc = s
+            self.ipc_file = s.makefile("rwb")
             return True
+        except OSError:
+            self.ipc = None
+            self.ipc_file = None
+            return False
+
+    def _ensure(self) -> bool:
+        if self._connect_ipc():
+            return True
+        if self.proc is not None and self.proc.poll() is None:
+            return self._connect_ipc()
+        try:
+            self._spawn()
+            for _ in range(20):
+                if self._connect_ipc():
+                    return True
+                time.sleep(0.1)
+            return False
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             log.warning("气泡小工拉不起来：%s", exc)
@@ -120,6 +143,24 @@ class BubbleBridge:
                 return None
             self._seq += 1
             payload = {**payload, "id": self._seq}
+            if self.ipc_file is not None:
+                try:
+                    self.ipc_file.write(
+                        (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+                    self.ipc_file.flush()
+                    line = self.ipc_file.readline()
+                    if line:
+                        return json.loads(line.decode("utf-8", "replace"))
+                except Exception as exc:  # noqa: BLE001
+                    self.last_error = str(exc)
+                    log.warning("气泡 IPC 断了（%s），下一句重连", exc)
+                    try:
+                        self.ipc_file.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.ipc_file = None
+                    self.ipc = None
+                return None
             try:
                 assert self.proc is not None and self.proc.stdin is not None
                 self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -175,6 +216,7 @@ class BubbleBridge:
         return bool(ack)
 
     def status(self) -> dict:
-        alive = bool(self.proc is not None and self.proc.poll() is None)
+        alive = bool(self.ipc is not None
+                     or (self.proc is not None and self.proc.poll() is None))
         return {"enabled": self.enabled, "alive": alive, "shown": self.shown,
                 "error": self.last_error, "last_reason": self.last_reason}

@@ -139,8 +139,7 @@
         "enabled": true,
         "duration_ms": 3200,
         "max_chars": 60,
-        "capture_window": true,
-        "capture_anchor_bottom": 150
+        "capture_window": true
     },
     "voice": {
         "enabled": true,
