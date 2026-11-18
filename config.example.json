@@ -5,6 +5,23 @@
     "upstream_chat_path": "/v1/chat/completions",
     "api_key": "",
     "upstream_timeout": 300,
+    "vision": {
+        "enabled": false,
+        "active": "qwen",
+        "fallback_to_chat": true,
+        "profiles": {
+            "qwen": {
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "chat_path": "/chat/completions",
+                "model": "qwen3-vl-plus",
+                "api_key": "",
+                "timeout": 120,
+                "extra": {
+                    "enable_thinking": false
+                }
+            }
+        }
+    },
     "tts": {
         "enabled": true,
         "backend": "gpt-sovits",

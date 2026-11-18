@@ -70,6 +70,14 @@ DEFAULTS = {
     "api_key": "",
     "api_key_credential_target": "provider/openai-main@dsh-pet-standalone",
     "upstream_timeout": 300,
+    # 识图模型单独走：不填就沿用上面的聊天模型。只对 scenario=vision 生效。
+    # profiles 里可以放多个，`active` 选当前用哪个；`enabled=false` 时全部走聊天模型。
+    "vision": {
+        "enabled": False,
+        "active": "",
+        "fallback_to_chat": True,
+        "profiles": {},
+    },
     "tts": {
         "enabled": True,
         "api": "http://127.0.0.1:9882",
@@ -648,6 +656,25 @@ def deep_merge(base: dict, patch: dict) -> None:
             deep_merge(base[k], v)
         else:
             base[k] = v
+
+
+def save_config_section(name: str, value: dict) -> bool:
+    """只改 config.json 里的一个顶层块，别把默认值/注释整份覆盖掉。"""
+    try:
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        data[name] = value
+        tmp = CONFIG_PATH + ".paopao-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        os.replace(tmp, CONFIG_PATH)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("写 config.%s 失败：%s", name, exc)
+        return False
 
 
 def setup_logging(cfg: dict) -> None:
@@ -3850,20 +3877,72 @@ class Gateway:
     def upstream_url(self) -> str:
         return self.cfg["upstream_base_url"].rstrip("/") + self.cfg["upstream_chat_path"]
 
-    def open_stream(self, payload: dict):
-        body = dict(payload)
-        body["stream"] = True
+    def _vision_route(self) -> dict | None:
+        """当前启用的识图模型（OpenAI 兼容）；没启用/没配好就返回 None。"""
+        vc = self.cfg.get("vision") or {}
+        if not vc.get("enabled"):
+            return None
+        profiles = vc.get("profiles") or {}
+        name = str(vc.get("active") or "")
+        prof = dict(profiles.get(name) or {})
+        if not prof and vc.get("base_url"):
+            # 兼容老式平坦写法：vision.base_url / model / api_key
+            prof = dict(vc)
+        base = str(prof.get("base_url") or "").strip()
+        model = str(prof.get("model") or "").strip()
+        if not base or not model:
+            return None
+        path = str(prof.get("chat_path") or "/v1/chat/completions")
+        if base.rstrip("/").endswith("/v1") and path.startswith("/v1/"):
+            path = path[3:]
+        url = base.rstrip("/") + "/" + path.lstrip("/")
+        key = str(prof.get("api_key") or "").strip()
+        if not key:
+            key = read_credential(str(prof.get("api_key_credential_target") or ""))
+        if not key:
+            key = self.api_key
+        extra = dict(prof.get("extra") or {})
+        timeout = float(prof.get("timeout") or vc.get("timeout")
+                        or self.cfg.get("upstream_timeout", 300))
+        return {"url": url, "key": key, "timeout": timeout,
+                "model": model, "extra": extra,
+                "name": name or "vision"}
+
+    def _open_stream_at(self, url: str, key: str, timeout: float, body: dict):
         req = urllib.request.Request(
-            self.upstream_url(),
+            url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": "Bearer %s" % self.api_key,
+                "Authorization": "Bearer %s" % key,
                 "Accept": "text/event-stream",
             },
         )
-        return urllib.request.urlopen(req, timeout=float(self.cfg.get("upstream_timeout", 300)))
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    def open_stream(self, payload: dict, scenario: str = "chat"):
+        body = dict(payload)
+        body["stream"] = True
+        route = self._vision_route() if scenario == "vision" else None
+        if route is not None:
+            body["model"] = route["model"]
+            for k, v in (route["extra"] or {}).items():
+                body.setdefault(k, v)
+            try:
+                return self._open_stream_at(route["url"], route["key"],
+                                            route["timeout"], body)
+            except Exception as exc:  # noqa: BLE001
+                vc = self.cfg.get("vision") or {}
+                if not vc.get("fallback_to_chat", True):
+                    raise
+                log.warning("识图模型 %s 连不上（%s），这一轮回退聊天模型",
+                            route["name"], str(exc)[:80])
+                body = dict(payload)
+                body["stream"] = True
+        return self._open_stream_at(
+            self.upstream_url(), self.api_key,
+            float(self.cfg.get("upstream_timeout", 300)), body)
 
     def post_once(self, payload: dict) -> dict:
         """非流式打一次上游（摘要这类内部调用用）。"""
@@ -4576,7 +4655,7 @@ class Gateway:
         t0 = time.time()
         logged_first = False
         logged_feed = False
-        resp = self.open_stream(payload)
+        resp = self.open_stream(payload, scenario)
         self.turn_active = True
         try:
             for raw in resp:
@@ -5283,6 +5362,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(GATEWAY.mode.set.__self__ and {
                 "mode": GATEWAY.mode.get(), "since": GATEWAY.mode.since, "source": GATEWAY.mode.source})
             return
+        if self.path.startswith("/vision"):
+            self._send_json(self._vision_status())
+            return
         if self.path.startswith("/voice"):
             self._send_json({"ok": True, "voice": GATEWAY.voice.status(),
                              "bubble": GATEWAY.bubble.status()})
@@ -5311,6 +5393,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_mode_lock()
         elif path.endswith("/mode"):
             self._handle_mode()
+        elif path.endswith("/vision"):
+            self._handle_vision()
         elif path.endswith("/say"):
             self._handle_say()
         elif path.endswith("/bubble"):
@@ -5424,6 +5508,81 @@ class Handler(BaseHTTPRequestHandler):
             return
         n = GATEWAY.speech.say(text, tag="divination")
         self._send_json({"ok": bool(n), "sentences": n})
+
+    def _vision_status(self) -> dict:
+        vc = GATEWAY.cfg.get("vision") or {}
+        profiles = []
+        for name, prof in (vc.get("profiles") or {}).items():
+            p = dict(prof or {})
+            profiles.append({
+                "name": name,
+                "model": p.get("model", ""),
+                "base_url": p.get("base_url", ""),
+                "chat_path": p.get("chat_path", "/v1/chat/completions"),
+                "has_key": bool(p.get("api_key") or p.get("api_key_credential_target")),
+            })
+        return {
+            "ok": True,
+            "enabled": bool(vc.get("enabled")),
+            "active": str(vc.get("active") or ""),
+            "fallback_to_chat": bool(vc.get("fallback_to_chat", True)),
+            "profiles": profiles,
+        }
+
+    def _handle_vision(self):
+        """识图模型接口：
+        GET  /vision                         看当前启用状态和已配的 profile
+        POST /vision {"enabled": true}       开关（关=走聊天模型）
+        POST /vision {"profile": "qwen"}     切到已有 profile
+        POST /vision {"profile":"qwen","base_url":"...","chat_path":"...",
+                      "model":"...","api_key":"...","activate":true,"persist":true}
+        """
+        try:
+            req = self._read_json()
+        except ValueError:
+            self._send_json({"ok": False, "error": "bad json"}, 400)
+            return
+        vc = json.loads(json.dumps(GATEWAY.cfg.get("vision") or {}, ensure_ascii=False))
+        vc.setdefault("profiles", {})
+        if "enabled" in req:
+            vc["enabled"] = bool(req.get("enabled"))
+        if "fallback_to_chat" in req:
+            vc["fallback_to_chat"] = bool(req.get("fallback_to_chat"))
+        name = str(req.get("profile") or "").strip()
+        if name:
+            prof = dict(vc["profiles"].get(name) or {})
+            for key in ("base_url", "chat_path", "model", "api_key",
+                        "api_key_credential_target"):
+                if key in req:
+                    prof[key] = str(req.get(key) or "").strip()
+            if "timeout" in req:
+                try:
+                    prof["timeout"] = float(req.get("timeout"))
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(req.get("extra"), dict):
+                prof["extra"] = dict(req.get("extra") or {})
+            if not prof.get("base_url") or not prof.get("model"):
+                self._send_json({"ok": False,
+                                 "error": "profile 至少要有 base_url 和 model"}, 400)
+                return
+            vc["profiles"][name] = prof
+            if req.get("activate", True):
+                vc["active"] = name
+                vc["enabled"] = True
+        if not vc.get("profiles") and vc.get("enabled"):
+            self._send_json({"ok": False, "error": "还没有配置任何识图 profile"}, 400)
+            return
+        GATEWAY.cfg["vision"] = vc
+        saved = False
+        if req.get("persist", True):
+            saved = save_config_section("vision", vc)
+        log.info("识图模型：enabled=%s active=%s（%s）",
+                 vc.get("enabled"), vc.get("active") or "-",
+                 "已写盘" if saved else "仅本次运行")
+        status = self._vision_status()
+        status["saved"] = saved
+        self._send_json(status)
 
     def _handle_mode(self):
         try:

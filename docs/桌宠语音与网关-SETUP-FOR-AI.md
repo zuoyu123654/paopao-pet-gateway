@@ -2228,9 +2228,57 @@ print(json.loads(r.read())['text'][:300])"
 | GET | `/status` | 模式、今日识屏数、帧缓冲、提示音缓存、摘要字数 |
 | GET | `/doctor` | 九项体检，返回 `{"ok": bool, "checks": {name: {ok, detail}}}` |
 | GET/POST | `/mode` | 读/切模式，落盘 `mode.json`；POST 体 `{"mode": "anime", "source": "qq"}` |
+| GET/POST | `/vision` | 看/切识图模型：GET 返回 profiles；POST 可启停、切 profile、改 `base_url/model/api_key` |
 | POST | `/say` | `{"text": "..."}` |
 | POST | `/digest` | 强制整理一次摘要 |
 | POST | `/frames` | 把最近拼图存成 `logs/last_grid.jpg` |
+
+### 识图模型接口（2026-11-18 加）
+
+网关默认把所有请求发给 `upstream_base_url` 的聊天模型；`vision` 块可以只把
+**识屏请求**（`scenario=vision`）切到另一个 OpenAI 兼容的视觉模型，聊天照旧走 DeepSeek。
+
+```jsonc
+"vision": {
+  "enabled": true,
+  "active": "qwen",
+  "fallback_to_chat": true,
+  "profiles": {
+    "qwen": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "chat_path": "/chat/completions",
+      "model": "qwen3-vl-plus",
+      "api_key": "sk-...",
+      "timeout": 120,
+      "extra": { "enable_thinking": false }
+    }
+  }
+}
+```
+
+- `enabled=false` 或 profile 没配好 → 完全走聊天模型，行为跟以前一样；
+- `fallback_to_chat=true` → 视觉模型连不上/HTTP 错时，这一轮自动回退聊天模型并记
+  `识图模型 xxx 连不上…回退聊天模型`，不会把识屏整轮弄哑；
+- `extra` 原样并入请求体（Qwen3-VL 的 `enable_thinking:false` 能明显降首字延迟）；
+- `api_key` 留空时依次找 `api_key_credential_target` → 全局 `api_key`（适合同一个中转站）；
+- 切模型不用重启：
+
+```powershell
+# 看当前
+Invoke-RestMethod http://127.0.0.1:9888/vision
+# 切到已有 profile
+Invoke-RestMethod http://127.0.0.1:9888/vision -Method POST -ContentType 'application/json' -Body '{"profile":"qwen"}'
+# 启用/停用
+Invoke-RestMethod http://127.0.0.1:9888/vision -Method POST -ContentType 'application/json' -Body '{"enabled":true}'
+Invoke-RestMethod http://127.0.0.1:9888/vision -Method POST -ContentType 'application/json' -Body '{"enabled":false}'
+# 新建/改一个 profile（persist=false 只本次运行）
+Invoke-RestMethod http://127.0.0.1:9888/vision -Method POST -ContentType 'application/json' -Body '{"profile":"qwen","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","chat_path":"/chat/completions","model":"qwen3-vl-plus","api_key":"sk-...","activate":true,"persist":true}'
+```
+
+**推荐**：中文游戏/番剧角色识别优先 **Qwen3-VL-Plus**（阿里云百炼，OpenAI 兼容，
+`qwen3-vl-plus`，对二次元角色知识面和中文名更稳，价格也比旗舰低）；要更高上限再上
+Gemini 3 Pro；豆包 Seed 1.6 Vision 适合已有火山引擎额度的场景。别用纯 OCR 模型，
+角色识别靠的是世界知识 + 画面特征，不是读字。
 
 ### 给 AI 的配置手册（2026-11-16 拆成两本）
 
