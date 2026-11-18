@@ -932,20 +932,24 @@ class SpeechPipeline:
         self.spoken_sentences = 0
         self.cue_paths: list[str] = []
         self.cue_durations: list[float] = []
-        # 首句真的开声了没有：后面的句子合成要等它，别抢 GPU；提示音也靠它判断
+        # 首句真的开声了没有：提示音靠它判断「已经开口了别插嘴」
         self.first_audio_started = threading.Event()
         # 整句合成同一时间最多 `synth_parallel` 条（实测 2 条并发每条只慢 10%，总吞吐
-        # 1.5 倍；3 条 1.7 倍、4 条 2.2 倍）。以前只跑 1 条：一条 20 字要合成 4 秒，
-        # 而前一句只播 3.5 秒，尾巴上的句子就只能干等，「后面几句卡」就是这么来的。
+        # 1.5 倍；3 条 1.7 倍、4 条 2.2 倍）。
         self.synth_parallel = max(1, int(cfg["tts"].get("synth_parallel", 2) or 2))
-        # 但首句还在流式吐音频的时候只许一条陪跑：三条一起挤 GPU，流式那条会掉到
-        # 实时以下，第一句就变成「念两个词停一下」。等首句的音频全到手了再放开。
-        # 按「第几代」记，不是简单的布尔：上一代的流收尾时不能把这一代的额度提前放开。
-        self.stream_done_gen = -1
+        # 有流式正在收音频时，整句合成一条都不放（否则会把那条流饿到实时以下，
+        # 听感就是「念两个词卡一下」）。收完自动放闸。
+        # 2026-11-19：改成计数器，不再按「第几代」——现在**不打断**了，generation 一直不变，
+        # 按代数记的闸永远只会放一次。
+        self.streams_receiving = 0
         self.synth_gate = threading.Condition()
         self.synth_busy = 0     # 正在合成几条（也是「句间空档」监测用的）
+        # 每一段话的开头几句：只有它们走流式，而且「等首句开声再合成后面」也靠它判
+        self.first_idxs: set[int] = set()
+        self.second_idxs: set[int] = set()
         self.play_end_at = 0.0  # 上一句声音什么时候结束（量句间空档用）
-        # 低优先级（DSH 状态）排队：等手上这段念完再补，别打断也别丢
+        # 低优先级（DSH 状态）排队：**现在不用了**（改成先来后到，见 say()），
+        # 字段留着是为了不破坏旧调用方和 /status 里的计数。
         self.deferred: list[tuple[str, str]] = []
         self.turn_active = False   # 模型这一轮还在吐字/合成
         self._playing = False      # 声卡正在响
@@ -1002,7 +1006,7 @@ class SpeechPipeline:
         self._force_stream: set[int] = set()
         self.current_stream = None
         self._prefetched: dict[int, dict] = {}
-        self._first_idx: dict[int, int] = {}
+        self._first_idx: dict[int, int] = {}   # 旧字段，留着兼容（新代码用 first_idxs）
         self.audio_dir = os.path.join(APP_DIR, "audio")
         self.phrase_dir = os.path.join(self.audio_dir, "phrases")
         os.makedirs(self.audio_dir, exist_ok=True)
@@ -1039,27 +1043,13 @@ class SpeechPipeline:
             sentences = split_sentences(cleaned, max_chars)[: int(
                 self.cfg["tts"].get("max_sentences", 40))]
         # 电话模式里主动识屏先开口时，语音回话也排队，别把它掐掉
-        if queue_if_busy and self._low_busy():
-            self.deferred.append((text, tag))
-            if len(self.deferred) > 6:
-                self.deferred.pop(0)
-            log.info("电话回话排队（先让主动识屏念完）：%s", cleaned[:30])
-            return 0
-        # 低优先级（DSH 状态）不许打断正事，也不许被吞：先记着，
-        # 等手上这段（当前回合 + 已经排队的句子 + 正在响的音频）念完再补。
-        if priority < self.active_priority and self._low_busy():
-            # 同一类低优先级只留最新一条：DSH 的 working/thinking 不该在完成之后
-            # 还排队补念，真正要补的是「完成工作」。
-            if tag == "dsh":
-                self.deferred = [(t, g) for t, g in self.deferred if g != "dsh"]
-            self.deferred.append((text, tag))
-            if len(self.deferred) > 6:
-                self.deferred.pop(0)
-            log.info("低优先级先排队（%s）：%s", tag, cleaned[:30])
-            return 0
         self.active_priority, self.last_feed_at = priority, now
-        self.interrupt()
-        log.info("念(%s) %d 句 / %d 字", tag, len(sentences), len(cleaned))
+        # 2026-11-19 老大定的新规矩：**不打断，先来后到**——上一段念完才轮到这一段。
+        # 以前这里 priority 高的会 interrupt() 掐掉正在念的、低优先级的进 deferred 排队，
+        # 现在一律直接排进同一条队列，按来的顺序念完为止。
+        queued = self.pending_count() + len(self.ready)
+        log.info("念(%s) %d 句 / %d 字（队列里还有 %d 句）",
+                 tag, len(sentences), len(cleaned), queued)
         return self.feed_sentences(sentences, tag)
 
     def _low_busy(self) -> bool:
@@ -1089,29 +1079,27 @@ class SpeechPipeline:
         self.active_priority = max(self.active_priority, self.PRIORITY.get(tag, 5))
         self.active_tag = tag
         self.last_feed_at = time.time()
-        first_of_gen = None
-        for s in sentences:
+        for seq_no, s in enumerate(sentences):
             with self.lock:
                 idx = self.seq
                 self.seq += 1
                 if force_stream:
                     self._force_stream.add(idx)
-            if first_of_gen is None:
-                first_of_gen = idx
-                # 同一个 gen 里只有【第一句】算首句；后面几批别把首句覆盖掉，
-                # 否则每一句都被当流式、也绕过了「等首句开声」的让路逻辑。
-                if gen not in self._first_idx:
-                    self._first_idx[gen] = idx
-                # 新一轮：先清掉上一轮的开声标记再入队
-                if self._cue_gen != gen:
-                    self._cue_gen = gen
-                    self.first_audio_started.clear()
+                # 每段话自己的「第一句/第二句」：不打断以后会有很多段排在队列里，
+                # 不能再靠 generation 认首句（那个现在一直不变）。
+                if seq_no == 0:
+                    self.first_idxs.add(idx)
+                elif seq_no == 1:
+                    self.second_idxs.add(idx)
             self.pending.put((idx, gen, s, tag))
             n += 1
         return n
 
-    def _gen_first_idx(self, gen: int):
-        return getattr(self, "_first_idx", {}).get(gen)
+    def _is_first(self, idx: int) -> bool:
+        return idx in self.first_idxs
+
+    def _is_second(self, idx: int) -> bool:
+        return idx in self.second_idxs
 
     def _stream_url(self, text: str, first: bool) -> str:
         """流式请求的地址。第一句用小块（开口最快），后面用大块（接缝少、质量好）。"""
@@ -1188,7 +1176,11 @@ class SpeechPipeline:
             except Exception:  # noqa: BLE001
                 pass
             pf = None
+        gate_closed = False
         try:
+            # 这条流从现在开始占着 GPU 的「接收」档：整句合成先全停
+            self._stream_begin()
+            gate_closed = True
             if pf is not None:
                 # 上一句还在播的时候就把这句的请求开出去了，头和数据都到手，
                 # 直接接上，不用再等一个首字节。
@@ -1357,8 +1349,11 @@ class SpeechPipeline:
                         pass
             if not self.first_audio_started.is_set():
                 self._mark_first_audio(gen)
-            # 首句的音频已经全到手了：放开并发的合成额度，后面的句子两条一起上。
-            self._mark_stream_done(gen)
+            # 这一句的音频已经全到手了：放闸，后面的句子可以开始合成/开流，
+            # 正好赶在这句还没播完的时候接上。
+            if gate_closed:
+                self._mark_stream_done()
+                gate_closed = False
             # 音频已经全进播放队列了：现在放开 GPU，后面的句子可以开始合成/开流，
             # 正好赶在这句还没播完的时候接上。
             if lock_held:
@@ -1387,8 +1382,10 @@ class SpeechPipeline:
         finally:
             if lock_held:
                 self.synth_lock.release()
-            # 流式这条路不管成没成，都别再让别人干等着额度
-            self._mark_stream_done(gen)
+            # 流式这条路不管成没成，都别再让别人干等着额度（配平 _stream_begin）
+            if gate_closed:
+                self._mark_stream_done()
+                gate_closed = False
             if stream is not None:
                 try:
                     # 等写入线程退干净再收尾；万一它卡在 write 里，也拿同一把锁错开，
@@ -1447,7 +1444,7 @@ class SpeechPipeline:
                 if gen != self.generation:
                     return
                 text = self.ready[idx][2]
-            first = idx == self._gen_first_idx(gen)
+            first = self._is_first(idx)
             tts = self.cfg["tts"]
             prebuffer = float(
                 (tts.get("prebuffer_first_seconds") if first else None)
@@ -1511,25 +1508,36 @@ class SpeechPipeline:
                 self._vision_totals.append(total)
                 self._vision_req_at = 0.0
 
-    def _mark_stream_done(self, gen: int) -> None:
-        """首句的流式音频已经全部到手（或根本没有流）：这一代可以放开并发了。"""
+    def _stream_begin(self) -> None:
+        """一条流式开始收音频：整句合成先全停，别把流饿死。"""
         with self.synth_gate:
-            self.stream_done_gen = max(self.stream_done_gen, gen)
+            self.streams_receiving += 1
             self.synth_gate.notify_all()
 
-    def _synth_slot(self, gen: int) -> None:
-        """领一个合成额度：这一代的流还没吐完时**一个都不给**，之后给 synth_parallel 个。
+    def _mark_stream_done(self, gen: int = -1) -> None:
+        """这条流的音频全部到手（或根本没有流）：放闸，整句合成可以跑了。"""
+        with self.synth_gate:
+            self.streams_receiving = max(0, self.streams_receiving - 1)
+            self.synth_gate.notify_all()
 
-        2026-11-18 实测：首句那条流还在吐的时候，只要放开 1 条整句合成，流就会
-        断成「念两三个词、卡 0.4～1.2 秒」——单个 api_v2 进程在 GPU 上是串行的，
+    def _synth_slot(self) -> None:
+        """领一个合成额度：有流式正在收音频时**一个都不给**，之后给 synth_parallel 个。
+
+        2026-11-18 实测：流还在吐的时候，只要放开 1 条整句合成，流就会断成
+        「念两三个词、卡 0.4～1.2 秒」——单个 api_v2 进程在 GPU 上是串行的，
         一条整句合成能把流饿到实时以下（6 字的句子当时合了 4.93 秒）。
-        所以首句流式期间整句合成一律等着；`_mark_stream_done` 一放闸，后面两条
-        并行合成正好落在首句还在播的那几秒里。
+        2026-11-19 改成数「有几条流正在收」，收完一条放一条，不再看 generation。
         """
         with self.synth_gate:
+            deadline = time.time() + 30.0
             while True:
-                cap = self.synth_parallel if self.stream_done_gen >= gen else 0
+                cap = 0 if self.streams_receiving > 0 else self.synth_parallel
                 if self.synth_busy < cap:
+                    self.synth_busy += 1
+                    return
+                if time.time() > deadline:
+                    # 流那头卡死了（TTS 掉线之类）：不能把整句话饿在这儿，硬给额度
+                    log.warning("等流式收音频超时，硬放整句合成")
                     self.synth_busy += 1
                     return
                 self.synth_gate.wait(timeout=0.5)
@@ -1540,11 +1548,17 @@ class SpeechPipeline:
             self.synth_gate.notify_all()
 
     def interrupt(self) -> None:
-        """停掉当前播放、丢掉还没播的句子与临时音频。"""
+        """紧急停：**不是常规路径**。
+
+        2026-11-19 起语音改成「先来后到」——say() 不再调它，识屏/聊天也不再掐上一段。
+        留着它只为「真要把她按闭嘴」的场合（比如人工干预）。
+        """
         with self.cond:
             self.generation += 1
             self.first_audio_started.clear()
             self._force_stream.clear()
+            self.first_idxs.clear()
+            self.second_idxs.clear()
             dropped = list(self._prefetched.values())
             self._prefetched.clear()
             stale = list(self.ready.values())
@@ -1750,6 +1764,10 @@ class SpeechPipeline:
         interval = float(self.cfg["tts"].get("pre_cue_min_interval", 20))
         if not cues or time.time() - self.last_pre_cue_at < interval:
             return
+        # 2026-11-19：先来后到——手上还有话在念/在排，就别塞这句提示音。
+        # 它是独立声道（winsound 直接播），会叠在她的话上，属于插队。pre_cue 现在为空。
+        if self.pending.qsize() > 0 or self.ready or self._playing:
+            return
         self.last_pre_cue_at = time.time()
         with self.lock:
             paths = list(self.cue_paths or [])
@@ -1864,9 +1882,8 @@ class SpeechPipeline:
                     if gen == self.generation:
                         self.ready[idx] = (gen, cached, None)
                         self.cond.notify_all()
-                        if idx == self._gen_first_idx(gen):
+                        if self._is_first(idx):
                             self.first_audio_started.set()
-                            self._mark_stream_done(gen)   # 首句是缓存文件，没有流要保护
                 continue
             # 第一句一律走流式：整句合成要 1～2 秒，流式首字节 0.5 秒就能开口。
             # 以前短句会退到整句合成，结果就是「文字都出来了，声音还要再等一两秒」。
@@ -1879,33 +1896,26 @@ class SpeechPipeline:
             # 第二句改流式后它是「预取」的对象（`_prefetch_next` 在首句还在播时就开请求），
             # 而且 ≤22 字的句子在 min_chunk 32 下只产生一个 chunk，等于边收边播、接缝为 0。
             if self.stream_first and (
-                idx == self._gen_first_idx(gen)
+                self._is_first(idx)
                 or idx in self._force_stream
-                or (self.stream_second and idx == self._gen_first_idx(gen) + 1)
+                or (self.stream_second and self._is_second(idx))
             ):
                 with self.cond:
                     if gen == self.generation:
                         self.ready[idx] = (gen, None, sentence)
                         self.cond.notify_all()
                 continue
-            # 后面几句等第一句真的开声了再合成：这样第一小句的开口不会被抢，
+            # 后面几句等「前面那条流收完音频」再合成：这样第一小句的开口不会被抢，
             # 而那点合成时间正好落在第一小句还在说话的时候。
-            # 注意不能只等 1.5 秒：首句首字节有时要 3～5 秒，等不到就提前开整句
-            # 合成，会把还没出声的流直接饿死——听起来就是第一句「卡住」。
-            if idx != self._gen_first_idx(gen):
+            # 真正的门是 `_synth_slot()`（有流在收就 0 额度），这里只是提前等一等，
+            # 免得一堆线程在 cond 上打转。
+            if not self._is_first(idx):
                 deadline = time.time() + 15.0
-                while (not self.first_audio_started.is_set()
-                       and self.stream_done_gen < gen
-                       and time.time() < deadline):
-                    self.first_audio_started.wait(0.5)
-            if idx == self._gen_first_idx(gen):
-                # 首句本来就该走整句合成（后端不支持流式）：那就没有流要保护，
-                # 后面几句直接放开并发。
-                self._mark_stream_done(gen)
-            # 并发额度：首句还在吐音频时只给 1 条，吐完了才放到 synth_parallel 条。
+                while self.streams_receiving > 0 and time.time() < deadline:
+                    self.first_audio_started.wait(0.3)
             # 一条 20 字的句子合成要 4 秒，播出来只有 3.5 秒——只跑一条的话越往后
             # 越跟不上，尾巴上那几句只能干等，听感就是「后面几句卡」。
-            self._synth_slot(gen)
+            self._synth_slot()
             try:
                 with self.lock:
                     if gen != self.generation:      # 等额度的时候被新的一段话顶掉了
@@ -2108,7 +2118,7 @@ class SpeechPipeline:
                 self._playing = True
                 try:
                     status, played = self._play_stream(
-                        stream_text, gen, first=(idx == self._gen_first_idx(gen)), idx=idx
+                        stream_text, gen, first=self._is_first(idx), idx=idx
                     )
                 finally:
                     self._playing = False
@@ -4160,7 +4170,7 @@ class Gateway:
         if self.vision_is_black():
             log.info("自己看一眼：这一帧太黑，跳过")
             return ""
-        self.speech.interrupt()
+        # 2026-11-19：不打断，先来后到（原来这里会把正在念的那段掐掉）
         try:
             self.speech.arm_vision_cue()
         except Exception:  # noqa: BLE001
@@ -6325,8 +6335,7 @@ class Handler(BaseHTTPRequestHandler):
             log.info("识屏：这一帧太黑（%.0f%% 接近纯黑），跳过这一轮", GATEWAY.vision_dark_ratio() * 100)
             self._send_blank_completion(client_stream, model)
             return
-        # 新一轮开始：前一段还没念完就掐掉，直接改念这一轮
-        GATEWAY.speech.interrupt()
+        # 2026-11-19：不打断，先来后到——排到就念（原来这里会把上一轮掐掉）
         # 「让我看看」用预缓存直接播（winsound），不占用正文的第一句流式名额；
         # 以前这里再 say 一句会把 pre-cue 塞进同一代，正文第一句就被当成“第二句”
         # 去整句合成，开口慢 4 秒、后面也跟着拖——2026-11-18 实测。
