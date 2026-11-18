@@ -125,12 +125,25 @@ class DanmakuClient(threading.Thread):
         # 收弹幕的去处：默认丢给 HostMode.push（回弹幕那条路）；
         # 「看直播模式」那条会传自己的收集器进来（2026-11-19）。
         self.on_message = on_message
+        # 旁听者：HostMode 自己连着的时候，「看直播模式」不再另开一条 WS，
+        # 挂到这里一起收（否则同一个直播间会开两条连接）。
+        self.sinks: list = []
         self.ws = None
         self.connected = False
         self.last_error = ""
         self._live_state: int | None = None   # 上次查到的开播状态，只用来少刷日志
 
+    def add_sink(self, fn) -> None:
+        """挂个旁听回调（和回弹幕共用同一条连接时用）。"""
+        if fn not in self.sinks:
+            self.sinks.append(fn)
+
     def _emit(self, user: str, uid: str, text: str, priority: int) -> None:
+        for fn in list(self.sinks):
+            try:
+                fn(user, uid, text, priority)
+            except Exception:  # noqa: BLE001
+                pass
         if self.on_message is not None:
             try:
                 self.on_message(user, uid, text, priority)

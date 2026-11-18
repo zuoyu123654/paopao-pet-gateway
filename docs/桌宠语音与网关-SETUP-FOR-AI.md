@@ -1206,23 +1206,29 @@ GET /status  →  video.tab: {enabled, lines, ok, drop, last, err}
 
 | 场景 | 怎么拿 | 进哪儿 | 取几条 |
 |---|---|---|---|
-| 看直播（live 模式） | `video_watch.LiveDanmaku`：复用 `host_mode.DanmakuClient` 的 WS（传 `on_message` 回调，走不进 host 的回复队列），跟着当前直播间切房间；攒最近 200 条 | `video_watch.context_block(mode="live")` 末尾：`【直播间弹幕（观众在刷的，只是氛围参考）】` | **8 条**（最近 120 秒） |
+| 看直播（live 模式） | `video_watch.LiveDanmaku`：复用 `host_mode.DanmakuClient` 的 WS（传 `on_message` 回调，走不进 host 的回复队列），跟着当前直播间切房间；**只留最近 120 秒**（`_prune`，不长期暂存） | `video_watch.context_block(mode="live")` 末尾：`【直播间弹幕（观众在刷的，只是氛围参考）】` | **8 条**（最近 120 秒） |
 | 番剧/视频 | `player_watch.danmaku(bvid, page)`：bvid → cid（`x/web-interface/view`）→ 弹幕 XML（`x/v1/dm/list.so`，deflate），缓存 6 小时；按当前进度切窗口 | `player_watch.context_block()` 末尾：`【观众弹幕（这一段大家在刷）】` | **8 条**（最近 90 秒） |
 
 几个必须知道的点：
 
-1. **只取几条**：老大明确说了「弹幕不能全拿」。两个收集器都各留一份原始池子（直播间 200 条 / 视频全量），
-   但**进提示的只有 8 条**——多了既费 token 又会让她变成念弹幕机。
-2. **跟着当前直播间走**：`video_watch._refresh_live_meta_async()` 里 `self.danmaku.follow(room)`，
-   房间变了才重连；退出直播模式时 `_leave()` 会 `stop()`。
-3. **轮播房（`live_status=2`）不连**：连上去只有空流，日志 `没开播（live_status=2）` 是正常判断。
-4. 高级弹幕（正文是 JSON/坐标）会被过滤掉，不然喂进去全是噪音。
+1. **只取几条、不长期暂存**：老大明确说了「弹幕不能全拿」「直播间不用暂存，直接取最近 120 秒最多 8 条」。
+   直播间那份按**时间**剪（超过 120 秒直接 pop，`_prune()`），视频那份按窗口切；
+   **进提示的只有 8 条**——多了既费 token 又会让她变成念弹幕机。
+2. **同一个直播间只开一条 WS（不会打架）**：host（回弹幕）开着、而且连的是同一个房间时，
+   `LiveDanmaku` 不再自己连，而是挂到 `DanmakuClient.add_sink()` 上**旁听**
+   （`/status` 里 `video.danmaku.reused=true`）；host 关了，它再自己连。
+   两者永远不会同时抢同一个直播间的弹幕。host 本身的行为没变（还是默认关、回来才回）。
+3. **跟着当前直播间走**：`video_watch._tick()` → `_refresh_live_meta_async()` 每 2 秒喂一次房间号，
+   房间变了才重连；退出直播模式时 `_leave()` 会 `stop()`（顺带撤掉旁听）。
+4. **轮播房（`live_status=2`）不连**：连上去只有空流，日志 `没开播（live_status=2）` 是正常判断。
+5. 高级弹幕（正文是 JSON/坐标）会被过滤掉，不然喂进去全是噪音。
 
-**实测（2026-11-19 01:44）**：
+**实测（2026-11-19 02:01，开着 host 验证复用）**：
 ```
-看直播：弹幕跟着切到房间 22725947
-看直播：带上直播间弹幕 8 条
-/status → video.danmaku: {"enabled":true,"room":22725947,"connected":true,"kept":63}
+看直播：复用回弹幕那条连接（房间 22725947），不再开第二条
+/status → video.danmaku: {"enabled":false,"reused":true,"connected":true,"kept":16}
+关掉 host 后 → {"enabled":true,"reused":false,"connected":true}
+```
 ```
 视频那条：`BV1GJ411x7h7` 拉到 1200 条、`BV1uv411q7Mv` 95 条（0.5～0.8 秒，有 6 小时缓存），
 但每次只往提示里放 8 条。

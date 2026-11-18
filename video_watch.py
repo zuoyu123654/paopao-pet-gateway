@@ -413,8 +413,11 @@ class LiveDanmaku:
         self.connected = False
         self.last_error = ""
         self.lock = threading.Lock()
-        self.items: "collections.deque" = collections.deque(maxlen=200)
+        # 不长期暂存：只留最近 window 秒（默认 120），多了随手剪掉
+        self.window = 120.0
+        self.items: "collections.deque" = collections.deque(maxlen=400)
         self.client = None
+        self.reused = False   # 是不是挂在 host 那条连接上旁听
 
     def start(self) -> None:
         if self.client is not None:
@@ -424,20 +427,77 @@ class LiveDanmaku:
         self.client = DanmakuClient(self, on_message=self._on_message)
         self.client.start()
 
+    def _host_shared(self, room_id: int):
+        """host（回弹幕）正连着同一个房间吗？连着就别再开第二条 WS。"""
+        host = getattr(getattr(self.watch, "gateway", None), "host", None)
+        if host is None or not getattr(host, "enabled", False):
+            return None
+        if int(getattr(host, "room_id", 0) or 0) != int(room_id):
+            return None
+        client = getattr(host, "client", None)
+        if client is None:
+            return None
+        return client
+
     def follow(self, room_id: int) -> None:
-        """跟着当前直播间走；房间变了才重连（客户端下一轮自己按新 room_id 连）。"""
-        room_id = int(room_id or 0)
-        if not room_id or room_id == self.room_id:
+        """跟着当前直播间走（每 2 秒调一次）。
+
+        同一个直播间只开**一条** WebSocket：host（回弹幕）那条要是在连同一个房间，
+        就挂到它的 `add_sink` 上旁听；host 中途关了，再自己连。
+        """
+        room = int(room_id or 0)
+        if not room:
             return
-        self.room_id = room_id
-        self.enabled = True
-        self.connected = False
-        with self.lock:
-            self.items.clear()
-        log.info("看直播：弹幕跟着切到房间 %s", room_id)
+        if room != self.room_id:
+            self._detach()
+            self.room_id = room
+            self.enabled = False
+            self.connected = False
+            with self.lock:
+                self.items.clear()
+            log.info("看直播：弹幕跟着切到房间 %s", room)
+        self._sync_share(room)
+
+    def _sync_share(self, room: int) -> None:
+        """按 host 当前状态决定「旁听它的」还是「自己连」。"""
+        shared = self._host_shared(room)
+        if shared is not None:
+            if not self.reused:
+                try:
+                    shared.add_sink(self._on_message)
+                    self.reused = True
+                    self.connected = True
+                    self.enabled = False      # 自己那条不连，别开第二条
+                    log.info("看直播：复用回弹幕那条连接（房间 %s），不再开第二条", room)
+                except Exception:  # noqa: BLE001
+                    self.reused = False
+            return
+        if self.reused:
+            self._detach()
+            self.connected = False
+            log.info("看直播：回弹幕那条停了，自己连房间 %s", room)
+        if not self.enabled:
+            self.enabled = True
+            self.connected = False
+
+    def _detach(self) -> None:
+        """撤掉挂在 host 连接上的旁听。"""
+        if not self.reused:
+            return
+        host = getattr(getattr(self.watch, "gateway", None), "host", None)
+        client = getattr(host, "client", None) if host is not None else None
+        try:
+            if client is not None:
+                client.sinks = [f for f in getattr(client, "sinks", []) if f != self._on_message]
+        except Exception:  # noqa: BLE001
+            pass
+        self.reused = False
 
     def stop(self) -> None:
+        self._detach()
         if not self.enabled:
+            with self.lock:
+                self.items.clear()
             return
         self.enabled = False
         self.connected = False
@@ -445,19 +505,27 @@ class LiveDanmaku:
             self.items.clear()
         log.info("看直播：离开直播间，弹幕先收着不连了")
 
+    def _prune(self, now: float) -> None:
+        """只留最近 window 秒，别越攒越多（老大要求：不长期暂存）。"""
+        while self.items and now - self.items[0][0] > self.window:
+            self.items.popleft()
+
     def _on_message(self, user: str, uid: str, text: str, priority: int) -> None:
         text = (text or "").strip()
         if not text or len(text) > 80:
             return
         if text.startswith(("!", "/", "！")):
             return
-        with self.lock:
-            self.items.append((time.time(), user or "观众", text))
-
-    def block(self, limit: int = 8, seconds: float = 120.0) -> str:
-        """最近几条弹幕，压成几行（默认只取 8 条，别把整个弹幕池灌进去）。"""
         now = time.time()
         with self.lock:
+            self.items.append((now, user or "观众", text))
+            self._prune(now)
+
+    def block(self, limit: int = 8, seconds: float = 120.0) -> str:
+        """最近 120 秒里最多 8 条弹幕，压成几行。"""
+        now = time.time()
+        with self.lock:
+            self._prune(now)
             items = [x for x in self.items if now - x[0] <= seconds][-limit:]
         if not items:
             return ""
@@ -466,7 +534,7 @@ class LiveDanmaku:
     def status(self) -> dict:
         with self.lock:
             n = len(self.items)
-        return {"enabled": self.enabled, "room": self.room_id,
+        return {"enabled": self.enabled, "room": self.room_id, "reused": self.reused,
                 "connected": self.connected, "kept": n, "error": self.last_error}
 
 
