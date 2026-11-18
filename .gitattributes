@@ -1,0 +1,5 @@
+# 补丁必须保持 LF：GitHub 上的 GPT-SoVITS 是 LF，补丁带 CRLF 会 apply 失败
+*.patch text eol=lf
+
+# Python 源码统一 LF（Windows 上也能跑）
+*.py text eol=lf
