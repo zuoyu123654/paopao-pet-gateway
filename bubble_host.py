@@ -366,6 +366,40 @@ def read_bubble_cfg(prev: dict) -> dict:
 # 所以现在只用"新样本一到就瞬间对齐"（不做预测）。
 
 
+def read_pet_window_rect(pid: int) -> QRect | None:
+    """桌宠真实可见窗口矩形；不依赖 runtime json（直播捕获模式可能改坐标口径）。"""
+    if not pid:
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        best = {"area": 0, "rect": None}
+        user32 = ctypes.windll.user32
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+        def cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            wpid = wt.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if int(wpid.value) != pid:
+                return True
+            rect = wt.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = int(rect.right - rect.left)
+            h = int(rect.bottom - rect.top)
+            if w >= 80 and h >= 80 and w * h > best["area"]:
+                best["area"] = w * h
+                best["rect"] = QRect(int(rect.left), int(rect.top), w, h)
+            return True
+
+        user32.EnumWindows(proc(cb), 0)
+        return best["rect"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def read_pet_rect() -> QRect | None:
     """返回桌宠精灵的全局矩形（桌宠自己写进 runtime json 的那个）。
 
@@ -391,6 +425,11 @@ def read_pet_rect() -> QRect | None:
             if w > 0 and h > 0:
                 rect = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
                 rect.pet_pid = int(data.get("pid") or 0)  # type: ignore[attr-defined]
+                if os.environ.get("PAOPAO_BUBBLE_USE_WINDOW_RECT", "0") == "1":
+                    real = read_pet_window_rect(int(data.get("pid") or 0))
+                    if real is not None:
+                        real.pet_pid = rect.pet_pid  # type: ignore[attr-defined]
+                        rect = real
                 _RECT_CACHE.update(path=str(path), mtime=mtime, rect=rect)
                 return rect
         except Exception:

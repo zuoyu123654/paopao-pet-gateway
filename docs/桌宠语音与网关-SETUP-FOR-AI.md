@@ -2763,7 +2763,9 @@ Invoke-WebRequest http://127.0.0.1:9888/bubble -Method POST -Body $body `
 `config.json → bubble`：`enabled`（总开关）、`duration_ms`（默认 3200）、
 `max_chars`（默认 60，超了截断）、`capture_window`（默认 false；true 时给
 OBS/直播姬一个**全屏透明采集画布**，窗口标题 **“泡泡气泡（全屏）”**，
-用窗口采集抓它，气泡按桌面真实位置画）。
+用窗口采集抓它，气泡按桌面真实位置画）、
+`use_pet_window_rect`（默认 false；true 时气泡锚点用桌宠**真实窗口矩形**，
+不再读 runtime json。桌宠开直播捕获/改坐标口径时，气泡位置不受它影响）。
 
 ### 15.3 跟她的设置同步（每次都读）
 
