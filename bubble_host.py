@@ -53,6 +53,7 @@ DEFAULT_DURATION_S = 3.2
 # 位置缓存：30ms 一跟，靠 mtime 判断要不要重新解析，别每次都读 JSON
 _CAPTURE_CACHE: dict = {"pid": 0, "value": False, "ready_at": 0.0, "read": False}
 _RECT_CACHE: dict = {"path": "", "mtime": 0, "capture": None, "rect": None}
+_ACTUAL_CAL: dict = {"pid": 0, "dx": 0, "dy": 0}
 _SCALE_CACHE: dict = {"mtime": 0, "scale": 0.0}
 
 # ---------------------------------------------------------------- 托盘菜单
@@ -449,19 +450,31 @@ def read_pet_rect() -> QRect | None:
         try:
             mtime = path.stat().st_mtime_ns
             capture = pet_stream_capture()
-            if (_RECT_CACHE["path"] == str(path)
-                    and _RECT_CACHE["mtime"] == mtime
-                    and _RECT_CACHE.get("capture") == capture):
-                return _RECT_CACHE["rect"]
             data = json.loads(path.read_text(encoding="utf-8"))
             w, h = int(data.get("w") or 0), int(data.get("h") or 0)
             if w > 0 and h > 0:
                 pid = int(data.get("pid") or 0)
-                rect = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
+                runtime = QRect(int(data.get("x") or 0), int(data.get("y") or 0), w, h)
+                real = read_pet_window_rect(pid)
+                if real is not None:
+                    # 真实窗口跟得快，但含透明边距；用 runtime 和它的固定差值
+                    # 校准回精灵坐标，再按实际窗口每 30ms 跟随。
+                    if _ACTUAL_CAL["pid"] != pid:
+                        _ACTUAL_CAL.update(pid=pid,
+                                           dx=real.x() - runtime.x(),
+                                           dy=real.y() - runtime.y())
+                    rect = QRect(real.x() - _ACTUAL_CAL["dx"],
+                                 real.y() - _ACTUAL_CAL["dy"],
+                                 real.width(), real.height())
+                else:
+                    rect = runtime
                 rect.pet_pid = pid  # type: ignore[attr-defined]
                 if pet_stream_capture():
                     rect = QRect(rect.x(), rect.y() + 70, rect.width(), rect.height())
                     rect.pet_pid = pid  # type: ignore[attr-defined]
+                # 真实窗口校准后仍有透明边距造成的水平/垂直偏差，统一修一下
+                rect = QRect(rect.x() - 190, rect.y() - 40, rect.width(), rect.height())
+                rect.pet_pid = pid  # type: ignore[attr-defined]
                 _RECT_CACHE.update(path=str(path), mtime=mtime, capture=capture, rect=rect)
                 return rect
         except Exception:
