@@ -45,7 +45,7 @@
         "text_lang": "zh",
         "max_sentences": 40,
         "max_chars_per_sentence": 32,
-        "first_min_chars": 16,
+        "first_min_chars": 10,
         "second_min_chars": 5,
         "early_sentences": 3,
         "early_min_chars": 8,
@@ -61,7 +61,7 @@
         "speed": 1.2,
         "speed_first": 1.0,
         "cache_pre_cue": true,
-        "streaming_first": true,
+        "streaming_first": false,
         "streaming_mode": 3,
         "stream_min_chunk_length": 32,
         "stream_min_chunk_length_first": 8,
@@ -200,7 +200,7 @@
     },
     "look_guard": {
         "enabled": true,
-        "idle_minutes": 5,
+        "idle_minutes": 2,
         "check_seconds": 30,
         "helper_port": 9893
     },
