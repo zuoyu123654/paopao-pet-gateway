@@ -33,6 +33,7 @@ class BubbleBridge:
         self.max_chars = int(conf.get("max_chars", 60) or 60)
         self.capture_window = bool(conf.get("capture_window", False))
         self.use_pet_window_rect = bool(conf.get("use_pet_window_rect", False))
+        self.offset_y = int(conf.get("offset_y", 0) or 0)
         self.ack_timeout = float(conf.get("ack_timeout", 3.0) or 3.0)
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
@@ -75,6 +76,8 @@ class BubbleBridge:
             env["PAOPAO_BUBBLE_CAPTURE"] = "1"
         if self.use_pet_window_rect:
             env["PAOPAO_BUBBLE_USE_WINDOW_RECT"] = "1"
+        if self.offset_y:
+            env["PAOPAO_BUBBLE_OFFSET_Y"] = str(self.offset_y)
         log_path = os.path.join(APP_DIR, "logs", "bubble.log")
         try:
             stderr = open(log_path, "a", encoding="utf-8", buffering=1)

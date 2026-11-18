@@ -609,6 +609,11 @@ def main() -> int:
             explicit = True
         if anchor is None:
             anchor = read_pet_rect()
+        if anchor is not None:
+            offset_y = int(os.environ.get("PAOPAO_BUBBLE_OFFSET_Y", "0") or 0)
+            if offset_y:
+                anchor = QRect(anchor.x(), anchor.y() + offset_y,
+                               anchor.width(), anchor.height())
         if anchor is None:
             log("找不到桌宠窗口，气泡没法定位")
             _ack(id=cmd.get("id"), shown=False, reason="no-pet")
