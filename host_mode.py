@@ -351,8 +351,8 @@ class HostMode(threading.Thread):
             return
         if URL_RE.search(text) or text.startswith(("!", "/", "！")):
             return
-        if uid and self._self_uid and uid == self._self_uid:
-            return
+        # 不按 uid 过滤自己：现在只读不发，自己发的测试弹幕也应该能回；
+        # 以后真做自动发弹幕，再单独按“刚发出去的那条”去重。
         key = "%s|%s" % (uid or user, text[:40])
         now = time.time()
         with self.lock:
@@ -369,6 +369,7 @@ class HostMode(threading.Thread):
             score += 6
         item = {"ts": now, "user": user or "观众", "uid": uid,
                 "text": text, "score": score}
+        log.info("直播弹幕收到：%s：%s", item["user"][:20], text[:40])
         try:
             self.q.put_nowait(item)
         except queue.Full:

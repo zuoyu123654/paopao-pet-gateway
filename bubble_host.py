@@ -491,6 +491,8 @@ def main() -> int:
     except OSError:
         pass
     bubble = PetSpeechBubble(None, style_id="classic_top")
+    # OBS/直播姬的窗口采集里按这个标题找；气泡本身已经跟着桌宠位置走
+    bubble.setWindowTitle("泡泡气泡")
     state = {"style": "classic_top", "scale": 1.0, "duration_ms": 3200}
     cmds: "queue.Queue[dict]" = queue.Queue()
 
