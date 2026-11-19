@@ -716,6 +716,8 @@ class VideoWatcher(threading.Thread):
         # B站直播参考信息：主播 / 分区 / 标题。按 room_id 缓存，别每轮都打 API。
         self._live_meta: dict = {}
         self._live_meta_at = 0.0
+        # 直播间 → 在玩什么游戏（持久化在 lore/live_rooms.json）
+        self._room_game: dict[str, str] = self._load_room_games()
         self._live_room_id = ""
         self._live_fetching = False
         self.keep = int(self.conf.get("transcript_keep", 12))
@@ -899,6 +901,78 @@ class VideoWatcher(threading.Thread):
             if m:
                 return m.group(1)
         return ""
+
+    # 分区名里这些是「类别」不是游戏名，单独拿出来不能查手册
+    GENERIC_AREAS = {
+        "单机游戏", "网络游戏", "手机游戏", "主机游戏", "网页游戏", "端游", "手游",
+        "游戏", "网游", "页游", "桌游", "棋牌", "电竞赛事", "赛事", "娱乐", "聊天",
+        "虚拟主播", "电台", "音乐", "舞蹈", "生活", "学习", "放映厅", "视频唱见",
+    }
+
+    def live_game_name(self) -> str:
+        """猜「这个直播间在玩什么游戏」：分区名 → 标题里的【】/《》 → 记过的那份。
+
+        2026-11-19 加：老大要「主播在游戏分区也用手册」。分区名很多时候就是游戏名
+        （原神/星穹铁道这种），泛分区（单机游戏/网络游戏）就退回从标题里抽。
+        """
+        meta = dict(self._live_meta or {})
+        area = str(meta.get("area") or "").strip()
+        title = str(meta.get("title") or "")
+        cands: list[str] = []
+        if area and area not in self.GENERIC_AREAS:
+            cands.append(area)
+        for m in re.finditer(r"[【\[《]([^】\]》]{2,14})[】\]》]", title):
+            cands.append(m.group(1).strip())
+        # 以前记过的（同一房间再来，直接用）
+        try:
+            remembered = self._room_game.get(str(self._live_room_id or ""), "")
+        except Exception:  # noqa: BLE001
+            remembered = ""
+        if remembered:
+            cands.append(remembered)
+        lore = getattr(self.gateway, "lore", None)
+        for c in cands:
+            try:
+                if lore is not None and lore.has(c):
+                    return c
+            except Exception:  # noqa: BLE001
+                pass
+        return cands[0] if cands else ""
+
+    def _load_room_games(self) -> dict:
+        path = os.path.join(APP_DIR, "lore", "live_rooms.json")
+        try:
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f) or {}
+                return {str(k): str((v or {}).get("name") or "") for k, v in raw.items()}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    def _remember_room_game(self, room: str, name: str) -> None:
+        """把这个「直播间 → 在玩什么」记下来，下次同一房间直接用（2026-11-19）。"""
+        name = (name or "").strip()
+        if not room or not name:
+            return
+        self._room_game[str(room)] = name
+        path = os.path.join(APP_DIR, "lore", "live_rooms.json")
+        try:
+            data = {}
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f) or {}
+            old = (data.get(str(room)) or {}).get("name")
+            if old == name:
+                return
+            data[str(room)] = {"name": name, "at": time.time(),
+                               "title": (self._live_meta.get("title") or "")[:60]}
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+            log.info("看直播：记下这个直播间在玩《%s》（房间 %s）", name, room)
+        except Exception as exc:  # noqa: BLE001
+            log.info("看直播：记直播间游戏名失败（不影响）：%s", exc)
 
     def _refresh_live_meta_async(self) -> None:
         if self._live_fetching:

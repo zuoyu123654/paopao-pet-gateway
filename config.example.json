@@ -284,7 +284,7 @@
                              },
                  "bili":  {
                               "enabled":  true,
-                              "videos":  2,
+                              "videos":  3,
                               "max_chars":  2400,
                               "timeout":  150
                           },

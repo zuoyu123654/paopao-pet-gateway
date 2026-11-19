@@ -3980,6 +3980,7 @@ class Gateway:
         self.bili_previews.start()
         # 作品的「肚子里的资料」：自己查百科+攻略 → 总结成本地手册；识屏/语音按需检索
         self.lore = Lore(cfg, self)
+        self._learning: set[str] = set()   # 正在「去学一下 XX」的作品名（别重复排）
         self.lore_keeper = LoreKeeper(cfg, self, self.lore)
         self.lore.keeper = self.lore_keeper
         self.lore_keeper.start()
@@ -4976,6 +4977,36 @@ class Gateway:
         except Exception as exc:  # noqa: BLE001
             log.warning("短语预热失败：%s", exc)
 
+    def _start_learn_if_asked(self, text: str) -> str:
+        """老大说「去学一下 XX」→ 后台开一条学习线程，返回作品名（没这句就返回空）。
+
+        2026-11-19 加。学完存进 lore/games/，之后识屏/语音都会按需检索它。
+        """
+        name = parse_learn_request(text)
+        if not name:
+            return ""
+        lore = getattr(self, "lore", None)
+        if lore is None or not getattr(lore, "enabled", False):
+            return ""
+        if name in self._learning:
+            return name
+        self._learning.add(name)
+
+        def _work() -> None:
+            try:
+                res = lore.learn_now(name, kind="game")
+                log.info("学资料：%s → %s", name,
+                         res.get("slug") or res.get("error") or res.get("skipped") or res)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("学资料失败（%s）：%s", name, exc)
+            finally:
+                self._learning.discard(name)
+
+        threading.Thread(target=_work, name="learn-asked", daemon=True).start()
+        log.info("学资料：老大让我学《%s》，后台去 B站（只收带字幕的）+ 百科", name)
+        return name
+
+
     def _learn_fact(self, scenario: str, user_text: str, app: str = "", title: str = "") -> None:
         """从这一轮里挑「老大在纠正/教她」的话，记进共用事实（聊天/语音/识屏都读）。"""
         if getattr(self, "facts", None) is None:
@@ -5252,6 +5283,18 @@ class Gateway:
                 last_user_msg = msg
                 user_text = message_text(msg.get("content"))[:1200]
                 break
+        # 2026-11-19：老大说「去学一下 XX」就当场答应、后台去学（返回作品名）
+        learn_name = ""
+        try:
+            if scenario in ("chat", "voice") and user_text:
+                learn_name = self._start_learn_if_asked(user_text)
+                if learn_name:
+                    messages.insert(0, {"role": "system", "content": (
+                        "【你刚答应去学《%s》】后台已经在抓 B站 攻略（只收带字幕的）和百科，"
+                        "几分钟后才有手册。这一轮就回一句「行，我去看，几分钟」这类，"
+                        "别编攻略内容、别报进度、别说自己在联网。" % learn_name)})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("学资料触发失败（不影响这一轮）：%s", exc)
         char_q = any(w in user_text for w in CHARACTER_QUESTION_HINTS)
         screen_attached = False
         # 文字聊天问「这个角色是谁」时，桌宠不会自动带图；不带图她只能拿最近聊过的
@@ -5374,6 +5417,18 @@ class Gateway:
             # 「肚子里的资料」：只要画面/问话里出现相关线索就递一两段，
             # 游戏模式主动识屏也一样带（预算仍按 lore.budget_chars）。
             try:
+                # 看直播：主播在游戏分区时，用「分区名/标题里的游戏名」查手册（2026-11-19）
+                if self.mode.get() == "live":
+                    try:
+                        live_game = self.video.live_game_name() if getattr(self, "video", None) else ""
+                    except Exception:  # noqa: BLE001
+                        live_game = ""
+                    if live_game:
+                        title = live_game
+                        try:
+                            self.lore.ensure(live_game, kind="game")   # 没学过就顺手学一份
+                        except Exception:  # noqa: BLE001
+                            pass
                 lore_block = self.lore.block(app=app, title=title, query=user_text)
             except Exception as exc:  # noqa: BLE001
                 lore_block = ""
@@ -5511,6 +5566,32 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 pass
         return payload, scenario, user_text
+
+
+# ------------------------------------------------------------------ 学资料
+_LEARN_VERBS = ("学习一下", "学一下", "去学习", "去学", "了解一下", "去了解",
+                "研究一下", "查一下资料", "记一下", "记住")
+_NAME_TAIL = re.compile(r"(的)?(攻略|资料|玩法|教程|怎么玩|怎么打|怎么弄|是什么|怎么样|吧|呗|呀|啊|嘛)$")
+
+
+def parse_learn_request(text: str) -> str:
+    """「去学一下 货币战争」→ "货币战争"；不是这种口气就返回空串。
+
+    2026-11-19 老大要的：跟她**说一句**就该去学，不用先去开游戏。
+    """
+    t = str(text or "").strip()
+    if not t or len(t) > 80:
+        return ""
+    for verb in _LEARN_VERBS:
+        i = t.find(verb)
+        if i < 0:
+            continue
+        rest = t[i + len(verb):].strip(" ：:，,。！？!?、的")
+        rest = _NAME_TAIL.sub("", rest).strip()
+        rest = re.split(r"[，,。！？!?、\s]", rest)[0].strip()
+        if 2 <= len(rest) <= 16 and re.search(r"[\u4e00-\u9fffA-Za-z]", rest):
+            return rest
+    return ""
 
 
 GATEWAY: Gateway | None = None

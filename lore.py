@@ -772,14 +772,22 @@ class Collector:
             if secs and not (90 <= secs <= 3000):
                 continue
             picked.append(it)
-        # 先看播放量（热门一般更靠谱），同量级再看标题里有没有「新手/攻略」
-        picked.sort(key=lambda it: (-int(it.get("play") or 0),
-                                    0 if any(w in str(it.get("title") or "") for w in wanted) else 1))
-        return picked[:self.bili_videos]
+        # 2026-11-19 老大定的：**保持 B站 搜索的原始顺序**（默认相关度，
+        # 高播放的本来就在前面），不要按 play 重排——按播放量排会把不相关的爆款顶上来。
+        # 这里多留几个候选（最多 10），后面「没字幕就跳过」要往下取。
+        return picked[:10]
 
     def bili_sources(self, name: str, kind: str) -> list[tuple[str, str]]:
+        """取 B站 攻略：**只要带字幕的**，没字幕就跳过、接着取下一个，直到取满 ``bili_videos`` 个。
+
+        2026-11-19 老大要求：攻略视频大多有字幕；没字幕的没有价值（光看标题和简介学不到东西），
+        所以宁可换下一个，也不要凑数。
+        """
         out: list[tuple[str, str]] = []
+        want = max(1, int(self.bili_videos))
         for it in self._pick_videos(name, kind):
+            if len(out) >= want:
+                break
             bvid = str(it.get("bvid") or "")
             if not bvid:
                 continue
@@ -816,9 +824,13 @@ class Collector:
                     bits.append("章节：" + " / ".join(names))
             transcript = data.get("transcript") or {}
             text = str((transcript or {}).get("text") or "").strip()
-            if text:
-                bits.append("字幕/转写摘录：%s" % text[:self.bili_chars])
+            if not text:
+                # 没字幕：这条不要，接着取下一个（别拿标题/简介凑数）
+                log.info("资料库：%s 没有字幕，跳过（已取到 %d/%d）", bvid, len(out), want)
+                continue
+            bits.append("字幕摘录：%s" % text[:self.bili_chars])
             out.append(("B站·" + title[:40], "\n".join(bits)))
+            log.info("资料库：%s 带字幕，收下（%d/%d）", bvid, len(out), want)
         return out
 
     def collect(self, name: str, kind: str = "game") -> list[tuple[str, str]]:
