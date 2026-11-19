@@ -286,7 +286,8 @@ class DanmakuClient(threading.Thread):
                 self.connected = False
                 time.sleep(1.0)
                 continue
-            room_id, err = _resolve_room(self.host.room_id)
+            want = self.host.current_room() if hasattr(self.host, "current_room") else self.host.room_id
+            room_id, err = _resolve_room(want)
             if not room_id:
                 self.last_error = err
                 self.host.last_error = err
@@ -415,15 +416,37 @@ class HostMode(threading.Thread):
             pass
 
     def set_room(self, room_id: int) -> None:
-        """换房间：断开旧连接，客户端下一轮按新 room_id 重连。"""
+        """换房间：断开旧连接，客户端下一轮按新 room_id 重连（并写回 config.json）。"""
         self.room_id = int(room_id or 0)
         self.cfg.setdefault("host", {})["room_id"] = self.room_id
         self.connected = False
+        try:
+            import gateway as _gw
+            _gw.save_config_section("host", self.cfg["host"])
+        except Exception:  # noqa: BLE001
+            pass
         try:
             if self.client.ws:
                 self.client.ws.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def current_room(self) -> int:
+        """当前正在看的直播间：优先取播放器 URL 里的房间号，其次用配置里的。
+
+        2026-11-19：以前只认配置里的 room_id，换个直播间就永远「没开播」→ 一条都不回。
+        """
+        try:
+            player = getattr(self.gateway, "player", None)
+            snap = player.snapshot() if player is not None else {}
+        except Exception:  # noqa: BLE001
+            snap = {}
+        for key in ("url", "referrer"):
+            m = re.search(r"live\.bilibili\.com/(?:blanc/|h5/)?(\d+)",
+                          str((snap or {}).get(key) or ""))
+            if m:
+                return int(m.group(1))
+        return int(self.room_id or 0)
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "speak": self.speak,

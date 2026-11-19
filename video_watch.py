@@ -985,6 +985,17 @@ class VideoWatcher(threading.Thread):
             self.danmaku.follow(int(room))
         except Exception:  # noqa: BLE001
             pass
+        # host（回弹幕那套）也得跟着当前直播间走，否则它还在盯配置里那个旧房间，
+        # 打开回弹幕会一直「没开播」→ 一条都不回（2026-11-19 修）。
+        try:
+            host = getattr(self.gateway, "host", None)
+            if host is not None and getattr(host, "enabled", False):
+                room_i = int(room)
+                if room_i != int(getattr(host, "room_id", 0) or 0):
+                    host.set_room(room_i)
+                    log.info("直播弹幕：跟着当前直播间切到 %s（回弹幕那条）", room_i)
+        except Exception as exc:  # noqa: BLE001
+            log.info("直播弹幕：切房间失败（不影响）：%s", exc)
         if room == self._live_room_id and time.time() - self._live_meta_at < 120:
             return
         self._live_fetching = True
