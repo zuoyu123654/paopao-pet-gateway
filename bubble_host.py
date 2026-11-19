@@ -654,6 +654,34 @@ def read_pet_scale(prev: float = 1.0) -> float:
     return prev
 
 
+_LAST_TOP: dict = {}
+_LAST_BUBBLE_RECT: dict = {}
+
+
+def _clear_old_bubble(overlay, bubble) -> None:
+    """新气泡之前，把上一块区域擦掉。
+
+    2026-11-19：透明全屏窗上的气泡缩小时，旧文字那圈像素没人擦，
+    新气泡压上去就变成两段字叠在一起（老大看到的「乱码/看不见」就是这个）。
+    """
+    old = _LAST_BUBBLE_RECT.get("r")
+    try:
+        new = bubble.geometry()
+    except Exception:  # noqa: BLE001
+        new = None
+    rect = old
+    if new is not None:
+        rect = old.united(new) if old is not None else new
+    if rect is not None and overlay is not None:
+        try:
+            overlay.update(rect)
+            overlay.repaint(rect)
+        except Exception:  # noqa: BLE001
+            pass
+    if new is not None:
+        _LAST_BUBBLE_RECT["r"] = new
+
+
 def force_topmost(widget) -> None:
     """再压一次最上层。
 
@@ -663,14 +691,32 @@ def force_topmost(widget) -> None:
     """
     try:
         import ctypes
+        from ctypes import wintypes
 
+        user32 = ctypes.windll.user32
         hwnd = int(widget.winId())
-        HWND_TOPMOST = -1
+        HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
         SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
-        ctypes.windll.user32.SetWindowPos(
-            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-        )
+        flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+        # 2026-11-19：单纯 SetWindowPos(TOPMOST) 有时候「已经是最上层」就不生效
+        # （老大的桌宠也这样：关掉置顶再打开才回来）。所以先撤掉再压回去，
+        # 等于手动做一遍「关掉置顶 → 再打开」，但不用人点。
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+        try:
+            widget.raise_()
+        except Exception:  # noqa: BLE001
+            pass
+        # 顺便把窗口矩形记下来，看不见的时候能一眼看出是不是被挪走了
+        _LAST_TOP = {"hwnd": hwnd, "ex": 0}
+        GWL_EXSTYLE = -20
+        WS_EX_TOPMOST = 0x00000008
+        try:
+            ex = user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_EXSTYLE)
+            _LAST_TOP["ex"] = int(ex)
+            _LAST_TOP["topmost"] = bool(int(ex) & WS_EX_TOPMOST)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001
         pass
 
@@ -816,12 +862,15 @@ def main() -> int:
         if _MOVE_CACHE.get("dx") or _MOVE_CACHE.get("dy"):
             log("锚点补了拖动增量：runtime 基准 +(%d,%d)" % (_MOVE_CACHE["dx"], _MOVE_CACHE["dy"]))
         # 完全照她 show_bubble 的写法：锚点用精灵包围盒，不额外挪
+        _clear_old_bubble(overlay, bubble)      # 先擦掉上一气泡的残影
         bubble.show_text(text, anchor, duration_ms=duration, pet_scale=state["pet_scale"])
         # 首弹可能拿到桌宠还没刷新的 runtime、或者字排完控件尺寸又动了一点；
         # 隔几拍按最新锚点再摆一次（force 忽略位置去重），不用等用户拖桌宠。
         def _refresh_pos() -> None:
             if not bubble.isVisible():
                 return
+            # 2026-11-19：气泡显示期间继续抢置顶（别人抢了 z-order 也能压回来）
+            force_topmost(overlay if overlay is not None else bubble)
             r = read_pet_rect()
             if r is None:
                 return
@@ -830,7 +879,7 @@ def main() -> int:
                 r = QRect(r.x(), r.y() + off, r.width(), r.height())
             bubble.reposition(r, force=True)
 
-        for delay in (120, 320, 700):
+        for delay in (120, 320, 700, 1500, 3000, 5000):
             QTimer.singleShot(delay, _refresh_pos)
         force_topmost(overlay if overlay is not None else bubble)
         state["anchor"] = (anchor.x(), anchor.y(), anchor.width(), anchor.height())
@@ -841,10 +890,12 @@ def main() -> int:
             log("锚点来源：runtime=%s 真实窗=%s 增量=%s（%s）"
                 % (src["runtime"], src["real"], src["delta"],
                    "真实窗可用" if src["real_ok"] else "真实窗不是精灵窗，不用增量"))
-        log("弹：%s（样式 %s，字号 %.2f，缩放 %.2f，%dms，锚点 (%d,%d)，气泡 (%d,%d)，%s）"
+        top = _LAST_TOP.get("topmost")
+        log("弹：%s（样式 %s，字号 %.2f，缩放 %.2f，%dms，锚点 (%d,%d)，气泡 (%d,%d)，%s%s）"
             % (text[:20], state["style"], state["scale"], state["pet_scale"], duration,
                anchor.x(), anchor.y(), bubble.x(), bubble.y(),
-               "上屏" if shown else "没上屏"))
+               "上屏" if shown else "没上屏",
+               "" if top is None else ("，置顶=%s" % ("是" if top else "否"))))
         _ack(id=cmd.get("id"), shown=shown, anchor=[anchor.x(), anchor.y()],
              size=[bubble.width(), bubble.height()],
              screen=[bubble.x(), bubble.y()])
