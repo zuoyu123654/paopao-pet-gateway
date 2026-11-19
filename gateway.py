@@ -5393,6 +5393,9 @@ class Gateway:
         except Exception as exc:  # noqa: BLE001
             log.warning("学资料触发失败（不影响这一轮）：%s", exc)
         char_q = any(w in user_text for w in CHARACTER_QUESTION_HINTS)
+        # 2026-11-19 老大定的：聊天/语音和识屏**用同一套提示词**，唯一区别是
+        # 「她要回答老大打的那句话」+「只带一张图」。所以内容类上下文统一按 watch_like 注入。
+        watch_like = scenario in ("chat", "voice", "vision")
         screen_attached = False
         # 2026-11-19：老大问「你看到了吗」，她答没看见——因为以前只有「问角色」才带图。
         # 现在聊天也带一张（当前屏幕），并按「要不要看」决定，省得每句都带图拖慢首字。
@@ -5416,7 +5419,9 @@ class Gateway:
                     for p in content)
                 if not has_img:
                     try:
-                        b64, n = self.frames.grid_jpeg(1, 1, max_width=520, quality=74)
+                        # 只带一张图，就不用压太小了（老大 2026-11-19）：
+                        # 用帧缓冲原尺寸 640 宽、质量 82，跟识屏同源
+                        b64, n = self.frames.grid_jpeg(1, 1)
                     except Exception:  # noqa: BLE001
                         b64, n = "", 0
                     if b64:
@@ -5484,7 +5489,7 @@ class Gateway:
         # B站视频模式（方案 B）：有调试端口就读「现在放到哪」，按时间轴切出前 N 秒字幕。
         # 这条比转写/OCR 都准，所以有它就不再叠转写，省 token。
         player_block = ""
-        if scenario == "vision" and getattr(self, "player", None) is not None:
+        if watch_like and getattr(self, "player", None) is not None:
             try:
                 player_block = self.player.context_block()
             except Exception as exc:  # noqa: BLE001
@@ -5493,7 +5498,7 @@ class Gateway:
                 messages.insert(0, {"role": "system", "content": player_block})
                 log.info("播放器：带上进度和字幕（%s）", self.player.status().get("position") or "?")
 
-        if scenario == "vision" and getattr(self, "video", None) is not None:
+        if watch_like and getattr(self, "video", None) is not None:
             # 通用视频模式：把刚才的对白/字幕条喂进去，她才知道片子在讲什么。
             # 已经有了「按时间轴的字幕」就不再叠一份转写（重复且费 token）。
             if not player_block or "B站字幕" not in player_block:
@@ -5504,11 +5509,17 @@ class Gateway:
 
 
 
-        if scenario == "vision":
+        if watch_like:
             # 「先看清再说话」+ 作品小抄：认得出是哪款游戏/哪部番，也接得住话。
             m = SCREEN_META_RE.search(str(user_text or ""))
             app = (m.group(1) or "").strip() if m else ""
             title = (m.group(2) or "").strip() if m else ""
+            if scenario != "vision" and not app and not title:
+                # 聊天/语音没有「识屏元数据」，直接看当前前台窗口是谁
+                try:
+                    app, title = foreground()
+                except Exception:  # noqa: BLE001
+                    app, title = "", ""
             note = title_hint(app, title)
             visual = title_visual_with_age(app, title)
             if note or visual:
@@ -5628,7 +5639,7 @@ class Gateway:
 
         # 看片/看番/看直播/网课/打游戏：这一轮只聊内容，不提时间，不念字幕（游戏不念界面文字）。
         # 放在最后 insert(0)，所以它是整段对话最前面那条 system（最有分量）。
-        if scenario == "vision" and self.cfg.get("watch_focus", True):
+        if watch_like and self.cfg.get("watch_focus", True):
             watching = self.mode.get()
             if watching in FOCUS_MODES:
                 messages.insert(0, {"role": "system", "content": build_watch_focus(watching)})
