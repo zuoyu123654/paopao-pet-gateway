@@ -29,6 +29,22 @@ TRAY_FEEDBACK = {
     "host_speak_off": "回弹幕只冒泡，不出声。",
 }
 
+# 语音模式切换时**出声**的提示（气泡那边托盘本来就会冒，这里补「听得见」的那份）
+VOICE_MODE_PHRASES: dict[str, list[str]] = {
+    "call": [
+        "语音电话开着呢，随时说。",
+        "行，电话通了，我听着呢。",
+    ],
+    "ptt": [
+        "改按键说话了，按住 Ctrl Alt V。",
+        "行，按住键说话，我等着。",
+    ],
+    "off": [
+        "语音关掉了。",
+        "好，那我先不听啦。",
+    ],
+}
+
 MODE_TIMEOUT = "回自动了"
 
 # 每个模式两句，随机挑一句（都要预合成）
@@ -90,6 +106,8 @@ def _flat() -> list[str]:
     for phrases in MODE_PHRASES.values():
         out += phrases
     out += GAME_OFF
+    for phrases in VOICE_MODE_PHRASES.values():
+        out += phrases
     return out
 
 

@@ -264,7 +264,7 @@ class TrayMenu(QObject):
             return
         self._mark_choice("voice", key)
         self._post("/voice", {"action": "set_mode", "mode": key})
-        self._feedback("voice_off" if key == "off" else key)
+        # 2026-11-19：语音模式的提示气泡和声音统一由网关出，这里不再重复冒
 
     # ------------------------------------------------------- 勾选防抖
     def _mark_toggle(self, key: str, want: bool) -> None:
@@ -308,7 +308,7 @@ class TrayMenu(QObject):
         turn_on = not (current["call"].isChecked())
         self._mark_choice("voice", "call" if turn_on else "ptt")
         self._post("/voice", {"action": "set_mode", "mode": "call" if turn_on else "ptt"})
-        self._feedback("call" if turn_on else "ptt")
+        # 同上：提示交给网关
 
     def _feedback(self, key: str) -> None:
         text = FEEDBACK.get(key)

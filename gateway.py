@@ -6394,6 +6394,7 @@ class Handler(BaseHTTPRequestHandler):
             if mode not in ("off", "ptt", "call"):
                 self._send_json({"ok": False, "error": "mode 只能是 off/ptt/call"}, 400)
                 return
+            old_mode = str(getattr(voice, "mode", "") or "")
             voice.mode = mode
             voice.enabled = mode != "off"
             if mode == "call":
@@ -6403,6 +6404,20 @@ class Handler(BaseHTTPRequestHandler):
             elif mode == "off":
                 voice.cancel.set()
             log.info("语音模式 → %s", mode)
+            # 2026-11-19：开关语音电话要听得见、看得见（句子在 phrases.ALL 里，已预合成）
+            if mode != old_mode:
+                try:
+                    import phrases as _ph
+                    text = random.choice(list(_ph.VOICE_MODE_PHRASES.get(mode) or []))
+                    if text:
+                        try:
+                            GATEWAY.bubble.show(text, 3600)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        GATEWAY.speech.say(text, tag="mode")
+                        log.info("语音模式提示：%s", text)
+                except Exception as exc:  # noqa: BLE001
+                    log.info("语音模式提示没出来（不影响切换）：%s", exc)
             self._send_json({"ok": True, "voice": voice.status()})
         else:
             self._send_json({"ok": False, "error": "action 只能是 start/stop/set_mode"}, 400)
