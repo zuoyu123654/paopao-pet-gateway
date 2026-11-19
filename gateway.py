@@ -3036,7 +3036,8 @@ class FrameBuffer(threading.Thread):
         return items[-n:] if n > 0 else items
 
     # ---- 拼图
-    def grid_jpeg(self, count: int = 0, cols: int = 2) -> tuple[str, int]:
+    def grid_jpeg(self, count: int = 0, cols: int = 2,
+                  max_width: int = 0, quality: int = 0) -> tuple[str, int]:
         """把缓冲里前 N 张按时间拼成 cols 列的网格（左上→右下），返回 (base64, 张数)。
 
         游戏模式会要更多帧（6 张、3 列），因为「精彩操作」得连着几秒看才看得出来。
@@ -3055,8 +3056,14 @@ class FrameBuffer(threading.Thread):
         canvas = Image.new("RGB", (w * cols, h * rows), (24, 24, 24))
         for i, (_ts, im) in enumerate(items):
             canvas.paste(im, ((i % cols) * w, (i // cols) * h))
+        if max_width and canvas.width > int(max_width):
+            # 缩一下再编码：视觉 token 少了，首字能快几百毫秒
+            ratio = int(max_width) / float(canvas.width)
+            canvas = canvas.resize(
+                (int(max_width), max(1, int(canvas.height * ratio))),
+                Image.LANCZOS)
         buf = io.BytesIO()
-        canvas.save(buf, "JPEG", quality=self.quality)
+        canvas.save(buf, "JPEG", quality=int(quality or self.quality))
         return base64.b64encode(buf.getvalue()).decode(), len(items)
 
     def attach_to(self, msg: dict, count: int = 0, cols: int = 2) -> int:
@@ -3466,6 +3473,8 @@ SCREEN_QUESTION_HINTS = (
     "游戏", "番", "视频", "画面", "屏幕", "直播", "在玩", "在看", "玩什么", "看什么",
     "这部", "那部", "这个是", "那个是", "我在干", "我这样",
 )
+LOOK_HINTS = ("看到", "看见", "看看", "看一下", "看一眼", "画面", "屏幕", "截图",
+             "这个", "这啥", "这是啥", "长什么样", "在干嘛", "干啥", "你看")
 CHARACTER_QUESTION_HINTS = (
     "角色", "是谁", "谁啊", "谁呀", "这个人", "那个人", "这个人物", "那个角色",
     "这角色", "那角色", "长什么样", "长得像", "认得出", "认人", "谁来的",
@@ -5385,18 +5394,29 @@ class Gateway:
             log.warning("学资料触发失败（不影响这一轮）：%s", exc)
         char_q = any(w in user_text for w in CHARACTER_QUESTION_HINTS)
         screen_attached = False
+        # 2026-11-19：老大问「你看到了吗」，她答没看见——因为以前只有「问角色」才带图。
+        # 现在聊天也带一张（当前屏幕），并按「要不要看」决定，省得每句都带图拖慢首字。
+        look_q = any(w in user_text for w in LOOK_HINTS)
+        mode_now = ""
+        try:
+            mode_now = str(self.mode.get() or "")
+        except Exception:  # noqa: BLE001
+            mode_now = ""
+        # 2026-11-19 老大定：**每句聊天都带一张截图**（跟语音/识屏一致），
+        # 不是「问到角色才带」。图缩到 520 宽、质量 74，压住首字的延迟。
+        want_shot = True
         # 文字聊天问「这个角色是谁」时，桌宠不会自动带图；不带图她只能拿最近聊过的
         # 角色硬套（所以什么都答奥黛塔）。这里补一张此刻的屏幕。
         if allow_screen and scenario == "chat" and last_user_msg is not None \
                 and self.cfg.get("chat_screen_look", True):
-            if char_q:
+            if want_shot:
                 content = last_user_msg.get("content")
                 has_img = isinstance(content, list) and any(
                     isinstance(p, dict) and p.get("type") in ("image_url", "input_image")
                     for p in content)
                 if not has_img:
                     try:
-                        b64, n = self.frames.grid_jpeg(1, 1)
+                        b64, n = self.frames.grid_jpeg(1, 1, max_width=520, quality=74)
                     except Exception:  # noqa: BLE001
                         b64, n = "", 0
                     if b64:
@@ -5410,7 +5430,9 @@ class Gateway:
                             ])
                             last_user_msg["content"] = content
                             screen_attached = True
-                            log.info("聊天：问角色，补一张当前屏幕")
+                            log.info("聊天：补一张当前屏幕（%s，%d KB）",
+                                     "问角色" if char_q else ("要看画面" if look_q else "模式带图"),
+                                     len(b64) * 3 // 4 // 1024)
         if screen_attached or (scenario == "vision" and char_q):
             # 认角色只看当前这张图：把历史对话里的上一轮名字/回答删掉，避免她照着念
             system_msgs = [m for m in messages if m.get("role") == "system"]
