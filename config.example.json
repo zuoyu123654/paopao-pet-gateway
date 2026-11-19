@@ -154,9 +154,9 @@
                    "max_chars":  60,
                    "capture_window":  true,
                    "capture_offset_px":  70,
-                   "voice_duration_ms":  12000,
-                   "voice_per_char_ms":  220,
-                   "voice_max_ms":  24000
+                   "reply_duration_ms":  5000,
+                   "reply_per_char_ms":  180,
+                   "reply_max_ms":  15000
                },
     "voice":  {
                   "enabled":  true,

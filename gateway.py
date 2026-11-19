@@ -4286,9 +4286,9 @@ class Gateway:
         if reply:
             # 和她自主识屏同一本账、同一份统计、同一个记忆信箱
             self.finish_turn(scenario, user_text, reply, int((time.time() - t0) * 1000))
-            # 气泡也补上：跟 voice_reply 同一套（3.2s 起步，最多 5s）
+            # 气泡也补上：跟 voice_reply 同一套（5 秒起步、最多 15 秒）
             try:
-                self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))
+                self.bubble.show(reply, self.reply_bubble_ms(reply))
             except Exception as exc:  # noqa: BLE001
                 log.info("自己看一眼：气泡没弹出来（%s）", exc)
         return reply
@@ -4830,16 +4830,23 @@ class Gateway:
         # 每字 220ms，最多 24 秒；可以在 config.bubble 里调
         # voice_duration_ms / voice_per_char_ms / voice_max_ms
         try:
-            bconf = self.cfg.get("bubble") or {}
-            base_ms = int(bconf.get("voice_duration_ms", 12000) or 12000)
-            per_char = float(bconf.get("voice_per_char_ms", 220) or 220)
-            cap_ms = int(bconf.get("voice_max_ms", 24000) or 24000)
-            self.bubble.show(reply, max(base_ms, min(cap_ms, int(len(reply) * per_char))))
+            self.bubble.show(reply, self.reply_bubble_ms(reply))
         except Exception as exc:  # noqa: BLE001
             log.info("语音回答：气泡没弹出来（%s）", exc)
         self.ledger.add("chat", text, reply, {"voice": True})
         self._learn_fact("voice", text, app, title)
         return reply
+
+    def reply_bubble_ms(self, text: str) -> int:
+        """回答气泡停留：5 秒起步、按字数加、最多 15 秒（2026-11-19 老大统一的）。
+
+        语音回答和识屏（自己看一眼）共用这一套，别再各自写死。
+        """
+        conf = self.cfg.get("bubble") or {}
+        base = int(conf.get("reply_duration_ms", 5000) or 5000)
+        cap = int(conf.get("reply_max_ms", 15000) or 15000)
+        per = float(conf.get("reply_per_char_ms", 180) or 180)
+        return max(base, min(cap, int(len(str(text or "")) * per)))
 
     def _persona(self) -> str:
         """优先用桌宠配置里的人设（泡泡）。"""
