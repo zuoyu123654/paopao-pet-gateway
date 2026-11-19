@@ -52,6 +52,10 @@ DEFAULT_PLAYERS = [
     "vlc", "mpv", "potplayermini64", "potplayermini", "mpc-hc64", "mpc-be64",
     "qqplayer", "qqpcmgr", "bilibili", "iqiyi", "youku", "tencentvideo",
     "qqlive", "migu", "baidunetdisk",
+    # 2026-11-19：直播软件也算「在看」。
+    # 老大全屏看直播，前台其实是 直播姬（livehime.exe），不在名单里 →
+    # 被判成「前台切走」，5 分钟后退出直播模式。OBS 同理。
+    "livehime", "obs", "obs64", "obs32", "streamlabs",
 ]
 
 
@@ -1596,6 +1600,7 @@ class VideoWatcher(threading.Thread):
             away_for = now - self.last_fore_at
             # 每 30 秒打一行，方便对「到底还有多久退」——排障用，不吵
             if away_for > 30 and int(away_for) % 30 < int(max(2.0, self.poll * 2)):
-                log.info("视频模式：前台切走 %.0f 秒（限 %.0f 秒）", away_for, self.away_grace)
+                log.info("视频模式：前台切走 %.0f 秒（限 %.0f 秒，当前前台 %s）",
+                         away_for, self.away_grace, app or "?")
             if away_for > self.away_grace:
                 self._leave("前台切走 %.0f 分钟" % (away_for / 60.0))
