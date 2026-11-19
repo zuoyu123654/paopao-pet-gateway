@@ -1113,6 +1113,35 @@ class VideoWatcher(threading.Thread):
         return ("\n【刚换了内容】标题从「%s」变成「%s」——这是换了视频/直播间/番剧或集数，"
                 "不是同一段；别把上一段剧情套到这一段。" % (old[:50], new[:50]))
 
+    def chat_block(self) -> str:
+        """聊天 / 语音用的参考：直播时**把最近弹幕也带上**。
+
+        2026-11-19：老大在会话里问「弹幕说了什么」，她说看不清——因为弹幕只注进了
+        `context_block()`（识屏那条路），聊天只拿到 `mode_context()`（主播/分区/标题）。
+        会话和语音现在走这里，补上最近 120 秒最多 8 条。
+        """
+        base = ""
+        try:
+            base = self.mode_context()
+        except Exception:  # noqa: BLE001
+            base = ""
+        try:
+            if self.gateway.mode.get() != "live":
+                return base
+        except Exception:  # noqa: BLE001
+            return base
+        try:
+            lines = self.danmaku.block(limit=8, seconds=120)
+        except Exception:  # noqa: BLE001
+            lines = ""
+        if not lines:
+            return base
+        add = ("【直播间弹幕（观众在刷的，只是氛围参考）】\n" + lines +
+               "\n这些是观众说的：可以转述弹幕在聊什么、说「弹幕在说…」，"
+               "但不要念原句、不要一条一条念、不要报观众名字。"
+               "老大问「弹幕说了什么」就按上面的转述，别说看不清、别说不识字。")
+        return (base + "\n\n" + add) if base else add
+
     def mode_context(self) -> str:
         """各模式的参考：视频/网课标题、番剧名、游戏名；通用视频要提醒标题可能不准。"""
         try:

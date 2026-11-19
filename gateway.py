@@ -5635,15 +5635,21 @@ class Gateway:
                 log.info("专注模式：注入「专心」规矩（%s）", watching)
 
         # 看片/看番/直播/网课/游戏：把标题/作品名/主播信息作为参考递给她
-        if scenario in ("chat", "vision") and self.mode.get() in FOCUS_MODES:
+        if scenario in ("chat", "voice", "vision") and self.mode.get() in FOCUS_MODES:
             try:
-                ref_block = self.video.mode_context() if getattr(self, "video", None) else ""
+                # 2026-11-19：聊天/语音要看齐识屏——直播时把最近弹幕一起带上，
+                # 不然问她「弹幕说了什么」只能看画面里的小字，答「看不清」。
+                if scenario in ("chat", "voice") and getattr(self, "video", None) is not None:
+                    ref_block = self.video.chat_block()
+                else:
+                    ref_block = self.video.mode_context() if getattr(self, "video", None) else ""
             except Exception as exc:  # noqa: BLE001
                 ref_block = ""
                 log.info("模式参考没取到（不影响回答）：%s", exc)
             if ref_block:
                 messages.insert(0, {"role": "system", "content": ref_block})
-                log.info("模式参考：带上标题/作品名")
+                log.info("模式参考：带上标题/作品名%s",
+                         "（含弹幕）" if "直播间弹幕" in ref_block else "")
 
         # 桌宠那张图是黑的、我们自己截得到 → 换成我们的；两边都黑就交给黑屏守卫整轮跳过
         if scenario == "vision":
