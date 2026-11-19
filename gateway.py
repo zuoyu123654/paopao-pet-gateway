@@ -3150,6 +3150,32 @@ class Ledger:
             return m.group(1).strip()[:40]
         return ""
 
+    def recent_conversation(self, limit: int = 6, max_minutes: float = 30.0) -> list[dict]:
+        """最近几轮**对话**（chat/voice/vision 都算），按时间从早到晚返回。
+
+        2026-11-19：`rows()` 只回识屏，语音问「我刚才问了什么」拿不到刚才说的话，
+        只能翻很久远的概括，答得又散又旧。这里补一条读全场景的。
+        """
+        cutoff = time.time() - max_minutes * 60
+        if not os.path.exists(self.path):
+            return []
+        out: list[dict] = []
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if int(row.get("epoch") or 0) < cutoff:
+                        continue
+                    if not str(row.get("assistant") or "").strip():
+                        continue
+                    out.append(row)
+        except OSError:
+            return []
+        return out[-max(1, int(limit)):]
+
     def recent_vision(self, limit: int, max_minutes: float) -> list[dict]:
         """最近的识屏：同一时间窗内、同一进程只留最新一条，避免十个浏览器标签占满。"""
         cutoff = time.time() - max_minutes * 60
@@ -4797,9 +4823,32 @@ class Gateway:
                 "「看不清/不确定」，别硬套上一个角色。"
             )
         content = parts if len(parts) > 1 else text
+        # 2026-11-19：语音原来是「一句一个独立对话」，问「我刚才问了什么」只能翻久远记忆。
+        # 把最近 6 轮真实对话按时间带上，语音就和文字聊天一样连着。
+        history_msgs: list[dict] = []
+        try:
+            ask_recent = any(w in text for w in
+                             ("刚才", "刚刚", "上句", "上一句", "前面问", "之前问",
+                              "我说了啥", "我说了什么", "问了什么", "说到哪"))
+            for row in self.ledger.recent_conversation(6, 30.0):
+                u = str(row.get("user") or "").strip()
+                a = str(row.get("assistant") or "").strip()
+                if not a:
+                    continue
+                if u.startswith("（参考元数据"):
+                    u = "（你当时看了一眼屏幕）"
+                history_msgs.append({"role": "user", "content": u[:200]})
+                history_msgs.append({"role": "assistant", "content": a[:300]})
+            if ask_recent:
+                system += ("\n【刚才的对话】下面紧跟着的几轮就是你和老大最近说的（从早到晚）。"
+                           "老大问「刚才问了什么/说到哪了」就照它们回答，先近后远；"
+                           "别拿更久远的零散印象来凑，记不清就说记不清。")
+        except Exception as exc:  # noqa: BLE001
+            log.info("语音：读最近对话失败（不影响这一句）：%s", exc)
         payload = {"model": self.cfg.get("model") or "deepseek-v4-flash",
-                   "messages": [{"role": "system", "content": system},
-                                {"role": "user", "content": content}],
+                   "messages": ([{"role": "system", "content": system}]
+                                + history_msgs
+                                + [{"role": "user", "content": content}]),
                    "max_tokens": int((self.cfg.get("voice") or {}).get("max_tokens", 800)),
                    "stream": False}
         data = self.post_once(payload)
