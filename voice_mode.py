@@ -228,6 +228,11 @@ class VoiceMode(threading.Thread):
             return False
         with self.lock:
             if self.recording.is_set():
+                if self.mode == "call":
+                    # 电话模式：别把当前这轮掐掉（掐了 _reopen_call 看到 cancel 就不续听了，
+                    # 看起来就像「电话被关掉」——老大 2026-11-19 报的）
+                    log.info("语音：电话模式在听，忽略这次触发（不取消）")
+                    return False
                 self.cancel.set()
                 self._hide_listening()
                 self._hide_bubble()
@@ -414,6 +419,14 @@ class VoiceMode(threading.Thread):
         if now - self._last_hotkey_at < 1.0:
             return
         self._last_hotkey_at = now
+        if self.mode == "call":
+            # 2026-11-19：电话模式是**常听**的，快捷键不该把电话挂掉。
+            # 已经在听就什么都不做（别 cancel），没在听就补开一个听音窗。
+            if not self.recording.is_set():
+                self.begin()
+            else:
+                log.info("语音热键：电话模式在听，忽略（不会挂断）")
+            return
         self.begin()
 
     def _probe_device(self, sd, idx: int) -> int:
