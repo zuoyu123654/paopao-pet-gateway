@@ -219,6 +219,9 @@ class VoiceMode(threading.Thread):
 
     def begin(self) -> bool:
         """开始录一句（热键 / HTTP）。已经在录就取消；语音关着就不理。"""
+        # 2026-11-19：不是电话模式就把常开麦克风关掉（别一直占着耳机）
+        if self.mode != "call":
+            self._close_mic()
         if self.mode == "off":
             # 按键说话被关掉 = 热键不干活，只提醒一句
             self._bubble(VOICE_OFF_HINT, 3200)
@@ -318,6 +321,12 @@ class VoiceMode(threading.Thread):
 
         hotkey_was_down = False
         if self.mode == "call":
+            # 2026-11-19：先把耳机麦克风拉起来（HFP 要 1~3 秒），再开听音窗，
+            # 不然第一句永远录不到（以前就是这样）
+            try:
+                self._ensure_mic(sd, self._device_index)
+            except Exception as exc:  # noqa: BLE001
+                log.info("语音：预热麦克风失败（不影响后面重试）：%s", exc)
             self.begin()          # 电话模式：进来就先开一个听音窗
         while True:
             time.sleep(0.05)
@@ -333,6 +342,8 @@ class VoiceMode(threading.Thread):
                 hotkey_was_down = down
             except Exception:  # noqa: BLE001
                 pass
+            if self.mode != "call":
+                self._close_mic()
             if not self.recording.is_set():
                 continue
             pcm = self._record_any(sd, np)
@@ -406,8 +417,14 @@ class VoiceMode(threading.Thread):
         self.begin()
 
     def _probe_device(self, sd, idx: int) -> int:
-        """开 0.35 秒看看这个设备到底出不出数据；返回收到的采样数。"""
+        """开一小会儿看看这个设备到底出不出数据；返回收到的采样数。
+
+        2026-11-19：蓝牙耳麦要 HFP 唤醒，1～3 秒才出数据；以前只等 0.35 秒，
+        永远探不到 → 判成「这台没数据」→ 戴上耳机就拉不起麦克风。
+        名字像蓝牙/耳机的等 3 秒，其它还是 0.35 秒（别人的设备别变慢）。
+        """
         got = [0]
+        wait = 3.0 if self._is_bluetooth(self._device_names.get(idx, "")) else 0.35
 
         def cb(indata, frames, time_info, status):  # noqa: ANN001
             got[0] += len(indata)
@@ -417,7 +434,7 @@ class VoiceMode(threading.Thread):
                 kw = {"samplerate": rate} if rate else {}
                 with sd.InputStream(device=idx, channels=1, dtype="float32",
                                     blocksize=480, callback=cb, **kw):
-                    time.sleep(0.35)
+                    time.sleep(wait)
                 return got[0]
             except Exception:  # noqa: BLE001
                 continue
@@ -425,6 +442,14 @@ class VoiceMode(threading.Thread):
 
     BAD_INPUT = ("立体声混音", "stereo mix", "line input", "线路输入", "what u hear")
     GOOD_INPUT = ("麦克风", "microphone", "mic", "耳机", "headset", "airpods")
+
+    BT_HINTS = ("hands-free", "handsfree", "bthhfenum", "bluetooth", "蓝牙", "airpods",
+                "headset", "耳机", "wh-1000", "buds", "freebuds", "enco")
+
+    def _is_bluetooth(self, name: str) -> bool:
+        """蓝牙耳麦要靠 HFP 唤醒，要 1～3 秒才出数据，探针时间得给够（2026-11-19）。"""
+        low = str(name or "").lower()
+        return any(k in low for k in self.BT_HINTS)
 
     def _device_order(self, sd) -> list[int]:
         """候选顺序：系统默认输入 → 名字像麦克风/耳机的 → 其它；混音/线路输入排最后。"""
@@ -490,6 +515,67 @@ class VoiceMode(threading.Thread):
         self._device_candidates = order
         return order[0], self._device_names[order[0]]
 
+    def _ensure_mic(self, sd, dev: int):
+        """电话模式：整通电话只开一路输入流（2026-11-19）。
+
+        每次开麦/关麦都会让蓝牙耳机在 A2DP 和 HFP 之间切一次，
+        切换瞬间就有 pop/滋滋，还会把她说话的音质一起拖成免提档。
+        所以电话模式进来开一次，退出才关。
+        """
+        mic = getattr(self, "_mic", None)
+        if mic and mic["dev"] == dev and mic["stream"].active:
+            return mic["stream"], mic["q"], mic["rate"]
+        self._close_mic()
+        q: "queue.Queue" = queue.Queue(maxsize=600)
+
+        def cb(indata, frames, time_info, status):  # noqa: ANN001
+            try:
+                q.put_nowait(indata.copy().reshape(-1))
+            except queue.Full:
+                pass
+
+        def _open(r):
+            return sd.InputStream(samplerate=r, channels=1, dtype="float32",
+                                  blocksize=int(r * BLOCK_SECONDS),
+                                  callback=cb, device=dev)
+
+        rate = SAMPLE_RATE
+        try:
+            stream = _open(rate)
+        except Exception:
+            info = sd.query_devices(dev)
+            rate = int(info.get("default_samplerate") or 48000)
+            stream = _open(rate)
+        stream.start()
+        self._mic = {"stream": stream, "q": q, "rate": rate, "dev": dev}
+        log.info("语音：电话模式常开麦克风 #%s（%s，%d Hz）",
+                 dev, self._device_names.get(dev, "?"), rate)
+        return stream, q, rate
+
+    def prewarm(self) -> None:
+        """电话模式的「拉起麦克风」：先把流开起来，别等第一句才唤醒耳机。"""
+        try:
+            import sounddevice as sd
+        except Exception as exc:  # noqa: BLE001
+            log.info("语音：预热麦克风失败（sounddevice 不可用）：%s", exc)
+            return
+        try:
+            self._ensure_mic(sd, self._device_index)
+        except Exception as exc:  # noqa: BLE001
+            log.info("语音：预热麦克风失败（等录音时再试）：%s", exc)
+
+    def _close_mic(self) -> None:
+        mic = getattr(self, "_mic", None)
+        self._mic = None
+        if not mic:
+            return
+        try:
+            mic["stream"].stop()
+            mic["stream"].close()
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("语音：关掉常开麦克风")
+
     def _record_once(self, sd, np, device: int | None = None):
         """录到「静音够久 / 到上限 / 被取消」为止，返回 float32 单声道。
 
@@ -517,21 +603,31 @@ class VoiceMode(threading.Thread):
         # 校准前先宽松一点（按配置的一半，最低 0.004），免得第一句话被卡掉
         thr = max(0.004, self.threshold * 0.4)
         self._last_thr = thr
+        # 电话模式复用一路常开流；按键说话还是每次开一次（不占麦）
+        use_shared = (self.mode == "call")
         try:
-            # 有些设备不吃 16k（WASAPI 会直接拒），那就按它的默认采样率录，事后再降
-            def _open(r):
-                return sd.InputStream(samplerate=r, channels=1, dtype="float32",
-                                      blocksize=int(r * BLOCK_SECONDS), callback=cb,
-                                      device=dev)
+            if use_shared:
+                stream, blocks, rate = self._ensure_mic(sd, dev)
+                try:
+                    while True:
+                        blocks.get_nowait()   # 清掉上一轮残留（否则会读到旧话）
+                except queue.Empty:
+                    pass
+            else:
+                # 有些设备不吃 16k（WASAPI 会直接拒），那就按它的默认采样率录，事后再降
+                def _open(r):
+                    return sd.InputStream(samplerate=r, channels=1, dtype="float32",
+                                          blocksize=int(r * BLOCK_SECONDS), callback=cb,
+                                          device=dev)
 
-            try:
-                stream = _open(SAMPLE_RATE)
-            except Exception:
-                info = sd.query_devices(dev)
-                rate = int(info.get("default_samplerate") or 48000)
-                stream = _open(rate)
-            if not stream.active:
-                stream.start()
+                try:
+                    stream = _open(SAMPLE_RATE)
+                except Exception:
+                    info = sd.query_devices(dev)
+                    rate = int(info.get("default_samplerate") or 48000)
+                    stream = _open(rate)
+                if not stream.active:
+                    stream.start()
             try:
                 while True:
                     if self.cancel.is_set():
@@ -542,7 +638,9 @@ class VoiceMode(threading.Thread):
                         if time.time() - started > self.max_record:
                             break
                         # 一块都没有：多半是这台设备不出数据，早点收工换下一台
-                        if not frames and time.time() - started > 0.8:
+                        grace = (5.0 if self._is_bluetooth(self._device_names.get(dev, ""))
+                                 else 1.5)
+                        if not frames and time.time() - started > grace:
                             log.info("语音：设备 #%s 一块数据都没有，收工", dev)
                             self._last_blocks = 0
                             return None
@@ -596,11 +694,12 @@ class VoiceMode(threading.Thread):
                         return None
             finally:
                 self._hide_listening()
-                try:
-                    stream.stop()
-                    stream.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                if not use_shared:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             log.warning("录音失败：%s", exc)
