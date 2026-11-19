@@ -313,5 +313,22 @@
                           "hour":  11,
                           "minute":  30
                       },
-    "anime_resolve_seconds":  10
+    "anime_resolve_seconds":  10,
+    "asr_guard":  {
+                      "enabled":  true,
+                      "check_seconds":  20,
+                      "relaunch_cooldown_seconds":  120,
+                      "port":  9881,
+                      "launch":  {
+                                     "python":  "D:\\app1\\GPT-SoVITS-v2pro-20250604-nvidia50\\GPT-SoVITS-v2pro-20250604-nvidia50\\runtime\\python.exe",
+                                     "script":  "D:\\app1\\asr\\asr_server.py",
+                                     "args":  [
+                                                  "--port",
+                                                  "9881"
+                                              ],
+                                     "workdir":  "D:\\app1\\asr",
+                                     "stdout":  "D:\\app1\\asr\\asr_stdout.log",
+                                     "stderr":  "D:\\app1\\asr\\asr_stderr.log"
+                                 }
+                  }
 }

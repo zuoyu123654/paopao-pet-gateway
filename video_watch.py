@@ -555,6 +555,10 @@ class OcrWorker(threading.Thread):
         self.proc = None
         self.error = ""
         self._last_text = ""
+        # 2026-11-19：连续 5 次读不到像样的字幕行 → 停 3 分钟再试（老大定的）
+        self.miss = 0
+        self.pause_until = 0.0
+        self.backoff_pauses = 0
 
     def _spawn(self):
         env = dict(os.environ)
@@ -646,6 +650,9 @@ class OcrWorker(threading.Thread):
             time.sleep(self.interval)
             if not self.active.is_set():
                 continue
+            # 连续读空之后歇一会儿，别每 2 秒截屏 + 跑模型白烧 CPU
+            if time.time() < self.pause_until:
+                continue
             # 没配 / 配错就安静跳过，别每 2 秒往日志里扔一次异常
             if not self.python:
                 self.error = "没配 video_watch.ocr_python（字幕 OCR 用不了）"
@@ -677,9 +684,19 @@ class OcrWorker(threading.Thread):
                     text = self._pick_line(lines)
                 else:
                     text = str(data.get("text") or "").strip()
-                if text and text != self._last_text:
-                    self._last_text = text
-                    self.on_text("ocr", text)
+                if text:
+                    self.miss = 0
+                    if text != self._last_text:
+                        self._last_text = text
+                        self.on_text("ocr", text)
+                else:
+                    self.miss += 1
+                    if self.miss >= 5:
+                        self.miss = 0
+                        self.backoff_pauses += 1
+                        self.pause_until = time.time() + 180.0
+                        log.info("字幕 OCR 连续 5 次没读到像样的字幕行，先停 3 分钟"
+                                 "（第 %d 次）", self.backoff_pauses)
                 self.error = ""
             except Exception as exc:  # noqa: BLE001
                 self.error = str(exc)
@@ -1515,13 +1532,25 @@ class VideoWatcher(threading.Thread):
             last_voice_at = max(self.last_asr_at, self.last_tab_at,
                                 self.session_since or 0)
             no_asr = now - last_voice_at
-            want_ocr = no_asr > 60 and not self.ocr_on
+            # 2026-11-19：**直播不跑 OCR**。直播画面里根本没有字幕条，
+            # 开了就是每 2 秒截一次屏白烧 CPU（老大当场问「哪来字幕」）。
+            # 只有 video / anime / course 才允许兜底。
+            mode_now = ""
+            try:
+                mode_now = str(self.gateway.mode.get() or "")
+            except Exception:  # noqa: BLE001
+                mode_now = ""
+            # 直播优先看「URL 里是不是直播间」，因为模式可能还停在 probe/auto 的
+            # video 上（那一瞬间会误开 OCR）
+            is_live = bool(self._live_room())
+            ocr_allowed = mode_now in ("video", "anime", "course") and not is_live
+            want_ocr = ocr_allowed and no_asr > 60 and not self.ocr_on
             if want_ocr:
                 with self.lock:
                     self.ocr_on = True
                 self.ocr.active.set()
                 log.info("视频模式：%.0f 秒没转写出词，开字幕 OCR 兜底", no_asr)
-            elif self.ocr_on and now - last_voice_at < 10:
+            elif self.ocr_on and (not ocr_allowed or now - last_voice_at < 10):
                 with self.lock:
                     self.ocr_on = False
                 self.ocr.active.clear()

@@ -1309,6 +1309,46 @@ GET /status  →  video.tab: {enabled, lines, ok, drop, last, err}
 （「弹幕在说这段好好笑」「有人刷说要看回放」），用她自己的话说大家在念叨什么；
 但**不要念弹幕原句**、不要一条一条念、不要报观众名字。
 
+### 4.2j-4 字幕 OCR 什么时候才该跑 + ASR 守护（2026-11-19）
+
+老大在直播时问：「现在 OCR 为啥在跑？不是在看直播吗？哪来字幕？」——查下来是
+**ASR（9881）死了**：环回和网页音轨两路转写全连不上，60 秒后触发了兜底 OCR。
+所以那次 OCR 烧 CPU，兜的是「服务挂了」，不是「这片没字幕」。
+
+三个闸（都做了）：
+
+1. **直播不跑 OCR**：`ocr_allowed = mode ∈ {video, anime, course} 且 URL 不是直播间`
+   （`self._live_room()` 判，因为模式可能还停在 probe 的 video 上，会误开）。
+   直播画面里本来就没有字幕条，开了纯烧 CPU（每 2 秒截一次屏 + 跑模型）。
+2. **连续 5 次读不到像样的字幕行 → 停 3 分钟再试**（`OcrWorker.miss` / `pause_until`）。
+   3 分钟后再试，还是读空就再停 3 分钟，一直这样；读到一行就清零。
+   日志：`字幕 OCR 连续 5 次没读到像样的字幕行，先停 3 分钟（第 N 次）`。
+3. **给 ASR 加守护**（`AsrGuard`，gateway.py）：每 20 秒探一次 9881，不在监听就按
+   `asr_guard.launch` 拉起来，冷却 120 秒防抖。日志：`ASR 没在跑，拉起来（pid …）`。
+
+实测：手工 kill 掉 9881 的进程，35 秒后端口重新在听（日志 `ASR 没在跑，拉起来（pid 22096，端口 9881）`）；
+直播模式下 `video.ocr=false`、`ocr_worker` 进程不存在。
+
+```jsonc
+"asr_guard": {
+  "enabled": true,
+  "check_seconds": 20,
+  "relaunch_cooldown_seconds": 120,
+  "port": 9881,
+  "launch": {
+    "python": "<GSV>\\runtime\\python.exe",
+    "script": "D:\\app1\\asr\\asr_server.py",
+    "args": ["--port", "9881"],
+    "workdir": "D:\\app1\\asr",
+    "stdout": "D:\\app1\\asr\\asr_stdout.log",
+    "stderr": "D:\\app1\\asr\\asr_stderr.log"
+  }
+}
+```
+
+> ASR 当初为什么会死：它是个裸 `HTTPServer`，客户端（网关重启）把连接一掐，
+> 它抛 `ConnectionResetError` 就整个进程退出。以前没有任何守护，死了没人知道。
+
 ### 4.2k 顺带修的崩溃：新识屏打断旧语音时进程直接没了（2026-11-17 01:36）
 
 **症状**：连着两轮识屏（前一轮还在念），网关进程凭空消失，`stderr` 里没有 traceback，

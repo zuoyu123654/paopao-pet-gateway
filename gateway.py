@@ -3913,6 +3913,91 @@ class TtsGuard(threading.Thread):
             time.sleep(self.check)
 
 
+class AsrGuard(threading.Thread):
+    """盯着 ASR（9881 那个转写服务）：没在监听就拉起来。
+
+    2026-11-19 的真事：ASR 是裸 HTTPServer，客户端一断（网关重启）就抛
+    ConnectionResetError 整个进程死掉；它一死，环回 + 网页音轨两路转写全失败，
+    60 秒后触发「字幕 OCR 兜底」——直播时根本不会有字幕条，白烧 CPU。
+    TTS 有 guard，它一直没有，这里补上。
+    """
+
+    def __init__(self, cfg: dict):
+        super().__init__(name="asr-guard", daemon=True)
+        conf = cfg.get("asr_guard") or {}
+        self.cfg = cfg
+        self.enabled = bool(conf.get("enabled", True))
+        self.check = max(10.0, float(conf.get("check_seconds", 20)))
+        self.cooldown = float(conf.get("relaunch_cooldown_seconds", 120))
+        self.host = "127.0.0.1"
+        self.port = int(conf.get("port") or 9881)
+        launch = conf.get("launch") or {}
+        self.python = str(launch.get("python") or "")
+        self.script = str(launch.get("script") or "")
+        self.args = [str(a) for a in (launch.get("args") or [])]
+        self.workdir = str(launch.get("workdir") or APP_DIR)
+        self.stdout = str(launch.get("stdout") or os.path.join(APP_DIR, "logs", "asr_stdout.log"))
+        self.stderr = str(launch.get("stderr") or os.path.join(APP_DIR, "logs", "asr_stderr.log"))
+        self._lock = threading.Lock()
+        self._proc = None
+        self._last_launch = 0.0
+        self.launches = 0
+        self.last_error = ""
+
+    def port_up(self) -> bool:
+        try:
+            with socket.create_connection((self.host, self.port), timeout=1.0):
+                return True
+        except OSError:
+            return False
+
+    def can_launch(self) -> bool:
+        return bool(self.python and self.script
+                    and os.path.exists(self.python) and os.path.exists(self.script))
+
+    def _launch(self) -> None:
+        with self._lock:
+            now = time.time()
+            if self._proc is not None and self._proc.poll() is None:
+                return
+            if now - self._last_launch < self.cooldown:
+                return
+            self._last_launch = now
+            if not self.can_launch():
+                self.last_error = "没配 launch 命令（asr_guard.launch）"
+                return
+            try:
+                os.makedirs(os.path.dirname(self.stdout) or ".", exist_ok=True)
+                out = open(self.stdout, "ab", buffering=0)
+                err = open(self.stderr, "ab", buffering=0)
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                self._proc = subprocess.Popen(
+                    [self.python, self.script] + self.args,
+                    cwd=self.workdir, stdout=out, stderr=err, creationflags=flags,
+                )
+                self.launches += 1
+                log.warning("ASR 没在跑，拉起来（pid %s，端口 %s）", self._proc.pid, self.port)
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = str(exc)
+                log.warning("ASR 拉不起来（%s）：%s", self.python, exc)
+
+    def status(self) -> dict:
+        return {"enabled": self.enabled, "up": self.port_up(), "launches": self.launches,
+                "error": self.last_error}
+
+    def run(self) -> None:
+        if not self.enabled:
+            return
+        time.sleep(5.0)
+        while True:
+            try:
+                if not self.port_up():
+                    self._launch()
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = str(exc)
+            time.sleep(self.check)
+
+
 class Gateway:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -3921,6 +4006,9 @@ class Gateway:
         # TTS 守护：开机时 TTS 往往还在加载，没它就绪就不开口（第一次识屏哑掉就是这么来的）
         self.tts_guard = TtsGuard(cfg)
         self.tts_guard.start()
+        # ASR 守护：它挂了没人知道，最后就变成「直播时白跑 OCR」（2026-11-19 补）
+        self.asr_guard = AsrGuard(cfg)
+        self.asr_guard.start()
         self.ledger = Ledger(cfg)
         # 老大亲口教的事（「那个人是遐蝶」）：聊天/语音/识屏共用一份，跨通道不认错
         self.facts = Facts(cfg)
