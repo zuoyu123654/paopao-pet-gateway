@@ -314,7 +314,18 @@ class DanmakuClient(threading.Thread):
                 self.host.last_error = ""
                 backoff = 3.0
                 beat = 0.0
+                # 每 30 秒对一次「现在看的是不是这间」：换直播间就重连（2026-11-19）
+                room_check = time.time()
                 while self.host.enabled:
+                    if time.time() - room_check > 30:
+                        room_check = time.time()
+                        try:
+                            now_room = int(self.host.current_room())
+                        except Exception:  # noqa: BLE001
+                            now_room = room_id
+                        if now_room and now_room != int(room_id):
+                            log.info("直播弹幕：直播间换了（%s → %s），重连", room_id, now_room)
+                            break
                     try:
                         raw = self.ws.recv()
                     except Exception as exc:  # noqa: BLE001
