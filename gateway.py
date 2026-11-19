@@ -4826,8 +4826,17 @@ class Gateway:
             and self.speech.busy()
             and str(getattr(self.speech, "active_tag", "")) == "proactive")
         self.speech.say(reply, tag="voice", queue_if_busy=queue_voice)
-        # 气泡停留：跟字数和语音差不多长，但别赖着——3.2 秒起步，最多 5 秒
-        self.bubble.show(reply, max(3200, min(5000, len(reply) * 160)))
+        # 气泡停留（2026-11-19 老大说太短）：语音对话按字数给，**12 秒起步**，
+        # 每字 220ms，最多 24 秒；可以在 config.bubble 里调
+        # voice_duration_ms / voice_per_char_ms / voice_max_ms
+        try:
+            bconf = self.cfg.get("bubble") or {}
+            base_ms = int(bconf.get("voice_duration_ms", 12000) or 12000)
+            per_char = float(bconf.get("voice_per_char_ms", 220) or 220)
+            cap_ms = int(bconf.get("voice_max_ms", 24000) or 24000)
+            self.bubble.show(reply, max(base_ms, min(cap_ms, int(len(reply) * per_char))))
+        except Exception as exc:  # noqa: BLE001
+            log.info("语音回答：气泡没弹出来（%s）", exc)
         self.ledger.add("chat", text, reply, {"voice": True})
         self._learn_fact("voice", text, app, title)
         return reply

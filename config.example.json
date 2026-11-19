@@ -153,7 +153,10 @@
                    "duration_ms":  10000,
                    "max_chars":  60,
                    "capture_window":  true,
-                   "capture_offset_px":  70
+                   "capture_offset_px":  70,
+                   "voice_duration_ms":  12000,
+                   "voice_per_char_ms":  220,
+                   "voice_max_ms":  24000
                },
     "voice":  {
                   "enabled":  true,
