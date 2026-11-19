@@ -286,8 +286,9 @@ class DanmakuClient(threading.Thread):
                 self.connected = False
                 time.sleep(1.0)
                 continue
-            want = self.host.current_room() if hasattr(self.host, "current_room") else self.host.room_id
-            room_id, err = _resolve_room(want)
+            # 回弹幕只钉「自己的直播间」：room_id=0 时按登录账号自动找（2026-11-19 回退：
+            # 之前一版跟着「正在看的直播间」走，结果跑去回别人直播间的弹幕，是错的）
+            room_id, err = _resolve_room(self.host.room_id)
             if not room_id:
                 self.last_error = err
                 self.host.last_error = err
@@ -314,18 +315,7 @@ class DanmakuClient(threading.Thread):
                 self.host.last_error = ""
                 backoff = 3.0
                 beat = 0.0
-                # 每 30 秒对一次「现在看的是不是这间」：换直播间就重连（2026-11-19）
-                room_check = time.time()
                 while self.host.enabled:
-                    if time.time() - room_check > 30:
-                        room_check = time.time()
-                        try:
-                            now_room = int(self.host.current_room())
-                        except Exception:  # noqa: BLE001
-                            now_room = room_id
-                        if now_room and now_room != int(room_id):
-                            log.info("直播弹幕：直播间换了（%s → %s），重连", room_id, now_room)
-                            break
                     try:
                         raw = self.ws.recv()
                     except Exception as exc:  # noqa: BLE001
@@ -441,23 +431,6 @@ class HostMode(threading.Thread):
                 self.client.ws.close()
         except Exception:  # noqa: BLE001
             pass
-
-    def current_room(self) -> int:
-        """当前正在看的直播间：优先取播放器 URL 里的房间号，其次用配置里的。
-
-        2026-11-19：以前只认配置里的 room_id，换个直播间就永远「没开播」→ 一条都不回。
-        """
-        try:
-            player = getattr(self.gateway, "player", None)
-            snap = player.snapshot() if player is not None else {}
-        except Exception:  # noqa: BLE001
-            snap = {}
-        for key in ("url", "referrer"):
-            m = re.search(r"live\.bilibili\.com/(?:blanc/|h5/)?(\d+)",
-                          str((snap or {}).get(key) or ""))
-            if m:
-                return int(m.group(1))
-        return int(self.room_id or 0)
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "speak": self.speak,
