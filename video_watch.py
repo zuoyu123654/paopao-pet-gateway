@@ -839,6 +839,33 @@ class VideoWatcher(threading.Thread):
             mode = ""
         return "auto" if mode == "anime" else "zh"
 
+    def _tab_title_matches(self, tab_title: str) -> bool:
+        """推音轨的这个网页标签，是不是「正在看的这一条」。
+
+        浏览器里挂着的另一个标签（后台直播、另一个视频）也会推音轨，标题对不上就不收，
+        不然两份内容会混进同一份台词里。只比前 16 个字：B站标题尾巴常带
+        「 - 哔哩哔哩」「_哔哩哔哩_bilibili」。两边都没名字可对时放行，别把正常转写挡掉。
+        """
+
+        def norm(value: str) -> str:
+            return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+        cand = norm(tab_title)
+        if not cand:
+            return True
+        known = [norm(getattr(self, "title", ""))]
+        try:
+            player = getattr(getattr(self, "gateway", None), "player", None)
+            snap = player.snapshot() if player else {}
+            known.append(norm((snap or {}).get("title")))
+        except Exception:  # noqa: BLE001
+            pass
+        known = [k for k in known if k]
+        if not known:
+            return True
+        head = cand[:16]
+        return any(head in k or k[:16] in cand for k in known)
+
     def feed_tab(self, wav: bytes, meta: dict | None = None) -> str:
         """网页音轨来了一段：排队转写。返回 queued / skip / reject。
 
@@ -860,6 +887,14 @@ class VideoWatcher(threading.Thread):
             return "skip"
         meta = meta or {}
         url = str(meta.get("url") or "")
+        tab_title = str(meta.get("title") or "").strip()
+        # 后台那个标签页（比如挂着的直播/另一个视频）也会往这儿推音轨：
+        # 标题跟「正在看的这一条」对不上就不收，免得两段内容混进同一份台词里。
+        if tab_title and not self._tab_title_matches(tab_title):
+            if time.time() - float(getattr(self, "_tab_reject_log_at", 0.0) or 0.0) > 60:
+                self._tab_reject_log_at = time.time()
+                log.info("网页音轨：这个标签页不是正在看的那一个（%s），不收", tab_title[:30])
+            return "skip"
         if url:
             self.tab_url = url
         try:
@@ -1153,6 +1188,19 @@ class VideoWatcher(threading.Thread):
             return self.live_context()
         if mode not in ("video", "anime", "course", "game"):
             return ""
+        if mode == "game":
+            # 只认前台窗口：player 快照记的是背景那个直播/视频的标题，
+            # 拿它当「在玩的游戏」会把直播间名字当成游戏名（2026-11-21 串台）。
+            name = ""
+            try:
+                fg_app, fg_title = foreground()
+                name = self._clean_ref_title(fg_title) or self._clean_ref_title(fg_app)
+            except Exception:  # noqa: BLE001
+                name = ""
+            if not name:
+                return ""
+            return ("【游戏参考】你和老大一起在玩：%s\n"
+                    "只是参考：认得出角色/玩法就自然聊，不确定的别编。" % name)
         try:
             snap = self.gateway.player.snapshot() if self.gateway.player else {}
         except Exception:  # noqa: BLE001
@@ -1164,12 +1212,6 @@ class VideoWatcher(threading.Thread):
                 title = self._clean_ref_title(title)
             except Exception:  # noqa: BLE001
                 title = ""
-        if mode == "game":
-            name = title or self._clean_ref_title(getattr(self, "app", ""))
-            if not name:
-                return ""
-            return ("【游戏参考】老大在玩：%s\n"
-                    "只是参考：认得出角色/玩法就自然聊，不确定的别编。" % name)
         if not title:
             return ""
         suffix = self._switch_note()
@@ -1198,6 +1240,15 @@ class VideoWatcher(threading.Thread):
         if not rows:
             return ""
         mode = str(mode or "").lower()
+        if mode == "game":
+            # 游戏模式只看游戏：后台挂着的直播/视频（网页音轨、环回、OCR）转写
+            # 一律不进提示词，否则她会把主播的话当成自己眼前的画面对上来——
+            # 2026-11-21 老大「后台挂直播、前台玩原神」串台就是这么来的。
+            return ""
+        if mode not in ("video", "anime", "live", "course"):
+            # auto / normal / off：这会儿没在「看片」，后台那个播放器的转写
+            # 不能套「看视频剧情参考」的模板递进去（同样会串台）。
+            return ""
         rows = rows[-self.keep:]
         tab_rows = any(src == "tab" for _ts, src, _txt in rows)
         lines = []
@@ -1379,15 +1430,27 @@ class VideoWatcher(threading.Thread):
         course_hints = ("网课", "课程", "课堂", "慕课", "mooc", "学习通", "雨课堂",
                         "腾讯会议", "钉钉", "classin", "zoom", "teams", "腾讯课堂",
                         "超星", "智慧树", "学堂在线", "中国大学", "course", "lesson")
+        # B站视频页的 document.title 一定带「_哔哩哔哩_bilibili」；消息中心/创作中心/
+        # 首页/搜索页只有「哔哩哔哩弹幕视频网」这种站名。以前一句「bilibili」就判成视频，
+        # 结果在消息中心、创作中心、首页也会被拽进 B站视频模式（2026-11-21 老大问的）。
+        bili_video_url = any(k in url for k in (
+            "/video/", "player.bilibili", "b23.tv", "/bangumi/play"))
+        video_page_mark = "_哔哩哔哩_bilibili" in hay
+        is_video_page = bili_video_url or video_page_mark
         if any(w in hay for w in course_hints) or "第" in hay and "讲" in hay:
             return "course", "auto-course"
-        if "bangumi" in url or "番剧" in hay or "新番" in hay:
+        # 番剧/直播只按 URL 认，或者标题像番剧页（不带视频页后缀）——视频标题里
+        # 出现「番剧推荐」「直播回放」这种词不该把模式拽走。
+        if "bangumi" in url or (not is_video_page and ("番剧" in hay or "新番" in hay)):
             return "anime", "auto-anime"
-        if "live.bilibili" in url or ("直播" in hay and not any(
+        if "live.bilibili" in url or (not is_video_page and "直播" in hay and not any(
                 w in hay for w in ("回放", "录播", "切片", "解说"))):
             return "live", "auto-live"
-        if "bilibili.com" in url or "bilibili" in hay or "哔哩哔哩" in hay:
+        if is_video_page:
             return "video", "auto-video-bili"
+        if "bilibili" in hay or "哔哩哔哩" in hay:
+            # 是 B站，但不是「在看片」的那一页（消息中心/创作中心/首页/搜索/个人空间）
+            return "", ""
         return "video", "auto-video"
 
     def _duration_seconds(self) -> float:
@@ -1433,8 +1496,11 @@ class VideoWatcher(threading.Thread):
             cur = self.gateway.mode.get()
             if cur == "auto":
                 target, source = self._video_target(self.app, self.title)
-                self.gateway.mode.set(target, source=source)
-                log.info("视频类模式：自动进入（%s｜%s，%s）", target, source, self.title[:40])
+                if target:
+                    self.gateway.mode.set(target, source=source)
+                    log.info("视频类模式：自动进入（%s｜%s，%s）", target, source, self.title[:40])
+                else:
+                    log.info("视频类模式：这一页不是在看片（%s），不进", self.title[:40])
         except Exception as exc:  # noqa: BLE001
             log.warning("切到 video 模式失败：%s", exc)
 
@@ -1504,6 +1570,8 @@ class VideoWatcher(threading.Thread):
                                 self.app, self.title = app, title
                                 self.session_since = now
                             target, source = self._video_target(app, title)
+                            if not target:
+                                return
                             mode.set(target, source=source)
                             self._enter()
                             purl = ""
@@ -1533,7 +1601,7 @@ class VideoWatcher(threading.Thread):
             cur = m.get()
             auto_src = str(m.source) in (
                 "auto-video", "auto-video-bili", "auto-anime", "auto-live")
-            if auto_src and cur in ("video", "anime", "live") and target != cur \
+            if auto_src and target and cur in ("video", "anime", "live") and target != cur \
                     and not self._mode_locked():
                 if self._target_title != title:
                     self._target_title = title
@@ -1600,6 +1668,12 @@ class VideoWatcher(threading.Thread):
                     self.state = "probe"
                 elif now - self.session_since >= self.enter_seconds:
                     target, _src = self._video_target(app, title)
+                    if not target:
+                        # 是 B站，但这一页不是视频/直播/番剧（消息中心、创作中心、首页、搜索）
+                        self.state = "idle"
+                        with self.lock:
+                            self.app, self.title, self.session_since = "", "", 0.0
+                        return
                     dur = self._duration_seconds()
                     if target in ("video", "anime") and dur and dur < self.min_video_seconds:
                         log.info("视频模式：%.0f 秒的短视频，不进入（至少 %.0f 秒）",

@@ -554,22 +554,26 @@ class HostMode(threading.Thread):
         bits = ["当前模式：%s" % mode]
         if app or title:
             bits.append("前台：%s | %s" % (app or "?", (title or "?")[:80]))
-        try:
-            snap = self.gateway.player.snapshot() if self.gateway.player else {}
-            if snap and snap.get("visible") is not False:
-                bits.append("正在看：%s" % (snap.get("title") or "")[:80])
-        except Exception:  # noqa: BLE001
-            pass
-        # 直播模式没有 B站字幕接口，靠环回转写；把主播刚说的带进上下文，
-        # 不然回弹幕时她只会说“听不见”。
-        try:
-            video = getattr(self.gateway, "video", None)
-            if video is not None and getattr(video, "active", False):
-                lines = [str(x[2]) for x in list(video.transcript)[-6:] if str(x[2]).strip()]
-                if lines:
-                    bits.append("主播刚说：\n" + "\n".join(x[:80] for x in lines))
-        except Exception:  # noqa: BLE001
-            pass
+        # 只有真的在「看片/看直播/看番/上课」时，才把「正在看 / 主播刚说」带进来；
+        # 游戏模式、auto/normal/off 下这些是背景内容，带进来就串台
+        # （2026-11-21 老大「后台挂直播、前台玩游戏」）。
+        if str(mode).lower() in ("live", "video", "anime", "course"):
+            try:
+                snap = self.gateway.player.snapshot() if self.gateway.player else {}
+                if snap and snap.get("visible") is not False:
+                    bits.append("正在看：%s" % (snap.get("title") or "")[:80])
+            except Exception:  # noqa: BLE001
+                pass
+            # 直播模式没有 B站字幕接口，靠环回转写；把主播刚说的带进上下文，
+            # 不然回弹幕时她只会说“听不见”。
+            try:
+                video = getattr(self.gateway, "video", None)
+                if video is not None and getattr(video, "active", False):
+                    lines = [str(x[2]) for x in list(video.transcript)[-6:] if str(x[2]).strip()]
+                    if lines:
+                        bits.append("主播刚说：\n" + "\n".join(x[:80] for x in lines))
+            except Exception:  # noqa: BLE001
+                pass
         recent = []
         for it in list(self.q.queue)[-8:]:
             recent.append("%s：%s" % (it["user"], it["text"][:50]))

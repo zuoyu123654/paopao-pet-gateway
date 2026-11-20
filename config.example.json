@@ -1,337 +1,337 @@
 {
-    "listen_host":  "127.0.0.1",
-    "listen_port":  9888,
-    "upstream_base_url":  "https://api.deepseek.com",
-    "upstream_chat_path":  "/v1/chat/completions",
-    "api_key":  "",
-    "api_key_credential_target":  "",
-    "model":  "deepseek-chat",
-    "upstream_timeout":  300,
-    "vision":  {
-                   "enabled":  false,
-                   "active":  "qwen",
-                   "fallback_to_chat":  true,
-                   "profiles":  {
-                                    "qwen":  {
-                                                 "base_url":  "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                                                 "chat_path":  "/chat/completions",
-                                                 "model":  "qwen3-vl-plus",
-                                                 "api_key":  "",
-                                                 "timeout":  120,
-                                                 "extra":  {
-                                                               "enable_thinking":  false
-                                                           }
-                                             }
-                                }
-               },
-    "host":  {
-                 "enabled":  false,
-                 "speak":  false,
-                 "room_id":  0,
-                 "reply_interval_seconds":  25,
-                 "message_ttl_seconds":  20,
-                 "max_queue":  30,
-                 "bubble_scale":  2.0,
-                 "name_max_chars":  6,
-                 "bubble_duration_seconds":  10
-             },
-    "tts":  {
-                "enabled":  true,
-                "backend":  "gpt-sovits",
-                "api":  "http://127.0.0.1:9882",
-                "api_stream":  "http://127.0.0.1:9882",
-                "api_file":  "",
-                "ref_audio_path":  "C:\\path\\to\\your\\ref.wav",
-                "prompt_text":  "参考音频里说的那句原话",
-                "prompt_lang":  "zh",
-                "text_lang":  "zh",
-                "max_sentences":  40,
-                "max_chars_per_sentence":  32,
-                "first_min_chars":  10,
-                "first_max_chars":  22,
-                "second_min_chars":  5,
-                "early_sentences":  3,
-                "early_min_chars":  8,
-                "timeout":  180,
-                "volume":  1.0,
-                "synth_workers":  3,
-                "pre_cue":  [
-
-                            ],
-                "pre_cue_min_interval":  20,
-                "retention_days":  3,
-                "speed":  1.2,
-                "speed_first":  1.0,
-                "cache_pre_cue":  false,
-                "streaming_first":  true,
-                "streaming_mode":  3,
-                "stream_min_chunk_length":  32,
-                "stream_min_chunk_length_first":  8,
-                "stream_overlap_length":  2,
-                "stream_merge_chars":  40,
-                "stream_gpu_wait":  25,
-                "strip_stream_punct_max_chars":  24,
-                "prebuffer_seconds":  0.5,
-                "prebuffer_first_seconds":  0.8,
-                "stream_tail_trim_seconds":  0.2,
-                "exclusive_gpu":  false,
-                "strip_stream_punct":  true,
-                "stream_split_method":  "cut0",
-                "max_internal_pause":  0,
-                "output_device":  "",
-                "synth_parallel":  2,
-                "tight_sentence_edges":  true,
-                "sentence_head_pad":  0.03,
-                "sentence_tail_pad":  0.08,
-                "reading_fixes":  {
-                                      "弹幕":  "蛋幕",
-                                      "茜特菈莉":  "希特菈莉"
-                                  },
-                "guard":  {
-                              "enabled":  true,
-                              "check_seconds":  15,
-                              "wait_seconds":  120,
-                              "relaunch_cooldown_seconds":  90,
-                              "launch":  {
-                                             "python":  "",
-                                             "script":  "",
-                                             "args":  [
-
-                                                      ],
-                                             "workdir":  ""
-                                         }
-                          },
-                "second_max_chars":  22,
-                "stream_second_sentence":  false
-            },
-    "speak_chat":  true,
-    "speak_vision":  true,
-    "inject_vision_ledger":  true,
-    "chat_screen_look":  true,
-    "mouse_look":  {
-                       "enabled":  true,
-                       "cooldown_seconds":  3
-                   },
-    "inject_vision_context":  true,
-    "wipe_owner_word":  true,
-    "memory_inbox_url":  "",
-    "memory_inbox_scenarios":  [
-                                   "vision"
-                               ],
-    "dsh":  {
-                "enabled":  true,
-                "event_dir":  "",
-                "speak_tools":  false,
-                "tool_min_interval":  25,
-                "poll_seconds":  1.5
-            },
-    "ledger_path":  "ledger.jsonl",
-    "log_path":  "logs/gateway.log",
-    "inject_recent_minutes":  45,
-    "inject_recent_entries":  3,
-    "ledger_digest":  {
-                          "enabled":  true,
-                          "interval_hours":  3,
-                          "min_entries":  8,
-                          "max_entries":  300,
-                          "max_chars":  240,
-                          "retention_hours":  24
-                      },
-    "frame_buffer":  {
-                         "enabled":  true,
-                         "interval_seconds":  1.5,
-                         "keep":  8,
-                         "frame_width":  640,
-                         "jpeg_quality":  82,
-                         "grid_frames":  4,
-                         "frame_idle_interval":  4.0,
-                         "attach_to_vision":  true,
-                         "black_ratio":  0.92
-                     },
-    "bubble":  {
-                   "enabled":  true,
-                   "duration_ms":  10000,
-                   "max_chars":  60,
-                   "capture_window":  true,
-                   "capture_offset_px":  70,
-                   "reply_duration_ms":  5000,
-                   "reply_per_char_ms":  180,
-                   "reply_max_ms":  15000
-               },
-    "voice":  {
-                  "enabled":  true,
-                  "mode":  "ptt",
-                  "hotkey":  "ctrl+alt+v",
-                  "vad_silence":  1.2,
-                  "max_record":  30,
-                  "min_record":  0.3,
-                  "energy_threshold":  0.012,
-                  "no_speech_timeout":  3.0,
-                  "call_window":  8,
-                  "barge_in":  false,
-                  "asr_url":  "http://127.0.0.1:9881/v1/audio/transcriptions",
-                  "screenshot":  "always",
-                  "call_min_voiced":  0.5,
-                  "onset_voiced":  0.35,
-                  "max_tokens":  800,
-                  "ref_context_seconds":  30
-              },
-    "player_watch":  {
-                         "enabled":  true,
-                         "cdp_port":  9222,
-                         "poll_seconds":  1.0,
-                         "fresh_seconds":  8,
-                         "subtitle_window_seconds":  90,
-                         "subtitle_cache_hours":  24,
-                         "bili_cli":  "bili"
-                     },
-    "video_watch":  {
-                        "enabled":  true,
-                        "poll_seconds":  2.0,
-                        "enter_min_seconds":  90,
-                        "audio_threshold":  0.004,
-                        "audio_active_seconds":  30,
-                        "input_idle_seconds":  60,
-                        "input_events_window":  180,
-                        "input_events_max":  15,
-                        "away_grace_seconds":  300,
-                        "paused_grace_seconds":  600,
-                        "paused_away_grace_seconds":  300,
-                        "asr_chunk_seconds":  8,
-                        "asr_url":  "http://127.0.0.1:9881/v1/audio/transcriptions",
-                        "asr_min_cjk_ratio":  0.25,
-                        "ocr_interval_seconds":  2.0,
-                        "ocr_python":  "C:\\path\\to\\ocrvenv\\Scripts\\python.exe",
-                        "ocr_bottom_ratio":  0.34,
-                        "transcript_keep":  12,
-                        "loopback_device":  "",
-                        "subtitle_ocr":  false,
-                        "switch_seconds":  20,
-                        "game_takeover_seconds":  90,
-                        "min_video_seconds":  120,
-                        "tab_audio_enabled":  true,
-                        "asr_language":  ""
-                    },
-    "soften_self_recognition":  true,
-    "self_recognition":  {
-                             "cooldown_minutes":  90,
-                             "lookback_minutes":  90
-                         },
-    "vision_context_minutes":  180,
-    "vision_context_entries":  6,
-    "vision_context_budget_chars":  600,
-    "vision_context_item_chars":  90,
-    "vision_markers":  [
-                           "截图",
-                           "识屏",
-                           "屏幕",
-                           "框选",
-                           "画面",
-                           "image_url"
-                       ],
-    "divination_voice":  {
-                             "enabled":  true,
-                             "max_line_age_seconds":  90,
-                             "dedupe_minutes":  60
-                         },
-    "look_guard":  {
-                       "enabled":  true,
-                       "idle_minutes":  5,
-                       "check_seconds":  30,
-                       "helper_port":  9893
-                   },
-    "vision_fresh_minutes":  10,
-    "vision_mention_minutes":  30,
-    "mute_vision_when_off":  false,
-    "watch_focus":  true,
-    "see_howto":  true,
-    "title_learner":  {
-                          "enabled":  true,
-                          "interval_seconds":  60,
-                          "min_checks":  2,
-                          "cooldown_minutes":  360
-                      },
-    "mode_lock_minutes":  5,
-    "game_watch":  {
-                       "enabled":  true,
-                       "poll_seconds":  5,
-                       "enter_seconds":  90,
-                       "away_grace_seconds":  180,
-                       "game_apps":  [
-
-                                     ],
-                       "switch_seconds":  20
-                   },
-    "skip_black_frames":  true,
-    "vision_black_ratio":  0.92,
-    "vision_black_frames":  2,
-    "fix_black_request_image":  true,
-    "mode_feedback":  true,
-    "lore":  {
-                 "enabled":  true,
-                 "dir":  "lore",
-                 "auto_learn":  true,
-                 "prebuild":  true,
-                 "poll_seconds":  45,
-                 "cooldown_minutes":  720,
-                 "refresh_days":  30,
-                 "stale_days":  60,
-                 "max_chunks":  2,
-                 "budget_chars":  320,
-                 "chunk_chars":  380,
-                 "model":  "deepseek-chat",
-                 "summarize_max_tokens":  2400,
-                 "moegirl":  {
-                                 "enabled":  true,
-                                 "max_chars":  12000
-                             },
-                 "bili":  {
-                              "enabled":  true,
-                              "videos":  3,
-                              "max_chars":  2400,
-                              "timeout":  150
-                          },
-                 "progress":  {
-                                  "enabled":  true,
-                                  "minutes":  30,
-                                  "min_rows":  2,
-                                  "window_minutes":  40,
-                                  "max_age_days":  7,
-                                  "max_chars":  120
-                              }
-             },
-    "facts":  {
-                  "enabled":  true,
-                  "path":  "facts.jsonl",
-                  "max_age_hours":  168,
-                  "max_items":  300,
-                  "inject_items":  3
-              },
-    "game_versions":  {
-                          "enabled":  true,
-                          "check_minutes":  360
-                      },
-    "bili_previews":  {
-                          "enabled":  true,
-                          "hour":  11,
-                          "minute":  30
-                      },
-    "anime_resolve_seconds":  10,
-    "asr_guard":  {
-                      "enabled":  true,
-                      "check_seconds":  20,
-                      "relaunch_cooldown_seconds":  120,
-                      "port":  9881,
-                      "launch":  {
-                                     "python":  "D:\\app1\\GPT-SoVITS-v2pro-20250604-nvidia50\\GPT-SoVITS-v2pro-20250604-nvidia50\\runtime\\python.exe",
-                                     "script":  "D:\\app1\\asr\\asr_server.py",
-                                     "args":  [
-                                                  "--port",
-                                                  "9881"
-                                              ],
-                                     "workdir":  "D:\\app1\\asr",
-                                     "stdout":  "D:\\app1\\asr\\asr_stdout.log",
-                                     "stderr":  "D:\\app1\\asr\\asr_stderr.log"
-                                 }
-                  }
+  "listen_host": "127.0.0.1",
+  "listen_port": 9888,
+  "upstream_base_url": "https://api.deepseek.com",
+  "upstream_chat_path": "/v1/chat/completions",
+  "api_key": "",
+  "api_key_credential_target": "",
+  "model": "deepseek-chat",
+  "upstream_timeout": 300,
+  "vision": {
+    "enabled": false,
+    "active": "qwen",
+    "fallback_to_chat": true,
+    "profiles": {
+      "qwen": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "chat_path": "/chat/completions",
+        "model": "qwen3-vl-plus",
+        "api_key": "",
+        "timeout": 120,
+        "extra": {
+          "enable_thinking": false
+        }
+      }
+    }
+  },
+  "host": {
+    "enabled": false,
+    "speak": false,
+    "room_id": 0,
+    "reply_interval_seconds": 25,
+    "message_ttl_seconds": 20,
+    "max_queue": 30,
+    "bubble_scale": 2.0,
+    "name_max_chars": 6,
+    "bubble_duration_seconds": 10,
+    "reply_max_chars": 60
+  },
+  "tts": {
+    "enabled": true,
+    "backend": "gpt-sovits",
+    "api": "http://127.0.0.1:9882",
+    "api_stream": "http://127.0.0.1:9882",
+    "api_file": "",
+    "ref_audio_path": "C:\\path\\to\\your\\ref.wav",
+    "prompt_text": "参考音频里说的那句原话",
+    "prompt_lang": "zh",
+    "text_lang": "zh",
+    "max_sentences": 40,
+    "max_chars_per_sentence": 32,
+    "first_min_chars": 10,
+    "first_max_chars": 22,
+    "second_min_chars": 5,
+    "early_sentences": 3,
+    "early_min_chars": 8,
+    "timeout": 180,
+    "volume": 1.0,
+    "synth_workers": 3,
+    "pre_cue": [],
+    "pre_cue_min_interval": 20,
+    "retention_days": 3,
+    "speed": 1.2,
+    "speed_first": 1.0,
+    "cache_pre_cue": false,
+    "streaming_first": true,
+    "streaming_mode": 3,
+    "stream_min_chunk_length": 32,
+    "stream_min_chunk_length_first": 8,
+    "stream_overlap_length": 2,
+    "stream_merge_chars": 40,
+    "stream_gpu_wait": 25,
+    "strip_stream_punct_max_chars": 24,
+    "prebuffer_seconds": 0.5,
+    "prebuffer_first_seconds": 0.8,
+    "stream_tail_trim_seconds": 0.2,
+    "exclusive_gpu": false,
+    "strip_stream_punct": true,
+    "stream_split_method": "cut0",
+    "max_internal_pause": 0,
+    "output_device": "",
+    "synth_parallel": 2,
+    "tight_sentence_edges": true,
+    "sentence_head_pad": 0.03,
+    "sentence_tail_pad": 0.08,
+    "reading_fixes": {
+      "弹幕": "蛋幕",
+      "茜特菈莉": "希特菈莉"
+    },
+    "guard": {
+      "enabled": true,
+      "check_seconds": 15,
+      "wait_seconds": 120,
+      "relaunch_cooldown_seconds": 90,
+      "launch": {
+        "python": "",
+        "script": "",
+        "args": [],
+        "workdir": ""
+      }
+    },
+    "second_max_chars": 22,
+    "stream_second_sentence": false
+  },
+  "speak_chat": true,
+  "speak_vision": true,
+  "inject_vision_ledger": true,
+  "chat_screen_look": true,
+  "mouse_look": {
+    "enabled": true,
+    "cooldown_seconds": 3
+  },
+  "inject_vision_context": true,
+  "wipe_owner_word": true,
+  "memory_inbox_url": "",
+  "memory_inbox_scenarios": [
+    "vision"
+  ],
+  "dsh": {
+    "enabled": true,
+    "event_dir": "",
+    "speak_tools": false,
+    "tool_min_interval": 25,
+    "poll_seconds": 1.5
+  },
+  "ledger_path": "ledger.jsonl",
+  "log_path": "logs/gateway.log",
+  "inject_recent_minutes": 45,
+  "inject_recent_entries": 3,
+  "ledger_digest": {
+    "enabled": true,
+    "interval_hours": 3,
+    "min_entries": 8,
+    "max_entries": 300,
+    "max_chars": 240,
+    "retention_hours": 24
+  },
+  "frame_buffer": {
+    "enabled": true,
+    "interval_seconds": 1.5,
+    "keep": 8,
+    "frame_width": 640,
+    "jpeg_quality": 82,
+    "grid_frames": 4,
+    "frame_idle_interval": 4.0,
+    "attach_to_vision": true,
+    "black_ratio": 0.92,
+    "shot_width": 1280,
+    "shot_quality": 90,
+    "hi_res_width": 1600,
+    "hi_res_quality": 90
+  },
+  "bubble": {
+    "enabled": true,
+    "duration_ms": 10000,
+    "max_chars": 60,
+    "capture_window": true,
+    "capture_offset_px": 70,
+    "reply_duration_ms": 5000,
+    "reply_per_char_ms": 180,
+    "reply_max_ms": 15000
+  },
+  "voice": {
+    "enabled": true,
+    "mode": "ptt",
+    "hotkey": "ctrl+alt+v",
+    "vad_silence": 1.2,
+    "max_record": 30,
+    "min_record": 0.3,
+    "energy_threshold": 0.012,
+    "no_speech_timeout": 3.0,
+    "call_window": 8,
+    "barge_in": false,
+    "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions",
+    "screenshot": "always",
+    "call_min_voiced": 0.5,
+    "onset_voiced": 0.35,
+    "max_tokens": 800,
+    "ref_context_seconds": 30
+  },
+  "player_watch": {
+    "enabled": true,
+    "cdp_port": 9222,
+    "poll_seconds": 1.0,
+    "fresh_seconds": 8,
+    "subtitle_window_seconds": 90,
+    "subtitle_cache_hours": 24,
+    "bili_cli": "bili"
+  },
+  "video_watch": {
+    "enabled": true,
+    "poll_seconds": 2.0,
+    "enter_min_seconds": 90,
+    "audio_threshold": 0.004,
+    "audio_active_seconds": 30,
+    "input_idle_seconds": 60,
+    "input_events_window": 180,
+    "input_events_max": 15,
+    "away_grace_seconds": 300,
+    "paused_grace_seconds": 600,
+    "paused_away_grace_seconds": 300,
+    "asr_chunk_seconds": 8,
+    "asr_url": "http://127.0.0.1:9881/v1/audio/transcriptions",
+    "asr_min_cjk_ratio": 0.25,
+    "ocr_interval_seconds": 2.0,
+    "ocr_python": "C:\\path\\to\\ocrvenv\\Scripts\\python.exe",
+    "ocr_bottom_ratio": 0.34,
+    "transcript_keep": 12,
+    "loopback_device": "",
+    "subtitle_ocr": false,
+    "switch_seconds": 20,
+    "game_takeover_seconds": 90,
+    "min_video_seconds": 120,
+    "tab_audio_enabled": true,
+    "asr_language": ""
+  },
+  "soften_self_recognition": true,
+  "self_recognition": {
+    "cooldown_minutes": 90,
+    "lookback_minutes": 90
+  },
+  "vision_context_minutes": 180,
+  "vision_context_entries": 6,
+  "vision_context_budget_chars": 600,
+  "vision_context_item_chars": 90,
+  "vision_markers": [
+    "截图",
+    "识屏",
+    "屏幕",
+    "框选",
+    "画面",
+    "image_url"
+  ],
+  "divination_voice": {
+    "enabled": true,
+    "max_line_age_seconds": 90,
+    "dedupe_minutes": 60
+  },
+  "look_guard": {
+    "enabled": true,
+    "idle_minutes": 5,
+    "check_seconds": 30,
+    "helper_port": 9893
+  },
+  "vision_fresh_minutes": 10,
+  "vision_mention_minutes": 30,
+  "mute_vision_when_off": false,
+  "watch_focus": true,
+  "see_howto": true,
+  "title_learner": {
+    "enabled": true,
+    "interval_seconds": 60,
+    "min_checks": 2,
+    "cooldown_minutes": 360
+  },
+  "mode_lock_minutes": 5,
+  "game_watch": {
+    "enabled": true,
+    "poll_seconds": 5,
+    "enter_seconds": 90,
+    "away_grace_seconds": 180,
+    "game_apps": [],
+    "switch_seconds": 20
+  },
+  "skip_black_frames": true,
+  "vision_black_ratio": 0.92,
+  "vision_black_frames": 2,
+  "fix_black_request_image": true,
+  "mode_feedback": true,
+  "lore": {
+    "enabled": true,
+    "dir": "lore",
+    "auto_learn": true,
+    "prebuild": true,
+    "poll_seconds": 45,
+    "cooldown_minutes": 720,
+    "refresh_days": 30,
+    "stale_days": 60,
+    "max_chunks": 2,
+    "budget_chars": 320,
+    "chunk_chars": 380,
+    "model": "deepseek-chat",
+    "summarize_max_tokens": 2400,
+    "moegirl": {
+      "enabled": true,
+      "max_chars": 12000
+    },
+    "bili": {
+      "enabled": true,
+      "videos": 3,
+      "max_chars": 2400,
+      "timeout": 150
+    },
+    "progress": {
+      "enabled": true,
+      "minutes": 30,
+      "min_rows": 2,
+      "window_minutes": 40,
+      "max_age_days": 7,
+      "max_chars": 120
+    }
+  },
+  "facts": {
+    "enabled": true,
+    "path": "facts.jsonl",
+    "max_age_hours": 168,
+    "max_items": 300,
+    "inject_items": 3
+  },
+  "game_versions": {
+    "enabled": true,
+    "check_minutes": 360
+  },
+  "bili_previews": {
+    "enabled": true,
+    "hour": 11,
+    "minute": 30
+  },
+  "anime_resolve_seconds": 10,
+  "asr_guard": {
+    "enabled": true,
+    "check_seconds": 20,
+    "relaunch_cooldown_seconds": 120,
+    "port": 9881,
+    "launch": {
+      "python": "D:\\app1\\GPT-SoVITS-v2pro-20250604-nvidia50\\GPT-SoVITS-v2pro-20250604-nvidia50\\runtime\\python.exe",
+      "script": "D:\\app1\\asr\\asr_server.py",
+      "args": [
+        "--port",
+        "9881"
+      ],
+      "workdir": "D:\\app1\\asr",
+      "stdout": "D:\\app1\\asr\\asr_stdout.log",
+      "stderr": "D:\\app1\\asr\\asr_stderr.log"
+    }
+  },
+  "chat_thinking": "low"
 }
