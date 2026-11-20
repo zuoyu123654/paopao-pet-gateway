@@ -4516,10 +4516,10 @@ class Gateway:
                     if not cur and self.mode.get() != "off":
                         self.mode.set("off", source="pet-proactive")
                         log.info("主动识屏是关的 → 模式切换为关闭")
-                    # 反过来：关机时她是开着的，就回自动（不管 off 是谁留下的）
+                    # 反过来不再自动回 auto（2026-11-21）：老大手动点「关闭」就是要她别看了，
+                    # 重启网关不该自己拨回来。要恢复就手动切模式，或者打开她那边「主动识屏」。
                     elif cur and self.mode.get() == "off":
-                        self.mode.set("auto", source="pet-proactive")
-                        log.info("主动识屏是开的 → 模式回自动")
+                        log.info("主动识屏是开的，但模式是关闭 → 尊重「关闭」，不回 auto")
                     continue
                 if cur == last:
                     continue
@@ -5204,6 +5204,13 @@ class Gateway:
                     frames.resume()
         except Exception as exc:  # noqa: BLE001
             log.info("同步帧缓冲没成（不影响模式）：%s", exc)
+        # 关闭模式：顺手把她那边的「主动识屏」也关掉——不然她每两分钟还在自己截屏、
+        # 发到网关来（2026-11-21 老大问的「关闭模式她还在识屏」就是这个）。
+        if mode == "off":
+            try:
+                self.set_proactive(False)
+            except Exception as exc:  # noqa: BLE001
+                log.info("同步「主动识屏」没成（不影响模式）：%s", exc)
         self._announce_mode(mode, source)
 
     def _announce_mode(self, mode: str, source: str) -> None:
@@ -6997,6 +7004,14 @@ class Handler(BaseHTTPRequestHandler):
         log.info("请求 scenario=%s stream=%s user=%r", scenario, client_stream, user_text[:60])
         proactive = (scenario == "vision"
                      and str(user_text).startswith("（参考元数据"))
+        # 关闭模式（mode=off）：她自己的「主动识屏」一律不接——不回、不冒泡、不占账本。
+        # 2026-11-21 老大问的「关闭模式她还是会识屏」：桌宠自己的主动识屏还会每两分钟发
+        # 一次（`（参考元数据…）` 开头），网关以前只把「出声」mute 掉，气泡和账本照旧。
+        # 手动「看看屏幕」是另一种文案（`看看这张截图…`），proactive=False，照常能用。
+        if proactive and GATEWAY.mode.get() == "off":
+            log.info("识屏：关闭模式，这一轮直接跳过（不回、不念、不记账）")
+            self._send_blank_completion(client_stream, model)
+            return
         # 黑屏守卫：独占全屏游戏 / 锁屏 / DRM 画面截出来一片黑，说出去就是「我什么也看不见」。
         # 连续 2 张都黑就整轮跳过（不叫模型、不说话、不冒泡），也不占账本。
         if scenario == "vision" and GATEWAY.vision_is_black():
