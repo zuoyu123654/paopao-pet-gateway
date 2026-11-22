@@ -36,7 +36,8 @@
     "bubble_duration_seconds": 10,
     "reply_max_chars": 60,
     "welcome": true,
-    "welcome_min_gap": 45
+    "welcome_min_gap": 20,
+    "welcome_max_age": 8
   },
   "tts": {
     "enabled": true,

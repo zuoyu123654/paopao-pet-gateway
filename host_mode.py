@@ -493,8 +493,12 @@ class HostMode(threading.Thread):
         # 欢迎进场（2026-11-22 老大要的）：有人进直播间就欢迎一句——
         # 可以是纯欢迎、顺手问一句，或者介绍一下自己/我们正在干嘛。
         self.welcome = bool(conf.get("welcome", True))
-        self.welcome_gap = max(15.0, float(conf.get("welcome_min_gap", 45)))
-        self.welcome_style = ""          # 空 = 三种调子轮换
+        self.welcome_gap = max(8.0, float(conf.get("welcome_min_gap", 20)))
+        # 只迎「刚进门」的人：进来超过这么多秒就不迎了。
+        # 2026-11-22 老大说「没人进还一直在欢迎」——以前是攒着、45 秒迎一个，
+        # 迎的是半分钟前进来的人，看着就像凭空在欢迎。现在只迎 8 秒内的。
+        self.welcome_max_age = max(3.0, float(conf.get("welcome_max_age", 8)))
+        self.welcome_style = ""          # 空 = 让她自己决定怎么说
         self.last_welcome_at = 0.0
         self.welcome_queue: "queue.Queue[dict]" = queue.Queue(maxsize=20)
         self._welcomed: dict[str, float] = {}
@@ -631,7 +635,7 @@ class HostMode(threading.Thread):
                 pass
 
     # ---------------------------------------------------------- 欢迎进场
-    def note_enter(self, user: str, uid: str) -> None:
+    def note_enter(self, user: str, uid: str, source: str = "") -> None:
         """有人进直播间：排一条欢迎（限频，同一个人 15 分钟内只迎一次）。"""
         if not self.enabled or not self.welcome:
             return
@@ -654,8 +658,8 @@ class HostMode(threading.Thread):
             self.welcome_queue.put_nowait({"ts": now, "user": name, "uid": uid})
         except queue.Full:
             return
-        log.info("进直播间：%s（排一条欢迎，前面还有 %d 个）",
-                 name[:20], max(0, self.welcome_queue.qsize() - 1))
+        log.info("进直播间：%s（%s，排一条欢迎，前面还有 %d 个）",
+                 name[:20], source or "自己直播间", max(0, self.welcome_queue.qsize() - 1))
 
     def _welcome_due(self) -> bool:
         if not self.welcome or self.welcome_queue.empty():

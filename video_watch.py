@@ -432,15 +432,27 @@ class LiveDanmaku:
         self.client.start()
 
     def note_enter(self, user: str, uid: str) -> None:
-        """旁听这条连接也会收到进场事件：转给 host，让「欢迎进场」照常工作。
+        """旁听这条连接也会收到进场事件：**只转发自己直播间的**。
 
-        2026-11-22：看直播模式自己连的那条 WS（LiveDanmaku）以前没有这个方法，
-        DanmakuClient 一收到进房事件就 AttributeError、整条连接断掉重连——
-        表现就是「有人进来她没反应」。转发给 gateway.host 后两条连接都能用。
+        2026-11-22 老大说「欢迎一些不知道哪来的人」——根因就是这里：
+        看直播模式连的是**别人**的直播间，进场事件被转给 host 后，她去迎的是
+        老大正在看的那位主播的观众。现在只有「看的就是老大自己的直播间」才转发。
         """
         host = getattr(getattr(self.watch, "gateway", None), "host", None)
-        if host is not None and hasattr(host, "note_enter"):
-            host.note_enter(user, uid)
+        if host is None or not hasattr(host, "note_enter"):
+            return
+        try:
+            mine = int(getattr(host, "room_id", 0) or 0)
+        except (TypeError, ValueError):
+            mine = 0
+        if not mine or int(getattr(self, "room_id", 0) or 0) != mine:
+            # 看的是别人的直播间：这些人不是老大的观众，不迎
+            if not getattr(self, "_enter_skip_logged", False):
+                self._enter_skip_logged = True
+                log.info("看直播：这个房间不是老大自己的直播间（%s），进场事件不转给欢迎",
+                         getattr(self, "room_id", 0))
+            return
+        host.note_enter(user, uid)
 
     def _host_shared(self, room_id: int):
         """host（回弹幕）正连着同一个房间吗？连着就别再开第二条 WS。"""
