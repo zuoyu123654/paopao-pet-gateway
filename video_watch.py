@@ -431,6 +431,17 @@ class LiveDanmaku:
         self.client = DanmakuClient(self, on_message=self._on_message)
         self.client.start()
 
+    def note_enter(self, user: str, uid: str) -> None:
+        """旁听这条连接也会收到进场事件：转给 host，让「欢迎进场」照常工作。
+
+        2026-11-22：看直播模式自己连的那条 WS（LiveDanmaku）以前没有这个方法，
+        DanmakuClient 一收到进房事件就 AttributeError、整条连接断掉重连——
+        表现就是「有人进来她没反应」。转发给 gateway.host 后两条连接都能用。
+        """
+        host = getattr(getattr(self.watch, "gateway", None), "host", None)
+        if host is not None and hasattr(host, "note_enter"):
+            host.note_enter(user, uid)
+
     def _host_shared(self, room_id: int):
         """host（回弹幕）正连着同一个房间吗？连着就别再开第二条 WS。"""
         host = getattr(getattr(self.watch, "gateway", None), "host", None)

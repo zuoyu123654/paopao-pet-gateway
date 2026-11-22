@@ -4631,18 +4631,18 @@ class Gateway:
         call = call[:max_name] if len(call) > max_name else call
         call = call or "这位新来的"
         if style not in ("hi", "ask", "intro"):
-            # 三种调子按顺序轮着来（不是随机）：纯欢迎 → 问一句 → 介绍一下，
-            # 连着好几个观众进来也不会一直是同一个腔调（2026-11-22）。
-            seq = ("hi", "ask", "intro")
-            n = int(getattr(self, "_welcome_seq", 0) or 0)
-            style = seq[n % len(seq)]
-            self._welcome_seq = n + 1
-        hint = {
-            "hi": "就单纯打个招呼、欢迎一下，别问问题。",
-            "ask": "欢迎的同时顺口问一句（从哪来 / 在忙什么 / 想听点什么），只问一句。",
-            "intro": "欢迎的同时简单介绍一下：你是谁（泡泡，一只蓝色鲸鱼娘），"
-                     "或者我们此刻在干嘛（看直播 / 看番 / 打游戏，按下面的上下文说）。",
-        }[style]
+            # 不按顺序轮、也不替她定调子：怎么迎她自己决定（老大 2026-11-22 定的）。
+            style = ""
+            hint = ("这一句你自己拿主意：怎么自然怎么来——打个招呼、顺口问一句、"
+                    "或者介绍一下你自己 / 我们此刻在干嘛，都行；"
+                    "别每次都同一个腔调，也别像客服欢迎语。")
+        else:
+            hint = {
+                "hi": "就单纯打个招呼、欢迎一下，别问问题。",
+                "ask": "欢迎的同时顺口问一句（从哪来 / 在忙什么 / 想听点什么），只问一句。",
+                "intro": "欢迎的同时简单介绍一下：你是谁（泡泡，一只蓝色鲸鱼娘），"
+                         "或者我们此刻在干嘛（按下面的上下文说）。",
+            }[style]
         prompt = (
             "你是泡泡，正在陪老大直播，直播间新进来一位观众「%s」。\n"
             "【这一句怎么来】%s\n\n"
@@ -4680,7 +4680,7 @@ class Gateway:
                 self.bubble.show(reply, duration, scale=scale, offset_y=-20)
             except Exception:  # noqa: BLE001
                 pass
-            log.info("欢迎进场（%s｜%s｜%s）：%s", call, style,
+            log.info("欢迎进场（%s｜%s｜%s）：%s", call, style or "自选",
                      "出声" if speak else "只气泡", reply[:60])
         return reply
 

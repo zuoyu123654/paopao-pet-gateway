@@ -11,6 +11,7 @@ B站直播 WebSocket 实现（protover=2，zlib）；房间号留空时先按账
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -27,6 +28,76 @@ from voice_mode import HotkeyThread
 import phrases
 
 log = logging.getLogger("petgw")
+
+
+def _pb_fields(data: bytes) -> list:
+    """极简 protobuf 顶层解析：返回 [(字段号, 值)]，值是 int 或 bytes。
+
+    只为解 B站 `INTERACT_WORD_V2` 的 `data.pb`（进场事件现在多半走这个），
+    不追求完整实现——解不出来的字段丢掉就行。
+    """
+    fields = []
+    i, n = 0, len(data)
+
+    def varint(pos: int) -> tuple[int, int]:
+        shift = 0
+        val = 0
+        while pos < n:
+            b = data[pos]
+            pos += 1
+            val |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return val, pos
+            shift += 7
+            if shift > 63:
+                raise ValueError("varint 太长")
+        raise ValueError("数据断了")
+
+    while i < n:
+        key, i = varint(i)
+        num, wt = key >> 3, key & 7
+        if wt == 0:
+            val, i = varint(i)
+            fields.append((num, val))
+        elif wt == 2:
+            ln, i = varint(i)
+            fields.append((num, data[i:i + ln]))
+            i += ln
+        elif wt == 1:
+            i += 8
+        elif wt == 5:
+            i += 4
+        else:
+            break
+    return fields
+
+
+def _pb_name(fields: list) -> str:
+    """在 pb 顶层找一个像用户名的 utf-8 字符串。"""
+    for _num, val in fields:
+        if not isinstance(val, bytes) or not (1 <= len(val) <= 24):
+            continue
+        try:
+            s = val.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if any(ord(c) < 32 for c in s):
+            continue
+        s = s.strip()
+        if s:
+            return s
+    return ""
+
+
+def _pb_msg_type(fields: list) -> int:
+    """进场事件类型：1 进场 2 关注 3 分享 4 特别关注 5 互粉 6 粉丝团。"""
+    for num, val in fields:
+        if num == 5 and isinstance(val, int) and 1 <= val <= 6:
+            return val
+    for _num, val in fields:
+        if isinstance(val, int) and 1 <= val <= 6:
+            return val
+    return 0
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CRED_PATH = os.path.join(os.environ.get("APPDATA", ""), "bili-cli", "credential.json")
@@ -132,6 +203,8 @@ class DanmakuClient(threading.Thread):
         self.connected = False
         self.last_error = ""
         self._live_state: int | None = None   # 上次查到的开播状态，只用来少刷日志
+        self._pb_logged = 0                   # 进房事件（V2）调试日志打几条就够
+        self._odd_cmds: dict[str, float] = {}  # 没见过的事件名，每种每分钟记一条
 
     def add_sink(self, fn) -> None:
         """挂个旁听回调（和回弹幕共用同一条连接时用）。"""
@@ -280,15 +353,50 @@ class DanmakuClient(threading.Thread):
                 self._emit(user, uid, "送出了 %s×%d" % (gift, num), 60)
             elif cmd.startswith("INTERACT_WORD"):
                 # 进房/关注/分享：msg_type 1=进场 2=关注 3=分享 4=特别关注
-                # （新版 INTERACT_WORD_V2 的 data 是 protobuf，没有 uname 就跳过）
+                # 新版 `INTERACT_WORD_V2` 的 data 只有一段 pb（base64），
+                # uname/uid/msg_type 都得自己解；V1 是明文字段，两种都认。
                 data = obj.get("data") or {}
+                user = str(data.get("uname") or "").strip()
+                uid = str(data.get("uid") or "")
                 try:
                     mtype = int(data.get("msg_type") or 0)
                 except (TypeError, ValueError):
                     mtype = 0
-                if mtype == 1 and data.get("uname"):
-                    self.host.note_enter(str(data.get("uname") or ""),
-                                         str(data.get("uid") or ""))
+                if (not user or not mtype) and data.get("pb"):
+                    try:
+                        fields = _pb_fields(base64.b64decode(str(data["pb"])))
+                        user = user or _pb_name(fields)
+                        if not uid:
+                            uid = str(next((v for k, v in fields
+                                            if k == 1 and isinstance(v, int)), ""))
+                        mtype = mtype or _pb_msg_type(fields)
+                        if self._pb_logged < 3:
+                            self._pb_logged += 1
+                            log.info("进房事件（V2）：%s｜uid=%s｜类型=%s｜字段=%s",
+                                     user or "?", uid or "?",
+                                     mtype, [(k, v if isinstance(v, int) else len(v))
+                                             for k, v in fields[:10]])
+                    except Exception as exc:  # noqa: BLE001
+                        log.info("进房事件解不开（%s）：%s", cmd, exc)
+                if mtype == 1 and user:
+                    # 这条连接可能是「看直播」那个旁听客户端（LiveDanmaku），
+                    # 它没有 note_enter——不能直接调，否则一有进房就断线重连。
+                    enter = getattr(self.host, "note_enter", None)
+                    if callable(enter):
+                        enter(user, uid)
+                    else:
+                        log.info("进房事件没处送（这条连接没有 note_enter）：%s", user)
+                elif self._pb_logged < 12:
+                    self._pb_logged += 1
+                    log.info("进房事件但不是「进场」：%s｜名字=%r｜类型=%s｜data 键=%s",
+                             cmd, user, mtype, list(data.keys())[:8])
+            elif cmd and ("INTERACT" in cmd.upper() or "ENTRY" in cmd.upper()
+                          or "WATCHED" in cmd.upper()):
+                # 别的事件名字（B站 会改）：每种每分钟记一条，方便对着改解析
+                if time.time() - self._odd_cmds.get(cmd, 0) > 60:
+                    self._odd_cmds[cmd] = time.time()
+                    log.info("直播事件（没专门处理）：%s｜data 键=%s", cmd,
+                             list((obj.get("data") or {}).keys())[:8])
 
     def run(self) -> None:
         backoff = 3.0
@@ -555,26 +663,33 @@ class HostMode(threading.Thread):
         return time.time() - self.last_welcome_at >= self.welcome_gap
 
     def _pick_welcome(self) -> dict | None:
+        """挑「刚进来那位」欢迎：取最新的、30 秒内的，更早的都丢掉。
+
+        直播间人多时一分钟能进来十几个，挨个欢迎既来不及也吵；
+        欢迎的是**此刻进来的那位**，不是排队排到一分钟前的。
+        """
         now = time.time()
-        picked = None
-        keep = []
+        fresh = []
         while True:
             try:
                 it = self.welcome_queue.get_nowait()
             except queue.Empty:
                 break
-            if now - it["ts"] > 45:
-                continue                      # 进来太久就别补欢迎了，太假
-            if picked is None:
-                picked = it
-            else:
-                keep.append(it)
-        for it in keep:
-            try:
-                self.welcome_queue.put_nowait(it)
-            except queue.Full:
-                break
-        return picked
+            if now - it["ts"] <= 30:
+                fresh.append(it)
+        if not fresh:
+            return None
+        latest = max(fresh, key=lambda x: x["ts"])
+        # 剩下的（同一批进来的）留 5 秒再看一眼，还赶得上就迎一句
+        for it in fresh:
+            if it is latest:
+                continue
+            if now - it["ts"] <= 5:
+                try:
+                    self.welcome_queue.put_nowait(it)
+                except queue.Full:
+                    break
+        return latest
 
     def _pick(self) -> dict | None:
         now = time.time()
@@ -613,10 +728,9 @@ class HostMode(threading.Thread):
             time.sleep(1.0)
             if not self.enabled or self.busy:
                 continue
-            if not self._can_speak():
-                continue
-            # 欢迎进场优先：人刚进来，隔太久再迎就没意思了（限频靠 welcome_gap）
-            if self._welcome_due():
+            # 欢迎进场优先：人刚进来，隔太久再迎就没意思了（限频靠 welcome_gap）。
+            # 出声时得等她嗓子空；只冒泡（speak=False）就不用等 TTS。
+            if self._welcome_due() and (not self.speak or self._can_speak()):
                 newbie = self._pick_welcome()
                 if newbie is not None:
                     self.busy = True
@@ -633,6 +747,8 @@ class HostMode(threading.Thread):
                     finally:
                         self.busy = False
                     continue
+            if not self._can_speak():
+                continue
             if time.time() - self.last_reply_at < self.interval:
                 continue
             item = self._pick()
