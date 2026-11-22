@@ -42,6 +42,11 @@ BLOCK_WORDS = (
 )
 
 
+# 喊她的通用称呼：弹幕里带这些也算「点名」，优先回（2026-11-22 老大要的：
+# 观众不一定喊「泡泡」，肥鱼、鲸鱼、鲸鲸这类也得算）。
+CALL_NAMES = ("泡泡", "鲸鱼", "鲸鱼娘", "鲸鲸", "肥鱼", "大肥鱼", "鱼娘")
+
+
 def _block_words(extra=None) -> tuple:
     """默认过滤词 + config 里 host.block_words 追加的。"""
     words = list(BLOCK_WORDS)
@@ -825,11 +830,12 @@ class HostMode(threading.Thread):
         score = priority
         if "?" in text or "？" in text:
             score += 8
-        # 带她名字 / @ 她的：直接顶到最前（2026-11-22 老大要的「优先回」）。
-        # 以前只 +6，人多的时候还是排不上；现在 +40，基本下一轮就回它。
-        if "泡泡" in text or "@" in text:
+        # 带她名字 / 通用称呼 / @ 她的：直接顶到最前（2026-11-22 老大要的「优先回」）。
+        # 以前只认「泡泡」+6 分；现在认肥鱼、鲸鱼、鲸鲸这些外号，并且 +40。
+        called = next((n for n in CALL_NAMES if n in text), "")
+        if called or "@" in text:
             score += 40
-            item_note = "点名"
+            item_note = "点名·%s" % (called or "@")
         else:
             item_note = ""
         item = {"ts": now, "user": user or "观众", "uid": uid,
