@@ -307,3 +307,15 @@ QQ/AstrBot 人格、插件角色设定），把「称呼、自称、禁区、说
   调试：`POST /host/test {"enter":"测试观众"}`（可选 `"style":"hi|ask|intro"` 强指定一种调子），
   日志会写「进直播间：…（排一条欢迎）」和「欢迎进场（名字｜自选/调子｜出声/只气泡）：那句话」。
 - 状态接口：`GET /host` / `GET /status` 的 host 段里多了 `welcome`（开关）和 `welcome_queued`（排队数）。
+
+**感谢关注 / 感谢加粉丝团（2026-11-22 加，和欢迎同一套）**
+- 托盘「直播设置」里多了「感谢关注」「感谢加粉丝团」两项，各管各的。
+- 关注：B站 `INTERACT_WORD` / `INTERACT_WORD_V2` 的 `msg_type=2`；
+  粉丝团/上舰：`msg_type` 4/5/6、`GUARD_BUY`、`USER_TOAST_MSG` 都算，走同一条感谢。
+- 怎么谢**由她自己决定**（提示词只说「一句谢谢，自然点，别像客服；不许许愿、不许承诺送东西/抽奖/加好友」）。
+- 限频：`host.thanks_follow` / `host.thanks_fans`（默认都开）、`host.thanks_min_gap`（默认 10 秒）、
+  `host.thanks_max_age`（默认 25 秒；出声时嗓子被占着，等一会儿再谢也不会丢）。
+  同一个人同一类 1 小时内只谢一次。
+- 调试：`POST /host/test {"thanks":"follow","user":"测试观众"}`（`"thanks":"fans"` 试粉丝团）。
+  日志：「关注：名字（自己直播间，排一条感谢）」→「感谢关注（名字｜出声）：那句话」。
+- 状态接口 host 段多 `thanks_follow` / `thanks_fans` / `thanks_queued`。

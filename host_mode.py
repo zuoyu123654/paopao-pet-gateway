@@ -386,10 +386,33 @@ class DanmakuClient(threading.Thread):
                         enter(user, uid)
                     else:
                         log.info("进房事件没处送（这条连接没有 note_enter）：%s", user)
+                elif mtype in (2, 4, 5) and user:
+                    # 关注 / 特别关注 / 互粉 → 感谢关注（2026-11-22 老大要的）
+                    thanks = getattr(self.host, "note_thanks", None)
+                    if callable(thanks):
+                        thanks("follow", user, uid)
+                elif mtype == 6 and user:
+                    # 多出来的 6 号（粉丝团一类）→ 感谢粉丝团
+                    thanks = getattr(self.host, "note_thanks", None)
+                    if callable(thanks):
+                        thanks("fans", user, uid)
                 elif self._pb_logged < 12:
                     self._pb_logged += 1
                     log.info("进房事件但不是「进场」：%s｜名字=%r｜类型=%s｜data 键=%s",
                              cmd, user, mtype, list(data.keys())[:8])
+            elif cmd in ("GUARD_BUY", "USER_TOAST_MSG"):
+                # 上舰 / 粉丝团：data.username、data.uid、data.guard_level、data.num
+                data = obj.get("data") or {}
+                user = str(data.get("username") or data.get("uname") or "").strip()
+                uid = str(data.get("uid") or "")
+                if user:
+                    thanks = getattr(self.host, "note_thanks", None)
+                    if callable(thanks):
+                        thanks("fans", user, uid)
+                    if self._pb_logged < 6:
+                        self._pb_logged += 1
+                        log.info("粉丝团/上舰事件：%s｜%s｜guard_level=%s｜num=%s",
+                                 cmd, user, data.get("guard_level"), data.get("num"))
             elif cmd and ("INTERACT" in cmd.upper() or "ENTRY" in cmd.upper()
                           or "WATCHED" in cmd.upper()):
                 # 别的事件名字（B站 会改）：每种每分钟记一条，方便对着改解析
@@ -497,11 +520,19 @@ class HostMode(threading.Thread):
         # 只迎「刚进门」的人：进来超过这么多秒就不迎了。
         # 2026-11-22 老大说「没人进还一直在欢迎」——以前是攒着、45 秒迎一个，
         # 迎的是半分钟前进来的人，看着就像凭空在欢迎。现在只迎 8 秒内的。
-        self.welcome_max_age = max(3.0, float(conf.get("welcome_max_age", 8)))
+        self.welcome_max_age = max(3.0, float(conf.get("welcome_max_age", 15)))
         self.welcome_style = ""          # 空 = 让她自己决定怎么说
         self.last_welcome_at = 0.0
         self.welcome_queue: "queue.Queue[dict]" = queue.Queue(maxsize=20)
         self._welcomed: dict[str, float] = {}
+        # 感谢关注 / 感谢加粉丝团（2026-11-22 老大要的，照欢迎那套做）
+        self.thanks_follow = bool(conf.get("thanks_follow", True))
+        self.thanks_fans = bool(conf.get("thanks_fans", True))
+        self.thanks_gap = max(5.0, float(conf.get("thanks_min_gap", 10)))
+        self.thanks_max_age = max(3.0, float(conf.get("thanks_max_age", 25)))
+        self.last_thanks_at = 0.0
+        self.thanks_queue: "queue.Queue[dict]" = queue.Queue(maxsize=20)
+        self._thanked: dict[str, float] = {}
 
     # ---------------------------------------------------------- 开关
     def start_all(self) -> None:
@@ -562,6 +593,37 @@ class HostMode(threading.Thread):
         except Exception:  # noqa: BLE001
             pass
 
+    def _set_thanks(self, kind: str, on: bool) -> None:
+        """感谢关注 / 感谢加粉丝团 的开关（照欢迎那套：气泡 + 出声一句反馈）。"""
+        if kind == "follow":
+            self.thanks_follow = bool(on)
+            self.cfg.setdefault("host", {})["thanks_follow"] = self.thanks_follow
+            on_now = self.thanks_follow
+            text = phrases.TRAY_FEEDBACK[
+                "thanks_follow_on" if on_now else "thanks_follow_off"]
+            log.info("感谢关注：%s", "开" if on_now else "关")
+        else:
+            self.thanks_fans = bool(on)
+            self.cfg.setdefault("host", {})["thanks_fans"] = self.thanks_fans
+            on_now = self.thanks_fans
+            text = phrases.TRAY_FEEDBACK[
+                "thanks_fans_on" if on_now else "thanks_fans_off"]
+            log.info("感谢加粉丝团：%s", "开" if on_now else "关")
+        try:
+            self.gateway.bubble.show(text, 3200)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.gateway.speech.say(text, tag="mode")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def set_thanks_follow(self, on: bool) -> None:
+        self._set_thanks("follow", on)
+
+    def set_thanks_fans(self, on: bool) -> None:
+        self._set_thanks("fans", on)
+
     def set_room(self, room_id: int) -> None:
         """换房间：断开旧连接，客户端下一轮按新 room_id 重连（并写回 config.json）。"""
         self.room_id = int(room_id or 0)
@@ -581,6 +643,9 @@ class HostMode(threading.Thread):
     def status(self) -> dict:
         return {"enabled": self.enabled, "speak": self.speak,
                 "welcome": self.welcome, "welcome_queued": self.welcome_queue.qsize(),
+                "thanks_follow": self.thanks_follow,
+                "thanks_fans": self.thanks_fans,
+                "thanks_queued": self.thanks_queue.qsize(),
                 "room_id": self.room_id, "connected": self.connected,
                 "queued": self.q.qsize(), "busy": self.busy,
                 "live_status": self.client._live_state,
@@ -666,6 +731,60 @@ class HostMode(threading.Thread):
             return False
         return time.time() - self.last_welcome_at >= self.welcome_gap
 
+    def note_thanks(self, kind: str, user: str, uid: str, source: str = "") -> None:
+        """有人关注了 / 加了粉丝团：排一条感谢（和欢迎同一套限频思路）。"""
+        kind = "fans" if str(kind).lower() in ("fans", "guard", "medal", "fansclub") else "follow"
+        if not self.enabled:
+            return
+        if kind == "follow" and not self.thanks_follow:
+            return
+        if kind == "fans" and not self.thanks_fans:
+            return
+        name = (user or "").strip()
+        if not name or len(name) > 24:
+            return
+        uid = str(uid or "")
+        if uid and self._self_uid and uid == self._self_uid:
+            return
+        now = time.time()
+        key = "%s|%s" % (kind, uid or name)
+        with self.lock:
+            if now - self._thanked.get(key, 0) < 3600:
+                return
+            self._thanked[key] = now
+            if len(self._thanked) > 800:
+                self._thanked = {k: v for k, v in self._thanked.items()
+                                 if now - v < 7200}
+        try:
+            self.thanks_queue.put_nowait({"ts": now, "user": name, "uid": uid,
+                                          "kind": kind})
+        except queue.Full:
+            return
+        log.info("%s：%s（%s，排一条感谢）",
+                 "关注" if kind == "follow" else "粉丝团", name[:20],
+                 source or "自己直播间")
+
+    def _thanks_due(self) -> bool:
+        if self.thanks_queue.empty():
+            return False
+        return time.time() - self.last_thanks_at >= self.thanks_gap
+
+    def _pick_thanks(self) -> dict | None:
+        now = time.time()
+        fresh = []
+        while True:
+            try:
+                it = self.thanks_queue.get_nowait()
+            except queue.Empty:
+                break
+            if now - it["ts"] <= self.thanks_max_age:
+                fresh.append(it)
+        if not fresh:
+            return None
+        # 关注优先于粉丝团（关注更常见、更该马上谢）
+        fresh.sort(key=lambda x: (0 if x["kind"] == "follow" else 1, -x["ts"]))
+        return fresh[0]
+
     def _pick_welcome(self) -> dict | None:
         """挑「刚进来那位」欢迎：取最新的、30 秒内的，更早的都丢掉。
 
@@ -748,6 +867,23 @@ class HostMode(threading.Thread):
                     except Exception as exc:  # noqa: BLE001
                         self.last_error = str(exc)[:120]
                         log.warning("欢迎进场失败：%s", exc)
+                    finally:
+                        self.busy = False
+                    continue
+            # 感谢关注 / 粉丝团：也用最新那条，限频 thanks_gap
+            if self._thanks_due() and (not self.speak or self._can_speak()):
+                fan = self._pick_thanks()
+                if fan is not None:
+                    self.busy = True
+                    try:
+                        reply = self.gateway.host_thanks(
+                            fan["kind"], fan["user"], self._context(), self.speak)
+                        if reply:
+                            self.last_text = reply
+                        self.last_thanks_at = time.time()
+                    except Exception as exc:  # noqa: BLE001
+                        self.last_error = str(exc)[:120]
+                        log.warning("感谢关注/粉丝团失败：%s", exc)
                     finally:
                         self.busy = False
                     continue

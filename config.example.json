@@ -37,7 +37,11 @@
     "reply_max_chars": 60,
     "welcome": true,
     "welcome_min_gap": 20,
-    "welcome_max_age": 8
+    "welcome_max_age": 15,
+    "thanks_follow": true,
+    "thanks_fans": true,
+    "thanks_min_gap": 10,
+    "thanks_max_age": 25
   },
   "tts": {
     "enabled": true,

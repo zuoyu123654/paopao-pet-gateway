@@ -29,6 +29,10 @@ TRAY_FEEDBACK = {
     "host_speak_off": "回弹幕只冒泡，不出声。",
     "host_welcome_on": "欢迎进场开了，有人进来我就招呼一句。",
     "host_welcome_off": "欢迎进场关了，来人不招呼了。",
+    "thanks_follow_on": "感谢关注开了，有人关注我就道声谢。",
+    "thanks_follow_off": "感谢关注关了。",
+    "thanks_fans_on": "感谢粉丝团开了，有人加粉丝团我就谢一句。",
+    "thanks_fans_off": "感谢粉丝团关了。",
 }
 
 # 语音模式切换时**出声**的提示（气泡那边托盘本来就会冒，这里补「听得见」的那份）

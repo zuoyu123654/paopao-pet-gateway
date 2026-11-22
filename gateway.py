@@ -4684,6 +4684,68 @@ class Gateway:
                      "出声" if speak else "只气泡", reply[:60])
         return reply
 
+    def host_thanks(self, kind: str, name: str, context: str,
+                    speak: bool) -> str:
+        """有人关注 / 加了粉丝团：谢一句。
+
+        2026-11-22 老大要的：照「欢迎进场」那套做，但说的是「谢谢你关注/加粉丝团」；
+        怎么谢也由她自己定（别像客服，别许愿承诺）。
+        """
+        host_cfg = self.cfg.get("host") or {}
+        max_name = int(host_cfg.get("name_max_chars", 6) or 6)
+        try:
+            max_chars = int(host_cfg.get("reply_max_chars", 60) or 60)
+        except (TypeError, ValueError):
+            max_chars = 60
+        max_chars = max(20, min(200, max_chars))
+        call = re.sub(r"^[@\s]+", "", str(name or ""))
+        call = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_]+", "", call)
+        call = call[:max_name] if len(call) > max_name else call
+        call = call or "这位观众"
+        why = "关注了直播间" if str(kind) == "follow" else "加了粉丝团"
+        prompt = (
+            "你是泡泡，正在陪老大直播。直播间有位观众「%s」刚刚%s。\n"
+            "【这一句怎么来】你自己拿主意：怎么自然怎么来——一句谢谢就行，"
+            "可以顺口说一句会继续好好播、多陪陪大家；别像客服，别刷「感谢感谢感谢」。\n\n"
+            "【当前直播上下文（只是背景，不要复述）】\n%s\n\n"
+            "要求：只说 1 句，**连名字一起算最多 %d 字**；自然叫出对方的名字"
+            "（名字超过 %d 字就只叫前 %d 字）；不要许愿、不要承诺任何东西"
+            "（送东西、抽奖、加好友、私聊都不许提）；不要暴露地址 / 账号 / 隐私。"
+            % (call, why, (context or "")[-800:], max_chars, max_name, max_name)
+        )
+        payload = {
+            "model": self.cfg.get("model") or "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": self._persona()},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max(300, max_chars * 8),
+            "temperature": 0.9,
+        }
+        payload, _scenario, _user_text = self.prepare(
+            payload, allow_screen=False, force_scenario="chat")
+        sink: list[str] = []
+        try:
+            for _ in self.stream_reply(payload, "danmaku", sink, speak=speak):
+                pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("感谢关注/粉丝团生成失败：%s", exc)
+            return ""
+        reply = "".join(sink).strip()
+        if reply:
+            reply = clip_reply_text(reply, max_chars)
+            try:
+                scale = float(host_cfg.get("bubble_scale", 2.0) or 2.0)
+                base_ms = int(float(host_cfg.get("bubble_duration_seconds", 10) or 10) * 1000)
+                duration = max(base_ms, min(15000, len(reply) * 180))
+                self.bubble.show(reply, duration, scale=scale, offset_y=-20)
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("%s（%s｜%s）：%s",
+                     "感谢关注" if str(kind) == "follow" else "感谢粉丝团",
+                     call, "出声" if speak else "只气泡", reply[:60])
+        return reply
+
     def refresh_game_updates(self, title: str, version: str) -> int:
         """版本变了：从官方公告/wiki版本页提取新角色/新地区，写进 latest。
 
@@ -6491,6 +6553,16 @@ class Handler(BaseHTTPRequestHandler):
             GATEWAY.host.note_enter(name, "test-enter-%d" % int(time.time() * 1000))
             self._send_json({"ok": True, "enter": name, "host": GATEWAY.host.status()})
             return
+        # 2026-11-22：感谢关注 / 粉丝团也能造一条来试
+        # POST /host/test {"thanks":"follow","user":"测试观众"}
+        if req.get("thanks"):
+            kind = "fans" if str(req.get("thanks")).lower() in ("fans", "guard", "medal") else "follow"
+            name = str(req.get("user") or "测试观众").strip()[:20]
+            GATEWAY.host.note_thanks(kind, name,
+                                     "test-thanks-%d" % int(time.time() * 1000))
+            self._send_json({"ok": True, "thanks": kind, "user": name,
+                             "host": GATEWAY.host.status()})
+            return
         if not text:
             self._send_json({"ok": False, "error": "text 为空"}, 400)
             return
@@ -6511,6 +6583,10 @@ class Handler(BaseHTTPRequestHandler):
             host.set_speak(bool(req.get("speak")))
         if "welcome" in req:
             host.set_welcome(bool(req.get("welcome")))
+        if "thanks_follow" in req:
+            host.set_thanks_follow(bool(req.get("thanks_follow")))
+        if "thanks_fans" in req:
+            host.set_thanks_fans(bool(req.get("thanks_fans")))
         if "room_id" in req:
             try:
                 host.set_room(int(req.get("room_id") or 0))
