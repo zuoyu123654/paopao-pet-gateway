@@ -46,7 +46,9 @@
     "thanks_gift": true,
     "gift_merge_seconds": 15,
     "gift_max_per_minute": 6,
-    "gift_min_value": 10
+    "gift_min_value": 10,
+    "thanks_sc": true,
+    "block_words": []
   },
   "tts": {
     "enabled": true,

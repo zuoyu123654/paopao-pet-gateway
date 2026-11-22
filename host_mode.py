@@ -31,6 +31,28 @@ import phrases
 log = logging.getLogger("petgw")
 
 
+BLOCK_WORDS = (
+    # 广告/引流：这些弹幕一律不念、不回（2026-11-22 老大要的）
+    "加微", "加v", "加V", "微信", "vx", "VX", "qq群", "QQ群", "扣扣群",
+    "代练", "代打", "陪玩", "刷人气", "刷粉", "涨粉", "私聊", "私信我",
+    "扫码", "二维码", "链接", "网址", "外挂", "脚本", "稳赚", "返利",
+    # 脏话/节奏：粗口不念
+    "傻逼", "傻b", "sb", "SB", "操你", "草你", "尼玛", "你妈", "妈的",
+    "他妈的", "婊", "贱人", "死全家", "滚蛋", "狗东西",
+)
+
+
+def _block_words(extra=None) -> tuple:
+    """默认过滤词 + config 里 host.block_words 追加的。"""
+    words = list(BLOCK_WORDS)
+    if isinstance(extra, (list, tuple)):
+        for w in extra:
+            w = str(w or "").strip()
+            if w and w not in words:
+                words.append(w)
+    return tuple(words)
+
+
 def _pb_fields(data: bytes) -> list:
     """极简 protobuf 顶层解析：返回 [(字段号, 值)]，值是 int 或 bytes。
 
@@ -344,6 +366,14 @@ class DanmakuClient(threading.Thread):
                 user = str(((data.get("user_info") or {}).get("uname")) or "")
                 uid = str(data.get("uid") or "")
                 msg = str(data.get("message") or "").strip()
+                try:
+                    price = int(data.get("price") or 0)
+                except (TypeError, ValueError):
+                    price = 0
+                # 醒目留言单列：感谢 + 把话接一句（2026-11-22 老大要的）
+                sc = getattr(self.host, "note_sc", None)
+                if callable(sc):
+                    sc(user, uid, msg, price)
                 self._emit(user, uid, msg, 100)
             elif cmd == "SEND_GIFT":
                 data = obj.get("data") or {}
@@ -570,6 +600,10 @@ class HostMode(threading.Thread):
         self.thanks_fans = bool(conf.get("thanks_fans", True))
         # 上舰单列（舰长/提督/总督），不再混进粉丝团
         self.thanks_guard = bool(conf.get("thanks_guard", True))
+        # 醒目留言（SC）单列：感谢 + 把内容接一句
+        self.thanks_sc = bool(conf.get("thanks_sc", True))
+        # 弹幕过滤：广告/脏话这些不念（不加开关，一直在）
+        self.block_words = _block_words(conf.get("block_words"))
         # 礼物感谢：可设上限（每分钟最多谢几次），频繁送就合并成一条
         self.thanks_gift = bool(conf.get("thanks_gift", True))
         self.gift_merge_seconds = max(3.0, float(conf.get("gift_merge_seconds", 15)))
@@ -666,6 +700,13 @@ class HostMode(threading.Thread):
             text = phrases.TRAY_FEEDBACK[
                 "thanks_gift_on" if on_now else "thanks_gift_off"]
             log.info("感谢礼物：%s", "开" if on_now else "关")
+        elif kind == "sc":
+            self.thanks_sc = bool(on)
+            self.cfg.setdefault("host", {})["thanks_sc"] = self.thanks_sc
+            on_now = self.thanks_sc
+            text = phrases.TRAY_FEEDBACK[
+                "thanks_sc_on" if on_now else "thanks_sc_off"]
+            log.info("感谢醒目留言：%s", "开" if on_now else "关")
         else:
             self.thanks_fans = bool(on)
             self.cfg.setdefault("host", {})["thanks_fans"] = self.thanks_fans
@@ -693,6 +734,9 @@ class HostMode(threading.Thread):
 
     def set_thanks_gift(self, on: bool) -> None:
         self._set_thanks("gift", on)
+
+    def set_thanks_sc(self, on: bool) -> None:
+        self._set_thanks("sc", on)
 
     def set_gift_min_value(self, value: float) -> None:
         """礼物门槛（电池）：低于这个价值的不谢。托盘「礼物门槛」里改。"""
@@ -732,6 +776,7 @@ class HostMode(threading.Thread):
                 "thanks_fans": self.thanks_fans,
                 "thanks_guard": self.thanks_guard,
                 "thanks_gift": self.thanks_gift,
+                "thanks_sc": self.thanks_sc,
                 "gift_min_value": self.gift_min_value,
                 "gift_merge_seconds": self.gift_merge_seconds,
                 "gift_max_per_minute": self.gift_max_per_minute,
@@ -757,6 +802,15 @@ class HostMode(threading.Thread):
             return
         if URL_RE.search(text) or text.startswith(("!", "/", "！")):
             return
+        # 广告/脏话过滤：不念、不回（2026-11-22 老大要的，不加开关，一直在）
+        low = text.lower()
+        for word in self.block_words:
+            if word.lower() in low:
+                now = time.time()
+                if now - getattr(self, "_block_logged", 0) > 30:
+                    self._block_logged = now
+                    log.info("直播弹幕：%s 那条有过滤词（%s），跳过", (user or "?")[:16], word)
+                return
         # 不按 uid 过滤自己：现在只读不发，自己发的测试弹幕也应该能回；
         # 以后真做自动发弹幕，再单独按“刚发出去的那条”去重。
         key = "%s|%s" % (uid or user, text[:40])
@@ -771,11 +825,17 @@ class HostMode(threading.Thread):
         score = priority
         if "?" in text or "？" in text:
             score += 8
+        # 带她名字 / @ 她的：直接顶到最前（2026-11-22 老大要的「优先回」）。
+        # 以前只 +6，人多的时候还是排不上；现在 +40，基本下一轮就回它。
         if "泡泡" in text or "@" in text:
-            score += 6
+            score += 40
+            item_note = "点名"
+        else:
+            item_note = ""
         item = {"ts": now, "user": user or "观众", "uid": uid,
                 "text": text, "score": score}
-        log.info("直播弹幕收到：%s：%s", item["user"][:20], text[:40])
+        log.info("直播弹幕收到%s：%s：%s", ("（" + item_note + "）") if item_note else "",
+                 item["user"][:20], text[:40])
         try:
             self.q.put_nowait(item)
         except queue.Full:
@@ -828,7 +888,7 @@ class HostMode(threading.Thread):
         和欢迎同一套限频思路；`detail` 给上舰（舰长/提督/总督）和礼物（礼物名×数量）用。
         """
         kind = str(kind or "follow").lower()
-        if kind not in ("follow", "fans", "guard", "gift"):
+        if kind not in ("follow", "fans", "guard", "gift", "sc"):
             kind = "follow"
         if not self.enabled:
             return
@@ -839,6 +899,8 @@ class HostMode(threading.Thread):
         if kind == "guard" and not self.thanks_guard:
             return
         if kind == "gift" and not self.thanks_gift:
+            return
+        if kind == "sc" and not self.thanks_sc:
             return
         name = (user or "").strip()
         if not name or len(name) > 24:
@@ -863,11 +925,23 @@ class HostMode(threading.Thread):
                                           "kind": kind, "detail": detail})
         except queue.Full:
             return
-        label = {"follow": "关注", "fans": "粉丝团", "guard": "上舰", "gift": "礼物"}[kind]
+        label = {"follow": "关注", "fans": "粉丝团", "guard": "上舰", "gift": "礼物",
+                 "sc": "醒目留言"}[kind]
         log.info("%s：%s（%s，排一条感谢%s）", label, name[:20],
                  source or "自己直播间", ("，" + detail) if detail else "")
 
     # ---------------------------------------------------------- 上舰 / 礼物
+    def note_sc(self, user: str, uid: str, text: str, price: int = 0) -> None:
+        """醒目留言：把内容带上，谢的时候顺便接一句。"""
+        if not self.enabled or not self.thanks_sc:
+            return
+        name = (user or "").strip()
+        if not name:
+            return
+        body = re.sub(r"\s+", " ", str(text or "")).strip()[:60]
+        detail = ("%s元｜%s" % (price, body)) if body else ("%s元" % price)
+        self.note_thanks("sc", name, uid, detail=detail)
+
     def note_guard(self, user: str, uid: str, level: int = 0) -> None:
         """上舰：舰长(3)/提督(2)/总督(1)，名字和头衔都带上。"""
         name = (user or "").strip()
@@ -979,8 +1053,8 @@ class HostMode(threading.Thread):
                 fresh.append(it)
         if not fresh:
             return None
-        # 花钱的优先：上舰 > 礼物 > 关注 > 粉丝团
-        order = {"guard": 0, "gift": 1, "follow": 2, "fans": 3}
+        # 花钱的优先：醒目留言 > 上舰 > 礼物 > 关注 > 粉丝团
+        order = {"sc": 0, "guard": 1, "gift": 2, "follow": 3, "fans": 4}
         fresh.sort(key=lambda x: (order.get(x["kind"], 9), -x["ts"]))
         return fresh[0]
 

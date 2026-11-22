@@ -248,6 +248,12 @@ class TrayMenu(QObject):
         self.host_thanks_gift_act.setData(("host", "thanks_gift"))
         self.host_thanks_gift_act.triggered.connect(self._on_pick)
         self.host_menu.addAction(self.host_thanks_gift_act)
+        # 醒目留言（SC）：单列一项（2026-11-22 老大要的）
+        self.host_thanks_sc_act = QAction("醒目留言（SC）", self)
+        self.host_thanks_sc_act.setCheckable(True)
+        self.host_thanks_sc_act.setData(("host", "thanks_sc"))
+        self.host_thanks_sc_act.triggered.connect(self._on_pick)
+        self.host_menu.addAction(self.host_thanks_sc_act)
         # 礼物门槛（2026-11-22 老大要的）：低于多少电池的礼物不谢
         self.gift_min_menu = self.host_menu.addMenu("礼物门槛（电池）")
         self.gift_min_group = QActionGroup(self)
@@ -278,6 +284,7 @@ class TrayMenu(QObject):
         self.host_thanks_fans_act.setChecked(True)
         self.host_thanks_guard_act.setChecked(True)
         self.host_thanks_gift_act.setChecked(True)
+        self.host_thanks_sc_act.setChecked(True)
         self.gift_min_actions[10.0].setChecked(True)
 
         self.timer = QTimer(self)
@@ -332,6 +339,9 @@ class TrayMenu(QObject):
             elif key == "thanks_gift":
                 self._mark_toggle("host_thanks_gift", on)
                 self._post("/host", {"thanks_gift": on, "persist": True})
+            elif key == "thanks_sc":
+                self._mark_toggle("host_thanks_sc", on)
+                self._post("/host", {"thanks_sc": on, "persist": True})
             elif key == "gift_min":
                 self._mark_gift_min(extra)
                 self._post("/host", {"gift_min_value": extra, "persist": True})
@@ -476,7 +486,9 @@ class TrayMenu(QObject):
                              (self.host_thanks_guard_act, "host_thanks_guard",
                               bool(host.get("thanks_guard", True))),
                              (self.host_thanks_gift_act, "host_thanks_gift",
-                              bool(host.get("thanks_gift", True)))):
+                              bool(host.get("thanks_gift", True))),
+                             (self.host_thanks_sc_act, "host_thanks_sc",
+                              bool(host.get("thanks_sc", True)))):
             if self._toggle_blocks(key, on):
                 continue
             act.blockSignals(True)
@@ -825,6 +837,23 @@ def force_topmost(widget) -> None:
         pass
 
 
+def _pid_alive(pid: int) -> bool:
+    """这个 pid 还活着吗（Windows 上用 tasklist 查，不靠 os.kill 的权限问题）。"""
+    try:
+        import subprocess
+
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"],
+                             capture_output=True, text=True, timeout=5,
+                             creationflags=0x08000000)
+        return str(pid) in (out.stdout or "")
+    except Exception:  # noqa: BLE001
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+
 def main() -> int:
     demo = ""
     demo_anchor = None
@@ -841,11 +870,23 @@ def main() -> int:
             demo_anchor = None
 
     app = QApplication(sys.argv[:1])
-    # 记下 pid：网关重启时用它收掉上一任气泡小工，免得托盘出现两个图标
+    # 记下 pid：网关重启时用它收掉上一任气泡小工，免得托盘出现两个图标。
+    # 2026-11-22：加了单实例检查——手动启动和自启脚本撞一起时，第二个直接退出，
+    # 不然右下角就会多一个托盘图标（老大看到的「两个托盘」）。
     try:
         pid_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
         os.makedirs(pid_dir, exist_ok=True)
-        with open(os.path.join(pid_dir, "bubble_host.pid"), "w", encoding="utf-8") as f:
+        pid_path = os.path.join(pid_dir, "bubble_host.pid")
+        old = 0
+        try:
+            with open(pid_path, "r", encoding="utf-8") as f:
+                old = int((f.read() or "0").strip() or 0)
+        except (OSError, ValueError):
+            old = 0
+        if old and old != os.getpid() and _pid_alive(old):
+            log("已经有托盘在跑（pid %d），这个退出，不再多一个图标" % old)
+            return 0
+        with open(pid_path, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
     except OSError:
         pass

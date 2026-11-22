@@ -4717,6 +4717,10 @@ class Gateway:
         elif kind == "fans":
             why = "加了粉丝团"
             hint = "谢「加粉丝团」，别和关注、上舰混在一起说。"
+        elif kind == "sc":
+            why = "发了醒目留言%s" % (("：" + detail) if detail else "")
+            hint = ("先把对方 SC 里说的话接一句（内容在上面的醒目留言里），再道谢；"
+                    "别只谢不打内容，也别把价格当谈资反复提。")
         else:
             why = "关注了直播间"
             hint = "谢「关注」，别和粉丝团、上舰混在一起说。"
@@ -4761,7 +4765,8 @@ class Gateway:
                 pass
             log.info("%s（%s｜%s）：%s",
                      {"follow": "感谢关注", "fans": "感谢粉丝团",
-                      "guard": "感谢上舰", "gift": "感谢礼物"}.get(kind, "感谢"),
+                      "guard": "感谢上舰", "gift": "感谢礼物",
+                      "sc": "感谢醒目留言"}.get(kind, "感谢"),
                      call, "出声" if speak else "只气泡", reply[:60])
         return reply
 
@@ -6576,7 +6581,8 @@ class Handler(BaseHTTPRequestHandler):
         # POST /host/test {"thanks":"follow","user":"测试观众"}
         if req.get("thanks"):
             raw = str(req.get("thanks")).lower()
-            kind = {"fans": "fans", "guard": "guard", "gift": "gift"}.get(raw, "follow")
+            kind = {"fans": "fans", "guard": "guard", "gift": "gift",
+                    "sc": "sc"}.get(raw, "follow")
             name = str(req.get("user") or "测试观众").strip()[:20]
             detail = str(req.get("detail") or "")
             if kind == "guard" and not detail:
@@ -6639,6 +6645,8 @@ class Handler(BaseHTTPRequestHandler):
             host.set_thanks_guard(bool(req.get("thanks_guard")))
         if "thanks_gift" in req:
             host.set_thanks_gift(bool(req.get("thanks_gift")))
+        if "thanks_sc" in req:
+            host.set_thanks_sc(bool(req.get("thanks_sc")))
         if "gift_min_value" in req:
             host.set_gift_min_value(float(req.get("gift_min_value") or 0))
         if "room_id" in req:
