@@ -694,6 +694,21 @@ class HostMode(threading.Thread):
     def set_thanks_gift(self, on: bool) -> None:
         self._set_thanks("gift", on)
 
+    def set_gift_min_value(self, value: float) -> None:
+        """礼物门槛（电池）：低于这个价值的不谢。托盘「礼物门槛」里改。"""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return
+        self.gift_min_value = max(0.0, min(100000.0, v))
+        self.cfg.setdefault("host", {})["gift_min_value"] = self.gift_min_value
+        log.info("礼物门槛：%g 电池", self.gift_min_value)
+        text = "礼物门槛改成了 %g 电池。" % self.gift_min_value
+        try:
+            self.gateway.bubble.show(text, 3200)
+        except Exception:  # noqa: BLE001
+            pass
+
     def set_room(self, room_id: int) -> None:
         """换房间：断开旧连接，客户端下一轮按新 room_id 重连（并写回 config.json）。"""
         self.room_id = int(room_id or 0)
@@ -717,6 +732,9 @@ class HostMode(threading.Thread):
                 "thanks_fans": self.thanks_fans,
                 "thanks_guard": self.thanks_guard,
                 "thanks_gift": self.thanks_gift,
+                "gift_min_value": self.gift_min_value,
+                "gift_merge_seconds": self.gift_merge_seconds,
+                "gift_max_per_minute": self.gift_max_per_minute,
                 "thanks_queued": self.thanks_queue.qsize(),
                 "room_id": self.room_id, "connected": self.connected,
                 "queued": self.q.qsize(), "busy": self.busy,

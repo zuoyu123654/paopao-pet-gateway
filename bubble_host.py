@@ -77,6 +77,16 @@ VOICE_ITEMS = (
     ("ptt", "按键说话"),
     ("call", "语音电话"),
 )
+# 礼物门槛（电池）：低于这个价值的不谢。100 金瓜子 = 1 电池，10 电池 = 1 元。
+GIFT_MIN_ITEMS = (
+    (0, "不限（所有礼物都谢）"),
+    (1, "1 电池"),
+    (5, "5 电池"),
+    (10, "10 电池（默认，约 1 元）"),
+    (30, "30 电池"),
+    (50, "50 电池"),
+    (100, "100 电池"),
+)
 LOCK_ITEMS = (
     ("5m", "5 分钟（默认）"),
     ("forever", "一直保持"),
@@ -238,6 +248,19 @@ class TrayMenu(QObject):
         self.host_thanks_gift_act.setData(("host", "thanks_gift"))
         self.host_thanks_gift_act.triggered.connect(self._on_pick)
         self.host_menu.addAction(self.host_thanks_gift_act)
+        # 礼物门槛（2026-11-22 老大要的）：低于多少电池的礼物不谢
+        self.gift_min_menu = self.host_menu.addMenu("礼物门槛（电池）")
+        self.gift_min_group = QActionGroup(self)
+        self.gift_min_group.setExclusive(True)
+        self.gift_min_actions: dict[float, QAction] = {}
+        for value, label in GIFT_MIN_ITEMS:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setData(("host", "gift_min", value))
+            self.gift_min_group.addAction(act)
+            self.gift_min_menu.addAction(act)
+            act.triggered.connect(self._on_pick)
+            self.gift_min_actions[float(value)] = act
 
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("泡泡 · 模式")
@@ -255,6 +278,7 @@ class TrayMenu(QObject):
         self.host_thanks_fans_act.setChecked(True)
         self.host_thanks_guard_act.setChecked(True)
         self.host_thanks_gift_act.setChecked(True)
+        self.gift_min_actions[10.0].setChecked(True)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync)
@@ -267,7 +291,9 @@ class TrayMenu(QObject):
         act = self.sender()
         if not isinstance(act, QAction):
             return
-        kind, key = act.data()
+        data = act.data()
+        kind, key = data[0], data[1]
+        extra = data[2] if len(data) > 2 else None
         if kind == "watch":
             payload = {"mode": "auto" if key == "auto" else key}
             if key == "generic":
@@ -306,6 +332,9 @@ class TrayMenu(QObject):
             elif key == "thanks_gift":
                 self._mark_toggle("host_thanks_gift", on)
                 self._post("/host", {"thanks_gift": on, "persist": True})
+            elif key == "gift_min":
+                self._mark_gift_min(extra)
+                self._post("/host", {"gift_min_value": extra, "persist": True})
             else:
                 self._mark_toggle("host_speak", on)
                 self._post("/host", {"speak": on, "persist": True})
@@ -321,6 +350,13 @@ class TrayMenu(QObject):
 
     def _mark_choice(self, key: str, want: str) -> None:
         self._pending_choice[key] = (str(want), time.time() + 4.0)
+
+    def _mark_gift_min(self, value) -> None:
+        try:
+            self._pending_choice["gift_min"] = ("%g" % float(value),
+                                               time.time() + 4.0)
+        except (TypeError, ValueError):
+            pass
 
     def _toggle_blocks(self, key: str, server_on: bool) -> bool:
         """服务器还没跟上自己刚点的值 → 先别用 /status 覆盖勾选。"""
@@ -448,6 +484,15 @@ class TrayMenu(QObject):
             act.blockSignals(False)
         if host.get("error"):
             self.host_act.setToolTip(str(host.get("error"))[:120])
+        try:
+            gmin = float(host.get("gift_min_value") or 0)
+        except (TypeError, ValueError):
+            gmin = 0.0
+        if not self._choice_blocks("gift_min", "%g" % gmin):
+            for value, act in self.gift_min_actions.items():
+                act.blockSignals(True)
+                act.setChecked(abs(float(value) - gmin) < 0.5)
+                act.blockSignals(False)
 
 
 def log(msg: str) -> None:

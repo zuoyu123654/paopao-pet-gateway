@@ -6639,6 +6639,8 @@ class Handler(BaseHTTPRequestHandler):
             host.set_thanks_guard(bool(req.get("thanks_guard")))
         if "thanks_gift" in req:
             host.set_thanks_gift(bool(req.get("thanks_gift")))
+        if "gift_min_value" in req:
+            host.set_gift_min_value(float(req.get("gift_min_value") or 0))
         if "room_id" in req:
             try:
                 host.set_room(int(req.get("room_id") or 0))
