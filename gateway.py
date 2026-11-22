@@ -4631,7 +4631,12 @@ class Gateway:
         call = call[:max_name] if len(call) > max_name else call
         call = call or "这位新来的"
         if style not in ("hi", "ask", "intro"):
-            style = random.choice(["hi", "ask", "intro"])
+            # 三种调子按顺序轮着来（不是随机）：纯欢迎 → 问一句 → 介绍一下，
+            # 连着好几个观众进来也不会一直是同一个腔调（2026-11-22）。
+            seq = ("hi", "ask", "intro")
+            n = int(getattr(self, "_welcome_seq", 0) or 0)
+            style = seq[n % len(seq)]
+            self._welcome_seq = n + 1
         hint = {
             "hi": "就单纯打个招呼、欢迎一下，别问问题。",
             "ask": "欢迎的同时顺口问一句（从哪来 / 在忙什么 / 想听点什么），只问一句。",
