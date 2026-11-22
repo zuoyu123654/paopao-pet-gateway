@@ -278,6 +278,17 @@ class DanmakuClient(threading.Thread):
                 gift = str(data.get("giftName") or "礼物")
                 num = int(data.get("num") or 1)
                 self._emit(user, uid, "送出了 %s×%d" % (gift, num), 60)
+            elif cmd.startswith("INTERACT_WORD"):
+                # 进房/关注/分享：msg_type 1=进场 2=关注 3=分享 4=特别关注
+                # （新版 INTERACT_WORD_V2 的 data 是 protobuf，没有 uname 就跳过）
+                data = obj.get("data") or {}
+                try:
+                    mtype = int(data.get("msg_type") or 0)
+                except (TypeError, ValueError):
+                    mtype = 0
+                if mtype == 1 and data.get("uname"):
+                    self.host.note_enter(str(data.get("uname") or ""),
+                                         str(data.get("uid") or ""))
 
     def run(self) -> None:
         backoff = 3.0
@@ -371,6 +382,14 @@ class HostMode(threading.Thread):
         self.last_error = ""
         self.client = DanmakuClient(self)
         self._self_uid = ""
+        # 欢迎进场（2026-11-22 老大要的）：有人进直播间就欢迎一句——
+        # 可以是纯欢迎、顺手问一句，或者介绍一下自己/我们正在干嘛。
+        self.welcome = bool(conf.get("welcome", True))
+        self.welcome_gap = max(15.0, float(conf.get("welcome_min_gap", 45)))
+        self.welcome_style = ""          # 空 = 三种调子轮换
+        self.last_welcome_at = 0.0
+        self.welcome_queue: "queue.Queue[dict]" = queue.Queue(maxsize=20)
+        self._welcomed: dict[str, float] = {}
 
     # ---------------------------------------------------------- 开关
     def start_all(self) -> None:
@@ -416,6 +435,21 @@ class HostMode(threading.Thread):
         except Exception:  # noqa: BLE001
             pass
 
+    def set_welcome(self, on: bool) -> None:
+        """欢迎进场开关（托盘「直播设置」里那一项）。"""
+        self.welcome = bool(on)
+        self.cfg.setdefault("host", {})["welcome"] = self.welcome
+        log.info("欢迎进场：%s", "开" if self.welcome else "关")
+        text = phrases.TRAY_FEEDBACK["host_welcome_on" if self.welcome else "host_welcome_off"]
+        try:
+            self.gateway.bubble.show(text, 3200)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.gateway.speech.say(text, tag="mode")
+        except Exception:  # noqa: BLE001
+            pass
+
     def set_room(self, room_id: int) -> None:
         """换房间：断开旧连接，客户端下一轮按新 room_id 重连（并写回 config.json）。"""
         self.room_id = int(room_id or 0)
@@ -434,6 +468,7 @@ class HostMode(threading.Thread):
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "speak": self.speak,
+                "welcome": self.welcome, "welcome_queued": self.welcome_queue.qsize(),
                 "room_id": self.room_id, "connected": self.connected,
                 "queued": self.q.qsize(), "busy": self.busy,
                 "live_status": self.client._live_state,
@@ -487,6 +522,60 @@ class HostMode(threading.Thread):
             except Exception:  # noqa: BLE001
                 pass
 
+    # ---------------------------------------------------------- 欢迎进场
+    def note_enter(self, user: str, uid: str) -> None:
+        """有人进直播间：排一条欢迎（限频，同一个人 15 分钟内只迎一次）。"""
+        if not self.enabled or not self.welcome:
+            return
+        name = (user or "").strip()
+        if not name or len(name) > 24:
+            return
+        uid = str(uid or "")
+        if uid and self._self_uid and uid == self._self_uid:
+            return
+        now = time.time()
+        key = uid or name
+        with self.lock:
+            if now - self._welcomed.get(key, 0) < 900:
+                return
+            self._welcomed[key] = now
+            if len(self._welcomed) > 800:
+                self._welcomed = {k: v for k, v in self._welcomed.items()
+                                  if now - v < 3600}
+        try:
+            self.welcome_queue.put_nowait({"ts": now, "user": name, "uid": uid})
+        except queue.Full:
+            return
+        log.info("进直播间：%s（排一条欢迎，前面还有 %d 个）",
+                 name[:20], max(0, self.welcome_queue.qsize() - 1))
+
+    def _welcome_due(self) -> bool:
+        if not self.welcome or self.welcome_queue.empty():
+            return False
+        return time.time() - self.last_welcome_at >= self.welcome_gap
+
+    def _pick_welcome(self) -> dict | None:
+        now = time.time()
+        picked = None
+        keep = []
+        while True:
+            try:
+                it = self.welcome_queue.get_nowait()
+            except queue.Empty:
+                break
+            if now - it["ts"] > 45:
+                continue                      # 进来太久就别补欢迎了，太假
+            if picked is None:
+                picked = it
+            else:
+                keep.append(it)
+        for it in keep:
+            try:
+                self.welcome_queue.put_nowait(it)
+            except queue.Full:
+                break
+        return picked
+
     def _pick(self) -> dict | None:
         now = time.time()
         items = []
@@ -524,9 +613,27 @@ class HostMode(threading.Thread):
             time.sleep(1.0)
             if not self.enabled or self.busy:
                 continue
-            if time.time() - self.last_reply_at < self.interval:
-                continue
             if not self._can_speak():
+                continue
+            # 欢迎进场优先：人刚进来，隔太久再迎就没意思了（限频靠 welcome_gap）
+            if self._welcome_due():
+                newbie = self._pick_welcome()
+                if newbie is not None:
+                    self.busy = True
+                    try:
+                        reply = self.gateway.host_welcome(
+                            newbie["user"], self._context(), self.speak,
+                            self.welcome_style)
+                        if reply:
+                            self.last_text = reply
+                        self.last_welcome_at = time.time()
+                    except Exception as exc:  # noqa: BLE001
+                        self.last_error = str(exc)[:120]
+                        log.warning("欢迎进场失败：%s", exc)
+                    finally:
+                        self.busy = False
+                    continue
+            if time.time() - self.last_reply_at < self.interval:
                 continue
             item = self._pick()
             if not item:

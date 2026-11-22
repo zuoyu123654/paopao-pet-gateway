@@ -4611,6 +4611,74 @@ class Gateway:
             log.info("直播弹幕回复（%s）：%s", "出声" if speak else "只气泡", reply[:40])
         return reply
 
+    def host_welcome(self, name: str, context: str, speak: bool,
+                     style: str = "") -> str:
+        """有新观众进直播间：欢迎一句。
+
+        2026-11-22 老大要的「欢迎进场」：不一定是干巴巴一句欢迎——可以纯欢迎，
+        也可以顺口问一句（从哪来 / 在干嘛 / 想听什么），或者介绍一下自己、
+        说一下我们此刻在干嘛。三种调子轮着来，别连着两次一个腔调。
+        """
+        host_cfg = self.cfg.get("host") or {}
+        max_name = int(host_cfg.get("name_max_chars", 6) or 6)
+        try:
+            max_chars = int(host_cfg.get("reply_max_chars", 60) or 60)
+        except (TypeError, ValueError):
+            max_chars = 60
+        max_chars = max(20, min(200, max_chars))
+        call = re.sub(r"^[@\s]+", "", str(name or ""))
+        call = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_]+", "", call)
+        call = call[:max_name] if len(call) > max_name else call
+        call = call or "这位新来的"
+        if style not in ("hi", "ask", "intro"):
+            style = random.choice(["hi", "ask", "intro"])
+        hint = {
+            "hi": "就单纯打个招呼、欢迎一下，别问问题。",
+            "ask": "欢迎的同时顺口问一句（从哪来 / 在忙什么 / 想听点什么），只问一句。",
+            "intro": "欢迎的同时简单介绍一下：你是谁（泡泡，一只蓝色鲸鱼娘），"
+                     "或者我们此刻在干嘛（看直播 / 看番 / 打游戏，按下面的上下文说）。",
+        }[style]
+        prompt = (
+            "你是泡泡，正在陪老大直播，直播间新进来一位观众「%s」。\n"
+            "【这一句怎么来】%s\n\n"
+            "【当前直播上下文（只是背景，不要复述）】\n%s\n\n"
+            "要求：只说 1 句，**连名字一起算最多 %d 字**；自然叫出对方的名字"
+            "（名字超过 %d 字就只叫前 %d 字）；别写成客服欢迎语，别刷「欢迎欢迎热烈欢迎」；"
+            "不要暴露地址 / 账号 / 隐私；不确定对方是谁就按普通新观众对待，别编关系。"
+            % (call, hint, (context or "")[-800:], max_chars, max_name, max_name)
+        )
+        payload = {
+            "model": self.cfg.get("model") or "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": self._persona()},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max(300, max_chars * 8),
+            "temperature": 0.9,
+        }
+        payload, _scenario, _user_text = self.prepare(
+            payload, allow_screen=False, force_scenario="chat")
+        sink: list[str] = []
+        try:
+            for _ in self.stream_reply(payload, "danmaku", sink, speak=speak):
+                pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("欢迎进场生成失败：%s", exc)
+            return ""
+        reply = "".join(sink).strip()
+        if reply:
+            reply = clip_reply_text(reply, max_chars)
+            try:
+                scale = float(host_cfg.get("bubble_scale", 2.0) or 2.0)
+                base_ms = int(float(host_cfg.get("bubble_duration_seconds", 10) or 10) * 1000)
+                duration = max(base_ms, min(15000, len(reply) * 180))
+                self.bubble.show(reply, duration, scale=scale, offset_y=-20)
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("欢迎进场（%s｜%s｜%s）：%s", call, style,
+                     "出声" if speak else "只气泡", reply[:60])
+        return reply
+
     def refresh_game_updates(self, title: str, version: str) -> int:
         """版本变了：从官方公告/wiki版本页提取新角色/新地区，写进 latest。
 
@@ -6409,6 +6477,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "bad json"}, 400)
             return
         text = str(req.get("text") or "").strip()
+        # 2026-11-22 加了「欢迎进场」：这里也能造一条进房事件，验证欢迎那句
+        # POST /host/test {"enter":"测试观众"}（可选 "style":"hi|ask|intro"）
+        if req.get("enter"):
+            name = str(req.get("enter") or "测试观众").strip()[:20]
+            if req.get("style"):
+                GATEWAY.host.welcome_style = str(req.get("style"))[:10]
+            GATEWAY.host.note_enter(name, "test-enter-%d" % int(time.time() * 1000))
+            self._send_json({"ok": True, "enter": name, "host": GATEWAY.host.status()})
+            return
         if not text:
             self._send_json({"ok": False, "error": "text 为空"}, 400)
             return
@@ -6416,7 +6493,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "host": GATEWAY.host.status()})
 
     def _handle_host(self):
-        """直播弹幕开关：POST {"enabled":true,"speak":false,"room_id":24555729}"""
+        """直播助手开关：POST {"enabled":true,"speak":false,"welcome":true,"room_id":24555729}"""
         try:
             req = self._read_json()
         except ValueError:
@@ -6427,6 +6504,8 @@ class Handler(BaseHTTPRequestHandler):
             host.set_enabled(bool(req.get("enabled")))
         if "speak" in req:
             host.set_speak(bool(req.get("speak")))
+        if "welcome" in req:
+            host.set_welcome(bool(req.get("welcome")))
         if "room_id" in req:
             try:
                 host.set_room(int(req.get("room_id") or 0))

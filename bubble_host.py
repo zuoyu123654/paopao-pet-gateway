@@ -197,18 +197,25 @@ class TrayMenu(QObject):
             act.triggered.connect(self._on_pick)
             self.voice_actions[key] = act
 
-        # 直播弹幕：跟语音同一栏，但**不是单选**，可以和任何模式/语音一起开
+        # 直播助手：跟语音同一栏，但**不是单选**，可以和任何模式/语音一起开
         self.menu.addSeparator()
-        self.host_act = QAction("直播弹幕", self)
+        self.host_act = QAction("直播助手", self)
         self.host_act.setCheckable(True)
         self.host_act.setData(("host", "enabled"))
         self.host_act.triggered.connect(self._on_pick)
         self.menu.addAction(self.host_act)
+        # 直播设置（2026-11-22 老大要的）：回弹幕出声 + 欢迎进场都收进这个子菜单
+        self.host_menu = self.menu.addMenu("直播设置")
         self.host_speak_act = QAction("回弹幕出声（Ctrl+Alt+B）", self)
         self.host_speak_act.setCheckable(True)
         self.host_speak_act.setData(("host", "speak"))
         self.host_speak_act.triggered.connect(self._on_pick)
-        self.menu.addAction(self.host_speak_act)
+        self.host_menu.addAction(self.host_speak_act)
+        self.host_welcome_act = QAction("欢迎进场（新观众）", self)
+        self.host_welcome_act.setCheckable(True)
+        self.host_welcome_act.setData(("host", "welcome"))
+        self.host_welcome_act.triggered.connect(self._on_pick)
+        self.host_menu.addAction(self.host_welcome_act)
 
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("泡泡 · 模式")
@@ -221,6 +228,7 @@ class TrayMenu(QObject):
         self.voice_actions["ptt"].setChecked(True)
         self.host_act.setChecked(False)
         self.host_speak_act.setChecked(False)
+        self.host_welcome_act.setChecked(True)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync)
@@ -257,6 +265,9 @@ class TrayMenu(QObject):
             if key == "enabled":
                 self._mark_toggle("host", on)
                 self._post("/host", {"enabled": on, "persist": True})
+            elif key == "welcome":
+                self._mark_toggle("host_welcome", on)
+                self._post("/host", {"welcome": on, "persist": True})
             else:
                 self._mark_toggle("host_speak", on)
                 self._post("/host", {"speak": on, "persist": True})
@@ -381,7 +392,9 @@ class TrayMenu(QObject):
                 act.blockSignals(False)
         host = data.get("host") or {}
         for act, key, on in ((self.host_act, "host", bool(host.get("enabled"))),
-                             (self.host_speak_act, "host_speak", bool(host.get("speak")))):
+                             (self.host_speak_act, "host_speak", bool(host.get("speak"))),
+                             (self.host_welcome_act, "host_welcome",
+                              bool(host.get("welcome", True)))):
             if self._toggle_blocks(key, on):
                 continue
             act.blockSignals(True)
