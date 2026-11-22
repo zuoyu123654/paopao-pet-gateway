@@ -12,6 +12,7 @@ B站直播 WebSocket 实现（protover=2，zlib）；房间号留空时先按账
 from __future__ import annotations
 
 import base64
+import collections
 import json
 import logging
 import os
@@ -349,7 +350,26 @@ class DanmakuClient(threading.Thread):
                 user = str(data.get("uname") or "")
                 uid = str(data.get("uid") or "")
                 gift = str(data.get("giftName") or "礼物")
-                num = int(data.get("num") or 1)
+                try:
+                    num = int(data.get("num") or 1)
+                except (TypeError, ValueError):
+                    num = 1
+                # 礼物价值：B站 100 金瓜子 = 1 电池；银瓜子（免费礼物）算 0。
+                try:
+                    total_coin = float(data.get("total_coin") or 0)
+                except (TypeError, ValueError):
+                    total_coin = 0.0
+                if total_coin <= 0:
+                    try:
+                        total_coin = float(data.get("price") or 0) * num
+                    except (TypeError, ValueError):
+                        total_coin = 0.0
+                coin = str(data.get("coin_type") or "").lower()
+                battery = (total_coin / 100.0) if coin != "silver" else 0.0
+                # 礼物单列：先进「合并缓冲」，攒一小会儿再一起谢（频繁送礼物不刷屏）
+                gift_hook = getattr(self.host, "note_gift", None)
+                if callable(gift_hook):
+                    gift_hook(user, uid, gift, num, battery)
                 self._emit(user, uid, "送出了 %s×%d" % (gift, num), 60)
             elif cmd.startswith("INTERACT_WORD"):
                 # 进房/关注/分享：msg_type 1=进场 2=关注 3=分享 4=特别关注
@@ -400,19 +420,39 @@ class DanmakuClient(threading.Thread):
                     self._pb_logged += 1
                     log.info("进房事件但不是「进场」：%s｜名字=%r｜类型=%s｜data 键=%s",
                              cmd, user, mtype, list(data.keys())[:8])
-            elif cmd in ("GUARD_BUY", "USER_TOAST_MSG"):
-                # 上舰 / 粉丝团：data.username、data.uid、data.guard_level、data.num
+            elif cmd == "GUARD_BUY":
+                # 上舰单独一类（2026-11-22 老大要的）：舰长/提督/总督分开谢
                 data = obj.get("data") or {}
                 user = str(data.get("username") or data.get("uname") or "").strip()
                 uid = str(data.get("uid") or "")
+                try:
+                    level = int(data.get("guard_level") or 0)
+                except (TypeError, ValueError):
+                    level = 0
                 if user:
+                    guard = getattr(self.host, "note_guard", None)
+                    if callable(guard):
+                        guard(user, uid, level)
+                    if self._pb_logged < 6:
+                        self._pb_logged += 1
+                        log.info("上舰事件：%s｜%s｜guard_level=%s", cmd, user, level)
+            elif cmd == "USER_TOAST_MSG":
+                # 上舰/续费提示：guard_level 有值才算上舰；粉丝团那类（level=0）才走粉丝团
+                data = obj.get("data") or {}
+                user = str(data.get("username") or data.get("uname") or "").strip()
+                uid = str(data.get("uid") or "")
+                try:
+                    level = int(data.get("guard_level") or 0)
+                except (TypeError, ValueError):
+                    level = 0
+                if user and level:
+                    guard = getattr(self.host, "note_guard", None)
+                    if callable(guard):
+                        guard(user, uid, level)
+                elif user:
                     thanks = getattr(self.host, "note_thanks", None)
                     if callable(thanks):
                         thanks("fans", user, uid)
-                    if self._pb_logged < 6:
-                        self._pb_logged += 1
-                        log.info("粉丝团/上舰事件：%s｜%s｜guard_level=%s｜num=%s",
-                                 cmd, user, data.get("guard_level"), data.get("num"))
             elif cmd and ("INTERACT" in cmd.upper() or "ENTRY" in cmd.upper()
                           or "WATCHED" in cmd.upper()):
                 # 别的事件名字（B站 会改）：每种每分钟记一条，方便对着改解析
@@ -528,6 +568,16 @@ class HostMode(threading.Thread):
         # 感谢关注 / 感谢加粉丝团（2026-11-22 老大要的，照欢迎那套做）
         self.thanks_follow = bool(conf.get("thanks_follow", True))
         self.thanks_fans = bool(conf.get("thanks_fans", True))
+        # 上舰单列（舰长/提督/总督），不再混进粉丝团
+        self.thanks_guard = bool(conf.get("thanks_guard", True))
+        # 礼物感谢：可设上限（每分钟最多谢几次），频繁送就合并成一条
+        self.thanks_gift = bool(conf.get("thanks_gift", True))
+        self.gift_merge_seconds = max(3.0, float(conf.get("gift_merge_seconds", 15)))
+        self.gift_max_per_minute = max(1, int(conf.get("gift_max_per_minute", 6)))
+        # 礼物门槛（电池）：低于这个价值的不谢。100 金瓜子 = 1 电池，10 电池 = 1 元。
+        self.gift_min_value = max(0.0, float(conf.get("gift_min_value", 10)))
+        self._gift_pending: dict[str, dict] = {}
+        self._gift_sent: "collections.deque" = collections.deque(maxlen=200)
         self.thanks_gap = max(5.0, float(conf.get("thanks_min_gap", 10)))
         self.thanks_max_age = max(3.0, float(conf.get("thanks_max_age", 25)))
         self.last_thanks_at = 0.0
@@ -594,7 +644,7 @@ class HostMode(threading.Thread):
             pass
 
     def _set_thanks(self, kind: str, on: bool) -> None:
-        """感谢关注 / 感谢加粉丝团 的开关（照欢迎那套：气泡 + 出声一句反馈）。"""
+        """感谢关注 / 粉丝团 / 上舰 / 礼物 的开关（照欢迎那套：气泡 + 出声一句反馈）。"""
         if kind == "follow":
             self.thanks_follow = bool(on)
             self.cfg.setdefault("host", {})["thanks_follow"] = self.thanks_follow
@@ -602,6 +652,20 @@ class HostMode(threading.Thread):
             text = phrases.TRAY_FEEDBACK[
                 "thanks_follow_on" if on_now else "thanks_follow_off"]
             log.info("感谢关注：%s", "开" if on_now else "关")
+        elif kind == "guard":
+            self.thanks_guard = bool(on)
+            self.cfg.setdefault("host", {})["thanks_guard"] = self.thanks_guard
+            on_now = self.thanks_guard
+            text = phrases.TRAY_FEEDBACK[
+                "thanks_guard_on" if on_now else "thanks_guard_off"]
+            log.info("感谢上舰：%s", "开" if on_now else "关")
+        elif kind == "gift":
+            self.thanks_gift = bool(on)
+            self.cfg.setdefault("host", {})["thanks_gift"] = self.thanks_gift
+            on_now = self.thanks_gift
+            text = phrases.TRAY_FEEDBACK[
+                "thanks_gift_on" if on_now else "thanks_gift_off"]
+            log.info("感谢礼物：%s", "开" if on_now else "关")
         else:
             self.thanks_fans = bool(on)
             self.cfg.setdefault("host", {})["thanks_fans"] = self.thanks_fans
@@ -624,6 +688,12 @@ class HostMode(threading.Thread):
     def set_thanks_fans(self, on: bool) -> None:
         self._set_thanks("fans", on)
 
+    def set_thanks_guard(self, on: bool) -> None:
+        self._set_thanks("guard", on)
+
+    def set_thanks_gift(self, on: bool) -> None:
+        self._set_thanks("gift", on)
+
     def set_room(self, room_id: int) -> None:
         """换房间：断开旧连接，客户端下一轮按新 room_id 重连（并写回 config.json）。"""
         self.room_id = int(room_id or 0)
@@ -645,6 +715,8 @@ class HostMode(threading.Thread):
                 "welcome": self.welcome, "welcome_queued": self.welcome_queue.qsize(),
                 "thanks_follow": self.thanks_follow,
                 "thanks_fans": self.thanks_fans,
+                "thanks_guard": self.thanks_guard,
+                "thanks_gift": self.thanks_gift,
                 "thanks_queued": self.thanks_queue.qsize(),
                 "room_id": self.room_id, "connected": self.connected,
                 "queued": self.q.qsize(), "busy": self.busy,
@@ -731,14 +803,24 @@ class HostMode(threading.Thread):
             return False
         return time.time() - self.last_welcome_at >= self.welcome_gap
 
-    def note_thanks(self, kind: str, user: str, uid: str, source: str = "") -> None:
-        """有人关注了 / 加了粉丝团：排一条感谢（和欢迎同一套限频思路）。"""
-        kind = "fans" if str(kind).lower() in ("fans", "guard", "medal", "fansclub") else "follow"
+    def note_thanks(self, kind: str, user: str, uid: str, source: str = "",
+                    detail: str = "") -> None:
+        """有人关注了 / 加了粉丝团 / 上舰了 / 送了礼物：排一条感谢。
+
+        和欢迎同一套限频思路；`detail` 给上舰（舰长/提督/总督）和礼物（礼物名×数量）用。
+        """
+        kind = str(kind or "follow").lower()
+        if kind not in ("follow", "fans", "guard", "gift"):
+            kind = "follow"
         if not self.enabled:
             return
         if kind == "follow" and not self.thanks_follow:
             return
         if kind == "fans" and not self.thanks_fans:
+            return
+        if kind == "guard" and not self.thanks_guard:
+            return
+        if kind == "gift" and not self.thanks_gift:
             return
         name = (user or "").strip()
         if not name or len(name) > 24:
@@ -748,8 +830,11 @@ class HostMode(threading.Thread):
             return
         now = time.time()
         key = "%s|%s" % (kind, uid or name)
+        # 礼物按「人」去重不能一小时一次——人家连送两波就该谢两次，
+        # 频率交给 gift_max_per_minute 和合并窗口；这里只防同一条重复。
+        dedupe = 120.0 if kind == "gift" else 3600.0
         with self.lock:
-            if now - self._thanked.get(key, 0) < 3600:
+            if now - self._thanked.get(key, 0) < dedupe:
                 return
             self._thanked[key] = now
             if len(self._thanked) > 800:
@@ -757,12 +842,107 @@ class HostMode(threading.Thread):
                                  if now - v < 7200}
         try:
             self.thanks_queue.put_nowait({"ts": now, "user": name, "uid": uid,
-                                          "kind": kind})
+                                          "kind": kind, "detail": detail})
         except queue.Full:
             return
-        log.info("%s：%s（%s，排一条感谢）",
-                 "关注" if kind == "follow" else "粉丝团", name[:20],
-                 source or "自己直播间")
+        label = {"follow": "关注", "fans": "粉丝团", "guard": "上舰", "gift": "礼物"}[kind]
+        log.info("%s：%s（%s，排一条感谢%s）", label, name[:20],
+                 source or "自己直播间", ("，" + detail) if detail else "")
+
+    # ---------------------------------------------------------- 上舰 / 礼物
+    def note_guard(self, user: str, uid: str, level: int = 0) -> None:
+        """上舰：舰长(3)/提督(2)/总督(1)，名字和头衔都带上。"""
+        name = (user or "").strip()
+        if not name:
+            return
+        title = {1: "总督", 2: "提督", 3: "舰长"}.get(int(level or 0), "舰长")
+        self.note_thanks("guard", name, uid, detail=title)
+
+    def note_gift(self, user: str, uid: str, gift: str, num: int = 1,
+                  battery: float = 0.0) -> None:
+        """礼物：先攒进合并缓冲，一会儿合成一条谢（频繁送不刷屏）。
+
+        `battery` 是礼物价值（单位电池，100 金瓜子 = 1 电池；银瓜子免费礼物算 0）。
+        低于 `host.gift_min_value`（默认 10 电池）的不谢——免得一句谢一个小心心。
+        """
+        if not self.enabled or not self.thanks_gift:
+            return
+        try:
+            battery = float(battery or 0)
+        except (TypeError, ValueError):
+            battery = 0.0
+        if battery < float(self.gift_min_value or 0):
+            now = time.time()
+            if now - getattr(self, "_gift_skip_logged", 0) > 60:
+                self._gift_skip_logged = now
+                log.info("礼物：%s 的 %s 价值 %.0f 电池，低于门槛 %.0f，不谢",
+                         (user or "?")[:16], gift,
+                         battery, float(self.gift_min_value or 0))
+            return
+        name = (user or "").strip()
+        if not name or len(name) > 24:
+            return
+        uid = str(uid or "")
+        if uid and self._self_uid and uid == self._self_uid:
+            return
+        now = time.time()
+        key = uid or name
+        with self.lock:
+            slot = self._gift_pending.get(key)
+            if slot is None:
+                slot = {"user": name, "uid": uid, "items": [], "first": now,
+                        "last": now}
+                self._gift_pending[key] = slot
+            if len(self._gift_pending) > 40:
+                # 太多人同时送：把最早的那批直接冲掉（先谢最旧的）
+                oldest = min(self._gift_pending.items(),
+                             key=lambda kv: kv[1]["last"])[0]
+                if oldest != key:
+                    self._gift_pending.pop(oldest, None)
+            slot["last"] = now
+            slot["battery"] = float(slot.get("battery", 0)) + battery
+            gift = re.sub(r"\s+", "", str(gift or "礼物"))[:10] or "礼物"
+            try:
+                num = max(1, int(num))
+            except (TypeError, ValueError):
+                num = 1
+            merged = False
+            for it in slot["items"]:
+                if it[0] == gift:
+                    it[1] += num
+                    merged = True
+                    break
+            if not merged and len(slot["items"]) < 6:
+                slot["items"].append([gift, num])
+
+    def _gift_rate_ok(self) -> bool:
+        """礼物感谢上限：最近 60 秒谢过几次。"""
+        now = time.time()
+        while self._gift_sent and now - self._gift_sent[0] > 60:
+            self._gift_sent.popleft()
+        return len(self._gift_sent) < self.gift_max_per_minute
+
+    def _flush_gifts(self) -> None:
+        """把「停了 gift_merge_seconds 秒没再送」的那批礼物合成一条感谢。"""
+        if not self.thanks_gift or not self._gift_pending:
+            return
+        now = time.time()
+        ready = []
+        with self.lock:
+            for key, slot in list(self._gift_pending.items()):
+                if now - slot["last"] >= self.gift_merge_seconds:
+                    ready.append(self._gift_pending.pop(key))
+            ready.sort(key=lambda s: s["first"])
+        for slot in ready:
+            if not slot["items"]:
+                continue
+            if not self._gift_rate_ok():
+                log.info("礼物：%s 这批不谢了（一分钟上限 %d 条已满）",
+                         slot["user"][:16], self.gift_max_per_minute)
+                continue
+            detail = "、".join("%s×%d" % (g, n) for g, n in slot["items"][:6])
+            self._gift_sent.append(time.time())
+            self.note_thanks("gift", slot["user"], slot["uid"], detail=detail)
 
     def _thanks_due(self) -> bool:
         if self.thanks_queue.empty():
@@ -781,8 +961,9 @@ class HostMode(threading.Thread):
                 fresh.append(it)
         if not fresh:
             return None
-        # 关注优先于粉丝团（关注更常见、更该马上谢）
-        fresh.sort(key=lambda x: (0 if x["kind"] == "follow" else 1, -x["ts"]))
+        # 花钱的优先：上舰 > 礼物 > 关注 > 粉丝团
+        order = {"guard": 0, "gift": 1, "follow": 2, "fans": 3}
+        fresh.sort(key=lambda x: (order.get(x["kind"], 9), -x["ts"]))
         return fresh[0]
 
     def _pick_welcome(self) -> dict | None:
@@ -849,6 +1030,11 @@ class HostMode(threading.Thread):
     def run(self) -> None:
         while True:
             time.sleep(1.0)
+            # 礼物：把「停了一会儿没再送」的那批合成一条感谢（频繁送不刷屏）
+            try:
+                self._flush_gifts()
+            except Exception as exc:  # noqa: BLE001
+                log.info("礼物合并失败（不影响这轮）：%s", exc)
             if not self.enabled or self.busy:
                 continue
             # 欢迎进场优先：人刚进来，隔太久再迎就没意思了（限频靠 welcome_gap）。
@@ -877,7 +1063,8 @@ class HostMode(threading.Thread):
                     self.busy = True
                     try:
                         reply = self.gateway.host_thanks(
-                            fan["kind"], fan["user"], self._context(), self.speak)
+                            fan["kind"], fan["user"], self._context(), self.speak,
+                            fan.get("detail") or "")
                         if reply:
                             self.last_text = reply
                         self.last_thanks_at = time.time()

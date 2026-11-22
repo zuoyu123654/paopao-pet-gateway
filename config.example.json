@@ -41,7 +41,12 @@
     "thanks_follow": true,
     "thanks_fans": true,
     "thanks_min_gap": 10,
-    "thanks_max_age": 25
+    "thanks_max_age": 25,
+    "thanks_guard": true,
+    "thanks_gift": true,
+    "gift_merge_seconds": 15,
+    "gift_max_per_minute": 6,
+    "gift_min_value": 10
   },
   "tts": {
     "enabled": true,

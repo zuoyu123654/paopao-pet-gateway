@@ -227,6 +227,17 @@ class TrayMenu(QObject):
         self.host_thanks_fans_act.setData(("host", "thanks_fans"))
         self.host_thanks_fans_act.triggered.connect(self._on_pick)
         self.host_menu.addAction(self.host_thanks_fans_act)
+        # 上舰和礼物各一项（2026-11-22 老大要的：上舰单列，不混粉丝团）
+        self.host_thanks_guard_act = QAction("感谢上舰（舰长/提督/总督）", self)
+        self.host_thanks_guard_act.setCheckable(True)
+        self.host_thanks_guard_act.setData(("host", "thanks_guard"))
+        self.host_thanks_guard_act.triggered.connect(self._on_pick)
+        self.host_menu.addAction(self.host_thanks_guard_act)
+        self.host_thanks_gift_act = QAction("感谢礼物", self)
+        self.host_thanks_gift_act.setCheckable(True)
+        self.host_thanks_gift_act.setData(("host", "thanks_gift"))
+        self.host_thanks_gift_act.triggered.connect(self._on_pick)
+        self.host_menu.addAction(self.host_thanks_gift_act)
 
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("泡泡 · 模式")
@@ -242,6 +253,8 @@ class TrayMenu(QObject):
         self.host_welcome_act.setChecked(True)
         self.host_thanks_follow_act.setChecked(True)
         self.host_thanks_fans_act.setChecked(True)
+        self.host_thanks_guard_act.setChecked(True)
+        self.host_thanks_gift_act.setChecked(True)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync)
@@ -287,6 +300,12 @@ class TrayMenu(QObject):
             elif key == "thanks_fans":
                 self._mark_toggle("host_thanks_fans", on)
                 self._post("/host", {"thanks_fans": on, "persist": True})
+            elif key == "thanks_guard":
+                self._mark_toggle("host_thanks_guard", on)
+                self._post("/host", {"thanks_guard": on, "persist": True})
+            elif key == "thanks_gift":
+                self._mark_toggle("host_thanks_gift", on)
+                self._post("/host", {"thanks_gift": on, "persist": True})
             else:
                 self._mark_toggle("host_speak", on)
                 self._post("/host", {"speak": on, "persist": True})
@@ -417,7 +436,11 @@ class TrayMenu(QObject):
                              (self.host_thanks_follow_act, "host_thanks_follow",
                               bool(host.get("thanks_follow", True))),
                              (self.host_thanks_fans_act, "host_thanks_fans",
-                              bool(host.get("thanks_fans", True)))):
+                              bool(host.get("thanks_fans", True))),
+                             (self.host_thanks_guard_act, "host_thanks_guard",
+                              bool(host.get("thanks_guard", True))),
+                             (self.host_thanks_gift_act, "host_thanks_gift",
+                              bool(host.get("thanks_gift", True)))):
             if self._toggle_blocks(key, on):
                 continue
             act.blockSignals(True)

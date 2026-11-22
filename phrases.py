@@ -33,6 +33,10 @@ TRAY_FEEDBACK = {
     "thanks_follow_off": "感谢关注关了。",
     "thanks_fans_on": "感谢粉丝团开了，有人加粉丝团我就谢一句。",
     "thanks_fans_off": "感谢粉丝团关了。",
+    "thanks_guard_on": "感谢上舰开了，舰长提督总督我都谢。",
+    "thanks_guard_off": "感谢上舰关了。",
+    "thanks_gift_on": "感谢礼物开了，送礼物我就谢一声。",
+    "thanks_gift_off": "感谢礼物关了。",
 }
 
 # 语音模式切换时**出声**的提示（气泡那边托盘本来就会冒，这里补「听得见」的那份）

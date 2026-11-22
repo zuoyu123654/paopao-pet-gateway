@@ -4685,11 +4685,12 @@ class Gateway:
         return reply
 
     def host_thanks(self, kind: str, name: str, context: str,
-                    speak: bool) -> str:
-        """有人关注 / 加了粉丝团：谢一句。
+                    speak: bool, detail: str = "") -> str:
+        """有人关注 / 加粉丝团 / 上舰 / 送礼物：谢一句。
 
-        2026-11-22 老大要的：照「欢迎进场」那套做，但说的是「谢谢你关注/加粉丝团」；
-        怎么谢也由她自己定（别像客服，别许愿承诺）。
+        2026-11-22 老大要的：照「欢迎进场」那套做，但说的是「谢谢你关注/粉丝团/
+        上舰/礼物」；上舰（舰长/提督/总督）和礼物单列，礼物可以带合并后的清单
+        （比如「小心心×3、辣条×2」）。怎么谢由她自己定（别像客服，别许愿承诺）。
         """
         host_cfg = self.cfg.get("host") or {}
         max_name = int(host_cfg.get("name_max_chars", 6) or 6)
@@ -4702,18 +4703,33 @@ class Gateway:
         call = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_]+", "", call)
         call = call[:max_name] if len(call) > max_name else call
         call = call or "这位观众"
-        why = "关注了直播间" if str(kind) == "follow" else "加了粉丝团"
+        kind = str(kind or "follow")
+        detail = str(detail or "").strip()
+        if kind == "guard":
+            title = detail if detail in ("舰长", "提督", "总督") else "舰长"
+            why = "上了%s" % title
+            hint = ("要谢出「%s」这个头衔，别只泛泛说谢谢；"
+                    "上舰是花了钱的，语气可以郑重一点，但别肉麻、别吹。" % title)
+        elif kind == "gift":
+            why = "送了礼物%s" % (("：" + detail) if detail else "")
+            hint = ("要提到礼物（名字或数量，用上面的清单），别只说「谢谢礼物」；"
+                    "如果一下送了好几种，一句话带过就行，别一样一样报菜名。")
+        elif kind == "fans":
+            why = "加了粉丝团"
+            hint = "谢「加粉丝团」，别和关注、上舰混在一起说。"
+        else:
+            why = "关注了直播间"
+            hint = "谢「关注」，别和粉丝团、上舰混在一起说。"
         prompt = (
             "你是泡泡，正在陪老大直播。直播间有位观众「%s」刚刚%s。\n"
             "【这一句怎么来】你自己拿主意：怎么自然怎么来——一句谢谢就行，"
-            "可以顺口说一句会继续好好播、多陪陪大家；别像客服，别刷「感谢感谢感谢」。\n\n"
+            "%s\n\n"
             "【当前直播上下文（只是背景，不要复述）】\n%s\n\n"
             "要求：只说 1 句，**连名字一起算最多 %d 字**；自然叫出对方的名字"
-            "（名字超过 %d 字就只叫前 %d 字）；这句里要**说清谢的是什么**——"
-            "「谢谢关注」还是「谢谢加粉丝团」，别只泛泛欢迎；"
+            "（名字超过 %d 字就只叫前 %d 字）；"
             "不要许愿、不要承诺任何东西"
             "（送东西、抽奖、加好友、私聊都不许提）；不要暴露地址 / 账号 / 隐私。"
-            % (call, why, (context or "")[-800:], max_chars, max_name, max_name)
+            % (call, why, hint, (context or "")[-800:], max_chars, max_name, max_name)
         )
         payload = {
             "model": self.cfg.get("model") or "deepseek-v4-flash",
@@ -4744,7 +4760,8 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 pass
             log.info("%s（%s｜%s）：%s",
-                     "感谢关注" if str(kind) == "follow" else "感谢粉丝团",
+                     {"follow": "感谢关注", "fans": "感谢粉丝团",
+                      "guard": "感谢上舰", "gift": "感谢礼物"}.get(kind, "感谢"),
                      call, "出声" if speak else "只气泡", reply[:60])
         return reply
 
@@ -6558,11 +6575,40 @@ class Handler(BaseHTTPRequestHandler):
         # 2026-11-22：感谢关注 / 粉丝团也能造一条来试
         # POST /host/test {"thanks":"follow","user":"测试观众"}
         if req.get("thanks"):
-            kind = "fans" if str(req.get("thanks")).lower() in ("fans", "guard", "medal") else "follow"
+            raw = str(req.get("thanks")).lower()
+            kind = {"fans": "fans", "guard": "guard", "gift": "gift"}.get(raw, "follow")
             name = str(req.get("user") or "测试观众").strip()[:20]
+            detail = str(req.get("detail") or "")
+            if kind == "guard" and not detail:
+                titles = {"1": "总督", "2": "提督", "3": "舰长"}
+                detail = titles.get(str(req.get("guard_level") or ""), "舰长")
+            if kind == "gift" and not detail:
+                detail = "小心心×3"
             GATEWAY.host.note_thanks(kind, name,
-                                     "test-thanks-%d" % int(time.time() * 1000))
+                                     "test-thanks-%d" % int(time.time() * 1000),
+                                     detail=detail)
             self._send_json({"ok": True, "thanks": kind, "user": name,
+                             "detail": detail, "host": GATEWAY.host.status()})
+            return
+        # 2026-11-22：礼物也能造一条（走合并缓冲 + 价值门槛）
+        # POST /host/test {"gift":"辣条","num":2,"price":1000}  price 是单价金瓜子
+        if req.get("gift"):
+            gift = str(req.get("gift"))[:12] or "礼物"
+            try:
+                num = int(req.get("num") or 1)
+            except (TypeError, ValueError):
+                num = 1
+            try:
+                price = float(req.get("price") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            coin = str(req.get("coin") or "gold").lower()
+            battery = (price * num / 100.0) if coin != "silver" else 0.0
+            GATEWAY.host.note_gift(str(req.get("user") or "测试观众"), "test-gift", gift,
+                                   num, battery)
+            self._send_json({"ok": True, "gift": gift, "num": num,
+                             "battery": round(battery, 1),
+                             "min_value": GATEWAY.host.gift_min_value,
                              "host": GATEWAY.host.status()})
             return
         if not text:
@@ -6589,6 +6635,10 @@ class Handler(BaseHTTPRequestHandler):
             host.set_thanks_follow(bool(req.get("thanks_follow")))
         if "thanks_fans" in req:
             host.set_thanks_fans(bool(req.get("thanks_fans")))
+        if "thanks_guard" in req:
+            host.set_thanks_guard(bool(req.get("thanks_guard")))
+        if "thanks_gift" in req:
+            host.set_thanks_gift(bool(req.get("thanks_gift")))
         if "room_id" in req:
             try:
                 host.set_room(int(req.get("room_id") or 0))
